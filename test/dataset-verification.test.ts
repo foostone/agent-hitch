@@ -1,18 +1,20 @@
 import assert from "node:assert/strict";
-import fs, { chmod, mkdir, mkdtemp, readFile, rename, rm, stat, symlink, utimes, writeFile } from "node:fs/promises";
-import { syncBuiltinESMExports } from "node:module";
+import { chmod, mkdir, mkdtemp, readFile, realpath, rename, rm, stat, symlink, utimes, writeFile } from "node:fs/promises";
+import { channel } from "node:diagnostics_channel";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test, { type TestContext } from "node:test";
 import { buildBenchmarkAdapterManifest, loadBenchmarkAdapterManifest, persistTrialVerifierDiagnostics, runEval } from "../src/evals/index.js";
 import { nativePhaseDescriptor } from "../src/evals/native-phase-evidence.js";
-import type { ImportEvalRunOptions } from "../src/evals/trial-import.js";
+import type { BenchmarkAdapterManifestV1 } from "../src/evals/benchmark-adapter-manifest.js";
+import { verifyBenchmarkExecution, verifyTrialBenchmark, verifiedTrialManifest } from "../src/evals/benchmark-verification.js";
+import type { EvalRequest } from "../src/domain/index.js";
 import { forceRemove, prepareHostHarborArtifactForTest, writeFakeHarbor, writeFakeNpm } from "../test-support/helpers.js";
 import { resourceFixture } from "../test-support/resource-fixture.js";
 import { selectResources } from "../src/resources/index.js";
 
 async function fixture(t: TestContext, ids = ["alpha", "beta"], benchmark = "arbitrary-suite") {
-  const root = await mkdtemp(path.join(tmpdir(), "hitch-dataset-verification-"));
+  const root = await realpath(await mkdtemp(path.join(tmpdir(), "hitch-dataset-verification-")));
   t.after(() => forceRemove(root));
   const dataset = path.join(root, "dataset");
   for (const id of ids) {
@@ -28,34 +30,64 @@ async function fixture(t: TestContext, ids = ["alpha", "beta"], benchmark = "arb
   });
   const manifestFile = path.join(dataset, "benchmark.adapter.json");
   await writeFile(manifestFile, JSON.stringify(manifest));
-  const verify = (taskId: string) => loadBenchmarkAdapterManifest(dataset, { taskId, expectedRevision: manifest.dataset_digest });
-  return { root, dataset, manifest, manifestFile, verify };
+  return { root, dataset, manifest, manifestFile, ...await admit(root, dataset, manifest) };
+}
+
+async function admit(root: string, dataset: string, manifest: BenchmarkAdapterManifestV1) {
+  const evalId = `eval_${"e".repeat(32)}`;
+  const evalDirectory = path.join(root, "evals", evalId);
+  const request: EvalRequest = {
+    schema_version: "1", backend: "harbor", dataset, harness_ref: "pi@version:1.2.3", model: "synthetic-model",
+    attempts: 1, max_concurrent: 1, infrastructure_retries: 0, infrastructure_retry_backoff_ms: 0,
+    timeout_ms: 0, setup_timeout_ms: 1000, agent_args: [], pass_env: [],
+    benchmark_id: manifest.benchmark.id, benchmark_revision: manifest.dataset_digest,
+  };
+  const resolvedRevision = {
+    schema_version: "1", requested_ref: request.harness_ref, canonical_ref: request.harness_ref,
+    harness_id: "pi", selector: { type: "version", value: "1.2.3" }, source: { type: "npm" },
+    revision: { type: "version", version: "1.2.3" }, identity: `sha256:${"a".repeat(64)}`,
+    resolved_at: "2026-10-11T00:00:00.000Z",
+  } as const;
+  await mkdir(evalDirectory, { recursive: true });
+  await writeFile(path.join(evalDirectory, "request.json"), JSON.stringify(request));
+  const input = { root, evalId, evalDirectory, request, resolvedRevision,
+    revisionIdentity: resolvedRevision.identity, benchmarkId: manifest.benchmark.id, benchmarkRevision: manifest.dataset_digest };
+  const execution = await verifyBenchmarkExecution(input);
+  assert.ok(execution);
+  const trial = async (taskId: string) => {
+    const verifiedTrialBinding = { ...input, taskId, trialDirectory: path.join(evalDirectory, "harbor/job", `${taskId}__1`) };
+    const verifiedTrialBenchmark = await verifyTrialBenchmark(verifiedTrialBinding, taskId, execution);
+    return { ...input, verifiedTrialBinding, verifiedTrialBenchmark };
+  };
+  const verify = async (taskId: string) => {
+    const input = await trial(taskId);
+    return verifiedTrialManifest(input.verifiedTrialBenchmark, input.verifiedTrialBinding);
+  };
+  return { trial, verify };
 }
 
 function trackReads(t: TestContext) {
   const reads: string[] = [];
-  const original = fs.readFile;
-  t.mock.method(fs, "readFile", (...args: unknown[]) => {
-    reads.push(String(args[0]));
-    return Reflect.apply(original, fs, args);
-  });
-  syncBuiltinESMExports();
-  t.after(() => { t.mock.restoreAll(); syncBuiltinESMExports(); });
+  const observer = (message: unknown) => {
+    const value = message as { root: string; path: string };
+    reads.push(path.join(value.root, value.path));
+  };
+  const diagnostics = channel("hitch.benchmark.task-content-read");
+  diagnostics.subscribe(observer);
+  t.after(() => diagnostics.unsubscribe(observer));
   return reads;
 }
 
 test("collection reads task payloads linearly across arbitrary dataset sizes", async t => {
   for (const count of [1, 3, 20]) await t.test(`${count} tasks`, async t => {
     const ids = Array.from({ length: count }, (_, i) => `case-${i}`);
-    const { dataset, manifest, verify, root } = await fixture(t, ids);
+    const { dataset, manifest, trial } = await fixture(t, ids);
     const reads = trackReads(t);
     assert.deepEqual(await loadBenchmarkAdapterManifest(dataset), manifest);
     for (const taskId of ids) {
-      assert.equal(await nativePhaseDescriptor({
-        evalDirectory: path.join(root, "eval"), request: { dataset },
-        benchmarkId: manifest.benchmark.id, benchmarkRevision: manifest.dataset_digest,
-      } as ImportEvalRunOptions, taskId), null);
-      assert.deepEqual(await verify(taskId), manifest);
+      const input = await trial(taskId);
+      assert.equal(await nativePhaseDescriptor(input, taskId), null);
+      assert.deepEqual(await verifiedTrialManifest(input.verifiedTrialBenchmark, input.verifiedTrialBinding), manifest);
     }
     assert.deepEqual(await loadBenchmarkAdapterManifest(dataset), manifest);
     const payloadReads = reads.filter(file => file.endsWith("task.toml") || file.endsWith("input.bin"));
@@ -73,10 +105,10 @@ test("task-scoped checks reject content, mode, membership and link changes witho
     ["executable bit", task => chmod(path.join(task, "task.toml"), 0o755)],
     ["new file", task => writeFile(path.join(task, "new-file"), "added")],
     ["deleted file", task => rm(path.join(task, "arbitrary/nested/input.bin"))],
-    ["renamed file", task => rename(path.join(task, "task.toml"), path.join(task, "renamed.toml"))],
+    ["renamed file", task => rename(path.join(task, "arbitrary/nested/input.bin"), path.join(task, "arbitrary/nested/renamed.bin"))],
     ["file symlink", async task => {
-      await rm(path.join(task, "task.toml"));
-      await symlink("arbitrary/nested/input.bin", path.join(task, "task.toml"));
+      await rm(path.join(task, "arbitrary/nested/input.bin"));
+      await symlink("../../task.toml", path.join(task, "arbitrary/nested/input.bin"));
     }],
     ["task symlink", async task => {
       await rename(task, `${task}-original`);
@@ -94,8 +126,8 @@ test("task-scoped checks reject content, mode, membership and link changes witho
 
 test("pinned contracts reject forged or replaced manifests, unknown tasks, and changed task sets", async t => {
   const { dataset, manifest, manifestFile, verify } = await fixture(t);
-  await assert.rejects(verify("unknown"), /not in the benchmark/);
-  await assert.rejects(verify("../alpha"), /task id is invalid/);
+  await assert.rejects(verify("unknown"), /absent from the admitted/);
+  await assert.rejects(verify("../alpha"), /absent from the admitted/);
   const forged = structuredClone(manifest);
   forged.scoring.total_score.range = [0, 100];
   await writeFile(manifestFile, JSON.stringify(forged));
@@ -109,7 +141,7 @@ test("pinned contracts reject forged or replaced manifests, unknown tasks, and c
   await assert.rejects(verify("alpha"), /task set does not match/);
   await rm(path.join(dataset, "extra"), { recursive: true });
   await rm(path.join(dataset, "beta"), { recursive: true });
-  await assert.rejects(verify("alpha"), /task set does not match/);
+  await assert.rejects(verify("alpha"), /manifest task is missing/);
 });
 
 test("concurrent datasets and retries do not share stale validation results", async t => {
@@ -127,11 +159,12 @@ test("concurrent datasets and retries do not share stale validation results", as
 });
 
 test("score collection uses the current task and preserves the scoring contract", async t => {
-  const { root, dataset, manifest } = await fixture(t);
-  const trialDirectory = path.join(root, "trial");
-  await mkdir(path.join(trialDirectory, "verifier"), { recursive: true });
+  const { root, dataset, manifest, trial } = await fixture(t);
   const reads = trackReads(t);
-  const input = { dataset, taskId: "alpha", benchmarkRevision: manifest.dataset_digest, trialDirectory,
+  const verified = await trial("alpha");
+  const trialDirectory = verified.verifiedTrialBinding.trialDirectory;
+  await mkdir(path.join(trialDirectory, "verifier"), { recursive: true });
+  const input = { ...verified, dataset, benchmarkRevision: manifest.dataset_digest, trialDirectory,
     runDirectory: path.join(root, "run"), verifierResult: { rewards: { reward: 1, total_score: 1 } } };
   assert.deepEqual((await persistTrialVerifierDiagnostics(input)).scores, { total_score: 1, normalization: "standard" });
   assert.ok(reads.some(file => file.includes("/alpha/")));
@@ -139,7 +172,7 @@ test("score collection uses the current task and preserves the scoring contract"
   const outOfRange = await persistTrialVerifierDiagnostics({ ...input, verifierResult: { rewards: { reward: 2, total_score: 2 } } });
   assert.match(outOfRange.issue!, /outside the benchmark range/);
   await writeFile(path.join(dataset, "alpha/task.toml"), "mutated");
-  assert.match((await persistTrialVerifierDiagnostics(input)).issue!, /task digest mismatch/);
+  await assert.rejects(trial("alpha"), /task digest mismatch/);
 });
 
 test("exported native phase descriptors verify their own task; standalone callers retain full verification", async t => {
@@ -151,35 +184,34 @@ test("exported native phase descriptors verify their own task; standalone caller
   await writeFile(descriptorFile, JSON.stringify(descriptor));
   const sealed = await buildBenchmarkAdapterManifest({ ...manifest, dataset, taskIds: ["alpha", "beta"] });
   await writeFile(manifestFile, JSON.stringify(sealed));
-  const input = { evalDirectory: path.join(root, "eval"), request: { dataset },
-    benchmarkId: sealed.benchmark.id, benchmarkRevision: sealed.dataset_digest } as ImportEvalRunOptions;
+  const { trial } = await admit(root, dataset, sealed);
   const reads = trackReads(t);
-  assert.equal((await nativePhaseDescriptor({ ...input, datasetVerification: "task" }, "alpha"))?.agent_timeout_ms, 60_000);
+  const input = await trial("alpha");
+  assert.equal((await nativePhaseDescriptor(input, "alpha"))?.agent_timeout_ms, 60_000);
   assert.equal(reads.some(file => file.includes("/beta/")), false);
   await writeFile(path.join(dataset, "beta/task.toml"), "changed");
-  await assert.rejects(nativePhaseDescriptor(input, "alpha"), /task digest mismatch: beta/);
+  const { verifiedTrialBenchmark: _receipt, verifiedTrialBinding: _binding, ...standalone } = input;
+  await assert.rejects(nativePhaseDescriptor(standalone, "alpha"), /task digest mismatch: beta/);
   await writeFile(descriptorFile, JSON.stringify({ ...descriptor, agent_timeout_sec: 120 }));
-  await assert.rejects(nativePhaseDescriptor({ ...input, datasetVerification: "task" }, "alpha"), /task digest mismatch: alpha/);
+  await assert.rejects(trial("alpha"), /task digest mismatch: alpha/);
 });
 
 test("resource datasets and selections retain their CAS identities and task membership", async t => {
   const root = await mkdtemp(path.join(tmpdir(), "hitch-verification-resources-"));
   t.after(() => rm(root, { recursive: true, force: true }));
   const { source, dataset } = await resourceFixture(root);
-  assert.deepEqual(await loadBenchmarkAdapterManifest(source, { expectedRevision: dataset.dataset_digest, taskId: "task-1" }), dataset);
-  await assert.rejects(loadBenchmarkAdapterManifest(source, { expectedRevision: dataset.dataset_digest, taskId: "missing" }), /not in the benchmark/);
+  assert.deepEqual(await loadBenchmarkAdapterManifest(source), dataset);
   const selection = selectResources(dataset, ["task-1"]), file = path.join(root, "selection.json");
   await writeFile(file, JSON.stringify(selection));
-  assert.equal((await loadBenchmarkAdapterManifest(file, { expectedRevision: selection.digest, taskId: "task-1" }))?.dataset_digest, selection.digest);
-  await assert.rejects(loadBenchmarkAdapterManifest(file, { expectedRevision: dataset.dataset_digest, taskId: "task-1" }), /changed after eval admission/);
-  await assert.rejects(loadBenchmarkAdapterManifest(file, { expectedRevision: selection.digest, taskId: "task-0" }), /not in the benchmark/);
+  const selected = await loadBenchmarkAdapterManifest(file);
+  assert.equal(selected?.dataset_digest, selection.digest);
+  assert.deepEqual(selected?.tasks.map(task => task.task_id), ["task-1"]);
 });
 
-test("eval collection is bounded and finalization catches late changes and removed manifests", async t => {
-  for (const change of ["none", "payload", "manifest"] as const) await t.test(change, async t => {
-    const { root, dataset, manifestFile } = await fixture(t, ["one", "two"]);
+test("eval finalization catches late payload, manifest and scoring-contract changes", async t => {
+  for (const change of ["none", "payload", "manifest", "contract"] as const) await t.test(change, async t => {
+    const { root, dataset, manifest, manifestFile } = await fixture(t, ["one", "two"]);
     const harbor = await writeFakeHarbor(root), npm = await writeFakeNpm(root);
-    const reads = trackReads(t);
     let finalized = false;
     const result = await runEval({
       root, harborExecutable: harbor, harborArtifactBuilder: prepareHostHarborArtifactForTest,
@@ -190,16 +222,22 @@ test("eval collection is bounded and finalization catches late changes and remov
         finalized = true;
         if (change === "payload") await writeFile(path.join(dataset, "one/arbitrary/nested/input.bin"), "late edit");
         if (change === "manifest") await rm(manifestFile);
+        if (change === "contract") {
+          const scoring = { total_score: { ...manifest.scoring.total_score, source_metric: "changed" } };
+          await writeFile(manifestFile, JSON.stringify(await buildBenchmarkAdapterManifest({ ...manifest, dataset, taskIds: ["one", "two"], scoring })));
+        }
       },
     });
     assert.equal(finalized, true, JSON.stringify(result.error));
     if (change === "none") {
       assert.notEqual(result.failure_stage, "finalizing");
-      assert.equal(reads.filter(file => file.endsWith("input.bin")).length, 8, "two admission scans, per-task imports, one final scan");
+      assert.ok(Array.isArray(result.trials));
+      assert.deepEqual(result.trials.map(trial => trial.task_id).sort(), ["one", "two"]);
     } else {
       assert.equal(result.status, "failed");
       assert.equal(result.failure_stage, "finalizing");
-      assert.match(result.error!.message, change === "payload" ? /task digest mismatch/ : /manifest disappeared/);
+      const expected = { payload: /task digest mismatch/, manifest: /manifest disappeared/, contract: /manifest changed/ };
+      assert.match(result.error!.message, expected[change]);
     }
   });
 });

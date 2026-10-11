@@ -50,7 +50,11 @@ collection path, while manifest parsing and task-set metadata checks still occur
 per collection. There is no pathname/mtime cache. Resource v2 closure validation
 and standalone full verification remain in place.
 
-Reproduce with any standardized v1 dataset and a built original checkout:
+Replay the current implementation with any standardized v1 dataset and a built
+pre-optimization checkout. After integrating #46, scoped verification uses
+identity-bound execution and trial receipts. The current script counts task
+content reads only; the historical measurements above also include root
+manifest metadata reads and are retained unchanged.
 
 ```sh
 npm run build

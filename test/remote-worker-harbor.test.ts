@@ -25,6 +25,7 @@ for (const resourceAware of [false, true]) test(`packaged worker executes a stag
   const controllerRoot = fixture?.store.root ?? directory;
   const workerRoot = await mkdtemp(path.join(tmpdir(), "hitch-remote-host-"));
   const workerController = new AbortController();
+  const workerErrors: string[] = [];
   const workers: Promise<void>[] = [], closeServers: Array<() => Promise<void>> = [];
   t.after(() => cleanupRemoteHarbor(workerController, workers, closeServers, [directory, workerRoot]));
   const dataset = fixture?.source ?? path.join(controllerRoot, "dataset");
@@ -79,6 +80,7 @@ fs.writeFileSync(${JSON.stringify(path.join(workerRoot, "materialization-observe
     releaseUnknown: (offer) => releaseRemoteHarborOffer(execution, offer),
     pollIntervalMs: 50, heartbeatIntervalMs: 50, retryIntervalMs: 50,
     signal: AbortSignal.any([workerController.signal, t.signal]),
+    onError: error => workerErrors.push((error as Error).stack ?? String(error)),
   });
   const worker = runner.run();
   workers.push(worker);
@@ -97,10 +99,16 @@ fs.writeFileSync(${JSON.stringify(path.join(workerRoot, "materialization-observe
     }),
   });
   const evalId = submitted.eval_id as string;
-  const status = await waitFor(async () => {
-    const current = await admin.request(`/v1/evals/${evalId}`);
-    return current.result ? current : undefined;
-  }, t.signal);
+  let status: Record<string, unknown>;
+  try {
+    status = await waitFor(async () => {
+      const current = await admin.request(`/v1/evals/${evalId}`);
+      return current.result ? current : undefined;
+    }, t.signal);
+  } catch (error) {
+    const current = await admin.request(`/v1/evals/${evalId}`), offers = await client.listOffers();
+    throw new Error(`remote staged eval timed out: ${JSON.stringify({ current, offers, workerErrors })}`, { cause: error });
+  }
   await worker;
   assert.equal((status.result as { status: string }).status, "failed", JSON.stringify(status.result));
   assert.equal(((status.result as { error?: { code?: string } }).error?.code), "eval_has_infrastructure_failures");

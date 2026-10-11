@@ -83,7 +83,7 @@ hitch --root ROOT resources legacy-export --ref /absolute/v2-dataset --output /a
 
 标准 v1 数据集的正常 eval 在 admission/planning 时校验全部 task，收集每个结果时校验锁定的 manifest 摘要、评分契约、task 集合和当前 task 的全部文件，最终完成前再校验一次全部数据。已收集 task 后续发生的变化会使最终 eval 失败。取消不增加全量扫描；没有前后校验边界的独立导入、恢复和手动重跑入口继续使用全量校验。
 
-这个优化按 manifest 的 task 身份工作，不依赖 benchmark 名称、文件布局或 task 数量，不缓存路径或文件修改时间。文件内容、执行权限、文件增删和链接仍参与检查，失败后重试会重新读取。无 native phase 描述的 task 直接跳过描述解析所需的校验；导出的 native phase task 仍校验描述所在的 task。Package-native 编译包原有的 source/compiled 整包证明保持不变。v2 数据集和 selection 继续使用资源闭包校验。
+这个优化按 manifest 的 task 身份工作，不依赖 benchmark 名称、文件布局或 task 数量，不缓存路径或文件修改时间。完整准入校验产生绑定 eval、请求、候选和数据集身份的内部凭据；收集时对当前 task 创建一次已校验快照，native phase 描述和评分收集共享该快照，不能由调用方任意缩小校验范围。文件内容、执行权限、文件增删和链接仍参与检查，失败后重试会重新读取。Package-native 编译包原有的 source/compiled 整包证明保持不变。v2 数据集和 selection 继续使用资源闭包校验。
 
 对每个 task 收集一次、无 native phase 描述的 v1 eval，task payload 的读取量由随 task 数量平方增长变为线性增长；manifest 解析和 task 集合检查仍逐次执行。这不改变 task 数据的物理副本，也不替代 v2 的 CAS 去重。可用不调用模型的脚本复现校验开销，先运行优化版，再运行旧版，再运行优化版，检查身份和描述结果完全一致：
 
@@ -95,7 +95,7 @@ node dist/scripts/benchmark-dataset-verification.js \
   --output /absolute/comparison.json
 ```
 
-输出区分整个校验序列与逐 task 收集阶段，记录文件读取次数及逻辑读取字节；这是校验回放，不是完整 eval 加速比，也不是物理磁盘吞吐量。
+输出区分整个校验序列与逐 task 收集阶段，记录 task 内容的读取次数及逻辑读取字节，不计根目录 manifest 元数据；这是校验回放，不是完整 eval 加速比，也不是物理磁盘吞吐量。baseline 必须使用按任务校验优化之前的已构建版本。
 
 ## 共享 controller 与 harness 安装目录
 

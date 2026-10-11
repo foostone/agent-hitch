@@ -65,6 +65,7 @@ export type BeginInfrastructureRetry = (input: {
 }) => Promise<InfrastructureRetryLifecycle>;
 
 export interface RunInfrastructureRetriesOptions {
+  verifiedBenchmark?: import("./benchmark-verification.js").VerifiedBenchmarkExecution;
   evalId: string;
   evalDirectory: string;
   backendBaseDirectory?: string;
@@ -72,7 +73,6 @@ export interface RunInfrastructureRetriesOptions {
   initialRefs: readonly EvalTrialRefV1[];
   progress: EvalProgressV1;
   request: EvalRequest;
-  datasetVerification?: "task" | undefined;
   root: string;
   resolvedRevision: ResolvedRevision;
   controllerRuntime: ControllerRuntimeUseResult;
@@ -253,10 +253,10 @@ export async function runInfrastructureRetries(
               harborJobDirectory,
               expectedAttempt: options.logicalAttempt,
               request: options.request,
+              ...(options.verifiedBenchmark ? { verifiedBenchmark: options.verifiedBenchmark } : {}),
               resolvedRevision: options.resolvedRevision,
               benchmarkId: options.request.benchmark_id,
               benchmarkRevision: options.request.benchmark_revision,
-              datasetVerification: options.datasetVerification,
               publicationMode: "replace-invalid",
               runtimeId: options.controllerRuntime.runtime_id,
               env: options.env,
@@ -290,10 +290,10 @@ export async function runInfrastructureRetries(
         harborJobDirectory,
         expectedAttempt: options.logicalAttempt,
         request: options.request,
+        ...(options.verifiedBenchmark ? { verifiedBenchmark: options.verifiedBenchmark } : {}),
         resolvedRevision: options.resolvedRevision,
         benchmarkId: options.request.benchmark_id,
         benchmarkRevision: options.request.benchmark_revision,
-        datasetVerification: options.datasetVerification,
         publicationMode: "replace-invalid",
         runtimeId: options.controllerRuntime.runtime_id,
         env: options.env,

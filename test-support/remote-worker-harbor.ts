@@ -297,9 +297,9 @@ export async function verifyRemoteModelCapture(t: TestContext, mode: ModelCaptur
     const initialExecution = JSON.parse(await readFile(path.join(runDirectory, "execution.json"), "utf8"));
     assert.notEqual(executionEvidence.work_id, initialExecution.work_id); assert.notEqual(executionEvidence.lease_id, initialExecution.lease_id);
     if (managed) { assert.deepEqual(scopes, [evalId, `${evalId}:${rerunId}`]); assert.equal(acquisitions, 2); assert.equal(releases, 2); }
-    if (managed) await verifyRemoteModelRecovery(controllerRoot, evalId, repairedRunId, { rerunId, prior: (status.result as { trials: EvalTrialRefV1[] }).trials[0]! });
+    if (managed) await verifyRemoteModelRecovery(controllerRoot, evalId, repairedRunId, { rerunId, prior: (status.result as { trials: EvalTrialRefV1[] }).trials[0]!, priorResult: status.result as Record<string, unknown> });
     await verifyRemoteRerunDaemonRecovery({ server, options: serverOptions, root: controllerRoot, evalId, rerunId,
-      prior: (status.result as { trials: EvalTrialRefV1[] }).trials[0]! });
+      prior: (status.result as { trials: EvalTrialRefV1[] }).trials[0]!, priorResult: status.result as Record<string, unknown> });
     if (managed) { assert.equal(acquisitions, 2, "completion recovery must not restart the model service"); assert.equal(releases, 2); }
     assert.equal(generations, 2);
   }

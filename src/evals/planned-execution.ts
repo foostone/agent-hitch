@@ -33,14 +33,14 @@ import { classifyTrialFailure, physicalRetryAllowed } from "./failure-classifier
 import { EvalSchedulerMetrics } from "./scheduler-metrics.js";
 import { pendingRetryWork, reconcilePersistedInitialRetryDecisions, runPlannedInfrastructureRetries, runPlannedInfrastructureRetriesFromSource } from "./planned-retry-execution.js";
 
+import type { VerifiedBenchmarkExecution } from "./benchmark-verification.js";
 export interface ExecutePlannedHarborOptions {
+  verifiedBenchmark?: VerifiedBenchmarkExecution;
   evalId: EvalId;
   evalDirectory: string;
   plan: EvalExecutionPlanV1;
   progress: EvalProgressV1;
   request: EvalRequest;
-  /** The owning eval verifies the entire dataset at both lifecycle boundaries. */
-  datasetVerification?: "task" | undefined;
   root: string;
   resolvedRevision: ResolvedRevision;
   controllerRuntime: ControllerRuntimeUseResult;
@@ -95,7 +95,7 @@ export async function executePlannedHarborTasks(options: ExecutePlannedHarborOpt
   })).sort((left, right) => workSchedulingPriority((right.items[0] ?? right.retries[0]?.item) as BackendWorkItemV1)
     - workSchedulingPriority((left.items[0] ?? left.retries[0]?.item) as BackendWorkItemV1)
     || Buffer.compare(Buffer.from(left.taskId), Buffer.from(right.taskId)));
-  await Promise.all(taskEntries.map(async ({ taskId, items, retries: pendingRetries }) => {
+  const workResults = await Promise.allSettled(taskEntries.map(async ({ taskId, items, retries: pendingRetries }) => {
     for (const pending of pendingRetries) {
       if (stopDispatch || options.signal?.aborted) break;
       try {
@@ -229,7 +229,8 @@ export async function executePlannedHarborTasks(options: ExecutePlannedHarborOpt
       }
     }
   }));
-  await publisher.settle();
+  for (const work of workResults) if (work.status === "rejected") executionFailure ??= work.reason;
+  await publisher.close();
   if (executionFailure !== undefined) throw executionFailure;
   results.sort((left, right) => workOrder(options.plan, left.workId) - workOrder(options.plan, right.workId));
   infrastructureRetryRuns.sort((left, right) => left.tasks.join("\0").localeCompare(right.tasks.join("\0"))
@@ -439,10 +440,10 @@ async function executeLeasedWorkItem(
           harborJobDirectory,
           expectedAttempt: logicalAttempt,
           request: options.request,
+          ...(options.verifiedBenchmark ? { verifiedBenchmark: options.verifiedBenchmark } : {}),
           resolvedRevision: options.resolvedRevision,
           benchmarkId: options.request.benchmark_id,
           benchmarkRevision: options.request.benchmark_revision,
-          datasetVerification: options.datasetVerification,
           runtimeId: options.controllerRuntime.runtime_id,
           env: options.env, ...(options.signal ? { signal: options.signal } : {}),
           ...(options.plan.model_capture ? { modelCapturePlan: options.plan.model_capture } : {}),
@@ -474,10 +475,10 @@ async function executeLeasedWorkItem(
     harborJobDirectory,
     expectedAttempt: logicalAttempt,
     request: options.request,
+    ...(options.verifiedBenchmark ? { verifiedBenchmark: options.verifiedBenchmark } : {}),
     resolvedRevision: options.resolvedRevision,
     benchmarkId: options.request.benchmark_id,
     benchmarkRevision: options.request.benchmark_revision,
-    datasetVerification: options.datasetVerification,
     runtimeId: options.controllerRuntime.runtime_id,
     env: options.env, ...(options.signal ? { signal: options.signal } : {}),
     ...(options.plan.model_capture ? { modelCapturePlan: options.plan.model_capture } : {}),
