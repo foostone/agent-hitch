@@ -106,7 +106,9 @@ HITCH_HARBOR_RUNTIME_TRANSPORT=readonly-bind hitch --root ROOT eval run \
   --dataset DATASET --harness HARNESS --model MODEL --max-concurrent 16
 ```
 
-每个 eval 为 controller bundle 创建一次独立快照，为每种固定内容身份的 harness artifact 创建一次快照。优先使用文件系统 reflink，不支持时复制；不使用硬链接。目录填充完成后恢复原始权限，完整校验固定身份与内容，再通过原子重命名发布。不同 task 将这些快照分别只读挂载到 `/opt/hitch` 和 `/opt/hitch-harness-artifact`，共用依赖文件和宿主页缓存，减少逐 task 上传与容器可写层副本。实现不依赖数据集名称、任务布局或 harness 类型。
+每个 eval 为 controller bundle 创建一次独立快照，为每种固定内容身份的 harness artifact 创建一次快照。优先使用文件系统 reflink，不支持时复制；不使用硬链接。目录填充完成后恢复 payload 原始权限，完整校验固定身份与内容，再通过原子重命名发布。不同 task 将这些快照分别只读挂载到 `/opt/hitch` 和 `/opt/hitch-harness-artifact`，共用依赖文件和宿主页缓存，减少逐 task 上传与容器可写层副本。实现不依赖数据集名称、任务布局或 harness 类型。
+
+绑定挂载保留宿主文件所有权，任务用户须能按现有权限读取和执行 payload。不参与 artifact 内容摘要的安装根目录和 `artifact.json` 分别规范为 0755、0644，使元数据读取不依赖容器的 DAC_OVERRIDE 能力；拒绝元数据符号链接。带摘要的文件、目录权限及原缓存均保持不变。
 
 任务的工作目录、状态、凭据和 Node 解包目录仍各自隔离。bridge 与容器内原有内容校验保留，不使用路径、mtime 或“校验过一次”的全局缓存跳过检查。bridge 检查 Docker 实际挂载源、只读标志、嵌套遮挡和候选容器权限；冲突、缺失或内容错误会失败。额外的 verifier 容器不会获得这些安装目录。
 
@@ -157,6 +159,8 @@ export HITCH_HARBOR_MANAGED_KEEPALIVE=1
 bridge 在 Harbor 的实际环境目录上读取 Compose 最终解析后的构建配置，因此同一逻辑覆盖候选、Compose 配套服务、独立验证器及多步骤验证器。身份包括完整上下文的相对路径、内容和权限、Dockerfile、固定摘要的基础镜像、平台、target、显式参数/标签、实际 daemon、builder 配置以及代理配置。mtime 不代替内容校验；完整上下文参与身份，未被 COPY 使用的文件变化也会保守地使缓存失效。不按数据集、task 名称或文件名写特殊规则。
 
 有效平台来自 Compose 的 `build --print` 计划，包含项目 `.env` 中的默认平台；不自行猜测 dotenv 的优先级。平台冲突、计划无法解析或 Compose 版本不支持该选项时保留原构建路径。完整快照无法读取或遍历的输入也回退，让 Docker 自行处理 `.dockerignore` 排除的无权限文件；快照目标写入失败仍作为错误报告。
+
+有多个硬链接的文件回退原构建，因为逐文件复制和字节摘要不足以保留 COPY 的链接关系。请求 `BUILDX_GIT_LABELS` 或 `BUILDX_GIT_CHECK_DIRTY` 时也回退；仓库状态可能位于构建上下文之外，不能通过迁移后的快照正确重现。
 
 构建消费独立复制的快照。相同内容在不同目录、task、轮次或角色之间可复用；进程间文件锁合并同一个构建，原子写入记录。每次命中仍核对 Docker 中的镜像 ID、平台和缓存身份标签。镜像被删除或记录不匹配时重新构建；失败和取消不发布记录，取消先收回构建子进程再释放锁。配置、构建参数及凭据值不写入缓存记录或诊断收据。
 

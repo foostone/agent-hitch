@@ -4,6 +4,7 @@ import json
 import logging
 import os
 from pathlib import Path
+import subprocess
 import sys
 from types import SimpleNamespace
 import uuid
@@ -17,7 +18,7 @@ class Result(SimpleNamespace):
         return Result(**{**vars(self), **update})
 
 
-async def main(root):
+async def main(root, base_image):
     root = Path(root).resolve()
     context = root / "external-context"
     project = root / "project"
@@ -127,8 +128,46 @@ async def main(root):
                         ignored.rmdir()
                     else:
                         ignored.unlink()
+        # Docker's directory COPY preserves links. An independent snapshot
+        # must not silently split them or alias an unlinked context's key.
+        os.link(context / "value", context / "other")
+        (context / "Dockerfile").write_text(f"FROM {base_image}\nCOPY . /data\nRUN test /data/value -ef /data/other\n")
+        assert await native_build() == "linux/amd64"
+        prep = preparation()
+        assert await prep.build(run) is None
+        assert prep.receipts == [{"event": "fallback", "reason": "context-hardlinks"}]
+        results["hardlinks"] = {"native_passed": True, "fallback": True}
+        (context / "other").unlink()
+
+        # Git metadata may live outside the build context, so copying its
+        # bytes into an unrelated cache directory loses requested labels.
+        repository = root / "repository"
+        repository.mkdir()
+        context = context.rename(repository / "context")
+        (context / "Dockerfile").write_text("FROM scratch\nCOPY value /value\n")
+        def git(*args):
+            result = subprocess.run(["git", "-c", "core.hooksPath=/dev/null", "-c", "user.name=Fixture",
+                "-c", "user.email=fixture@example.invalid", *args], cwd=repository,
+                text=True, capture_output=True, check=True)
+            return result.stdout.strip()
+        git("init")
+        git("remote", "add", "origin", "https://example.invalid/fixture.git")
+        git("add", ".")
+        git("commit", "-m", "fixture")
+        service["build"]["context"] = str(context)
+        definition()
+        environment.update(COMPOSE_BAKE="true", BUILDX_GIT_LABELS="full")
+        assert await native_build() == "linux/amd64"
+        labels = json.loads((await command(["image", "inspect", "--format", "{{json .Config.Labels}}", tag])).stdout)
+        assert labels["org.opencontainers.image.revision"] == git("rev-parse", "HEAD"), labels
+        assert "fixture.git" in labels["org.opencontainers.image.source"], labels
+        prep = preparation()
+        assert await prep.build(run) is None
+        assert prep.receipts == [{"event": "fallback", "reason": "git-build-metadata"}]
+        results["git_labels"] = {"native_labels": labels, "fallback": True}
         (root / "result.json").write_text(json.dumps(results, indent=2) + "\n")
         print("Compose build inputs: dotenv platforms, warm identity, native conflicts and ignored input fallback OK", flush=True)
+        print("context metadata: native hardlinks and Git-derived labels preserved by fallback OK", flush=True)
         if os.geteuid() == 0:
             print("unreadable input cases skipped: root can read mode 000", flush=True)
     finally:
@@ -143,4 +182,4 @@ async def main(root):
 
 
 if __name__ == "__main__":
-    asyncio.run(main(sys.argv[1]))
+    asyncio.run(main(*sys.argv[1:]))

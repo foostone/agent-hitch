@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { chmod, mkdtemp, readFile, readdir, symlink, unlink, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdtemp, readFile, readdir, symlink, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { tmpdir } from "node:os";
 import { spawnSync } from "node:child_process";
@@ -17,8 +17,11 @@ test("concurrent tasks share verified installation snapshots, isolated from subs
   const controller = await ensureControllerRuntime({ root });
   const fixture = await nodeRuntimeHarnessFixture(root);
   await symlink("entry.js", path.join(fixture.directory, "alias.js"));
+  await chmod(path.join(fixture.directory, "entry.js"), 0o750);
   fixture.manifest.artifact_integrity = await artifactDirectoryIntegrity(fixture.directory);
   await writeFile(path.join(fixture.directory, "artifact.json"), JSON.stringify(fixture.manifest));
+  await chmod(fixture.directory, 0o700);
+  await chmod(path.join(fixture.directory, "artifact.json"), 0o600);
   const artifact = { ...harborPreparedArtifact(root, { ...fixture.manifest, executable: "node", entrypoint_args: [], cache_hit: false }), directory: fixture.directory };
   const base = path.join(root, "eval", "shared-runtime");
   const alias = path.join(root, "controller-alias");
@@ -36,6 +39,11 @@ test("concurrent tasks share verified installation snapshots, isolated from subs
   assert.equal((await readdir(base)).length, 2);
   assert.notEqual(shared.runtime_directory, controller.directory);
   assert.notEqual(shared.artifact_directory, artifact.directory);
+  assert.equal((await lstat(shared.artifact_directory)).mode & 0o777, 0o755);
+  assert.equal((await lstat(path.join(shared.artifact_directory, "artifact.json"))).mode & 0o777, 0o644);
+  assert.equal((await lstat(path.join(shared.artifact_directory, "entry.js"))).mode & 0o777, 0o750);
+  assert.equal((await lstat(artifact.directory)).mode & 0o777, 0o700);
+  assert.equal((await lstat(path.join(artifact.directory, "artifact.json"))).mode & 0o777, 0o600);
   await writeFile(path.join(artifact.directory, "entry.js"), "console.log('changed original cache')\n");
   const controllerFile = path.join(controller.directory, "payload", "package.json");
   await chmod(controllerFile, 0o644);
@@ -58,6 +66,13 @@ test("corrupt dependencies are rejected before a snapshot is published; upload r
   await writeFile(path.join(artifact.directory, "extra-dependency.js"), "unexpected code");
   await assert.rejects(new SharedRuntimeSnapshots(base, controller, "readonly-bind").prepare(artifact), /content verification/);
   assert.equal((await readdir(base)).some((name) => name.startsWith("artifact") || name.startsWith(".")), false);
+  await unlink(path.join(artifact.directory, "extra-dependency.js"));
+  const externalMetadata = path.join(root, "external-artifact.json");
+  await writeFile(externalMetadata, JSON.stringify(fixture.manifest), { mode: 0o600 });
+  await unlink(path.join(artifact.directory, "artifact.json"));
+  await symlink(externalMetadata, path.join(artifact.directory, "artifact.json"));
+  await assert.rejects(new SharedRuntimeSnapshots(path.join(root, "linked-metadata"), controller, "readonly-bind").prepare(artifact), /metadata must be a regular file/);
+  assert.equal((await lstat(externalMetadata)).mode & 0o777, 0o600);
   assert.equal(await new SharedRuntimeSnapshots(undefined, controller, "upload").prepare(artifact), artifact);
   assert.throws(() => new SharedRuntimeSnapshots(undefined, controller, "readonly-bind"), /local Linux/);
   assert.throws(() => new SharedRuntimeSnapshots(base, controller, "typo"), /must be upload or readonly-bind/);

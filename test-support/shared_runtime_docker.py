@@ -54,11 +54,13 @@ async def main():
     config = root / "compose.json"
     config.write_text(json.dumps({"services": {
         name: {"image": image, "command": ["sleep", "240"], "network_mode": "none",
-               "volumes": shared.compose_mounts(sources) if name != "verifier" else []}
+               "cap_drop": ["DAC_OVERRIDE"] if name == "peer" else [],
+               "volumes": shared.compose_mounts(sources) if name in ("main", "peer") else []}
         for name in ("main", "peer", "verifier")
     }}))
     env = DockerEnvironment(docker, "", False)
     compose = ["compose", "--project-name", project, "-f", str(config)]
+
     try:
         env.call(*compose, "up", "--detach", "--pull", "never")
         candidates = []
@@ -67,7 +69,7 @@ async def main():
             candidate = SharedEnvironment(docker, identity, sources)
             candidates.append(candidate)
             candidate.call("exec", identity, "mkdir", "-p", "/workspace", "/logs/agent")
-            if index == 0:
+            if name == "main":
                 candidate.call("exec", identity, "rm", "/usr/local/bin/node", "/usr/local/bin/npm", "/usr/local/bin/npx")
             agent = bridge.HitchHarborAgent(
                 logs_dir=root / name, harness_ref="pi@version:1.2.3", revision_identity=artifact["revision_identity"],
@@ -76,10 +78,16 @@ async def main():
             await agent.setup(candidate)
             assert agent._setup_complete
             assert agent._artifact_transport_status == "shared_readonly_bind"
+            # Exercise artifact metadata as the default container user with
+            # DAC_OVERRIDE dropped, just like in-container Hitch verification.
+            metadata = await candidate.exec("cat /opt/hitch-harness-artifact/artifact.json")
+            assert metadata.return_code == 0, (name, metadata.stderr,
+                (await candidate.exec("stat -c '%u:%g %a' /opt/hitch-harness-artifact /opt/hitch-harness-artifact/artifact.json")).stdout)
             # The process default must not redirect mount inspection away from
             # the Docker connection used by this environment's Compose calls.
             with patch.dict(os.environ, {"DOCKER_HOST": "unix:///nonexistent-hitch-test.sock"}):
                 assert await candidate.hitch_verify_shared_runtime(Path(controller_path) / "payload", Path(artifact_path))
+            assert (await candidate.exec("cat /opt/hitch-harness-artifact/artifact.json", user=65534)).return_code == 0
             result = await candidate.exec(agent._node_prefix() + " node /opt/hitch-harness-artifact/entry.js", user=65534)
             assert result.return_code == 0 and "offline harness OK" in result.stdout, result.stderr
             for target in shared.TARGETS:
@@ -91,6 +99,7 @@ async def main():
         missing = env.call("exec", verifier, "sh", "-c", "test ! -e /opt/hitch && test ! -e /opt/hitch-harness-artifact")
         assert missing.returncode == 0
         print("shared runtime: two candidates, isolated workspaces, verifier excluded, no uploads OK", flush=True)
+        print("metadata permissions: shared candidate without DAC_OVERRIDE OK", flush=True)
     finally:
         env.call(*compose, "down", "--timeout", "1", "--volumes")
 

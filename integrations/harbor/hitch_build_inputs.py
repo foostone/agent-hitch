@@ -154,6 +154,10 @@ async def snapshot_context(source, target):
             os.chmod(destination, mode)
             os.utime(destination, ns=(info.st_atime_ns, info.st_mtime_ns))
         elif stat.S_ISREG(info.st_mode):
+            if info.st_nlink != 1:
+                # COPY can preserve link relationships. Separate copies and a
+                # byte-only identity cannot represent them, even on a hit.
+                raise UnsupportedBuild("context-hardlinks")
             checksum = hashlib.sha256()
             with read_context():
                 fd = os.open(current, os.O_RDONLY | os.O_NOFOLLOW)

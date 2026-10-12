@@ -61,8 +61,11 @@ test("real Compose build defaults and ignored unreadable inputs preserve native 
 }, async t => {
   const directory = await mkdtemp(path.join(tmpdir(), "hitch-compose-build-inputs-"));
   t.after(() => forceRemove(directory));
+  const image = process.env.HITCH_IMAGE_PREPARATION_TEST_IMAGE;
+  assert.match(image ?? "", /@sha256:[a-f0-9]{64}$/);
   const result = await runCommand(process.env.HITCH_HARBOR_TEST_PYTHON || "python3",
-    ["test-support/compose_build_inputs_docker.py", directory], { timeoutMs: 110_000 });
+    ["test-support/compose_build_inputs_docker.py", directory, image!], { timeoutMs: 110_000 });
   assert.match(result.stdout, /dotenv platforms, warm identity, native conflicts and ignored input fallback OK/);
+  assert.match(result.stdout, /native hardlinks and Git-derived labels preserved by fallback OK/);
   t.diagnostic(result.stdout.trim());
 });

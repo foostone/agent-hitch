@@ -46,6 +46,14 @@ export class SharedRuntimeSnapshots {
     const key = digest(identity);
     if (!this.artifacts.has(key)) {
       this.artifacts.set(key, snapshot(base, "artifact", artifact.directory, async (directory) => {
+        // The installation root and artifact.json are outside the sealed
+        // payload digest. Bind mounts keep host ownership, so expose these
+        // transport entries without requiring the candidate's DAC override.
+        // Do not follow a metadata symlink or change hash-covered file modes.
+        const metadata = path.join(directory, "artifact.json");
+        if (!(await lstat(metadata)).isFile()) throw invalidInput("shared artifact metadata must be a regular file");
+        await chmod(directory, 0o755);
+        await chmod(metadata, 0o644);
         await verifyPreparedArtifact(directory, artifact);
       }, signal));
     }

@@ -249,6 +249,28 @@ class CacheTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(list((self.root / "cache").glob("image-*.json")), [])
         self.assertEqual(list((self.root / "cache").glob(".context-*")), [])
 
+    async def test_hardlink_topology_cannot_alias_an_independent_warm_context(self):
+        other = self.source / "other"
+        other.write_text((self.source / "value").read_text())
+        await self.cache.prepare(self.service)
+        other.unlink()
+        os.link(self.source / "value", other)
+        with self.assertRaisesRegex(UnsupportedBuild, "context-hardlinks"):
+            await self.cache.prepare(self.service)
+        self.assertEqual(len(self.builds), 1)
+        self.assertEqual(list((self.root / "cache").glob(".context-*")), [])
+
+    async def test_git_metadata_requests_bypass_relocated_contexts(self):
+        await self.cache.prepare(self.service)
+        for name in ("BUILDX_GIT_LABELS", "BUILDX_GIT_CHECK_DIRTY"):
+            for value in ("1", "true", "full"):
+                with self.subTest(name=name, value=value):
+                    cache = ImagePreparationCache(self.root / "cache", {name: value})
+                    with self.assertRaisesRegex(UnsupportedBuild, "git-build-metadata"):
+                        await cache.prepare(self.service)
+            disabled = ImagePreparationCache(self.root / "cache", {name: "false"})
+            self.assertIn("image", await disabled.prepare(self.service))
+
     async def test_custom_frontend_arguments_and_source_policies_bypass_warm_cache(self):
         await self.cache.prepare(self.service)
         for reference in ("example.test/frontend:latest", BASE):

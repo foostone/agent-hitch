@@ -134,6 +134,11 @@ class ImagePreparationCache:
         # Their files and external policy dependencies are outside this key.
         if self.env.get("EXPERIMENTAL_BUILDKIT_SOURCE_POLICY") or self.env.get("BUILDX_DEFAULT_POLICY"):
             raise UnsupportedBuild("source-policy")
+        # Buildx discovers enclosing Git state from the context's location,
+        # which an independent snapshot deliberately does not retain.
+        for name in ("BUILDX_GIT_LABELS", "BUILDX_GIT_CHECK_DIRTY"):
+            if self.env.get(name, "").lower() not in ("", "0", "f", "false"):
+                raise UnsupportedBuild("git-build-metadata")
         if self.daemon is None:
             raw = await docker(["info", "--format", "{{json .}}"], env=self.env, timeout=30)
             data = json.loads(raw)

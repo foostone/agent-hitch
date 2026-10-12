@@ -36,5 +36,6 @@ test("real Docker candidates share read-only installations with isolated workspa
   const result = await runCommand("python3", ["test-support/shared_runtime_docker.py", docker, image.Id,
     prepared.sharedRuntime!.artifact_directory, prepared.sharedRuntime!.runtime_directory, path.join(root, "logs")], { timeoutMs: 240_000 });
   assert.match(result.stdout, /shared runtime: two candidates, isolated workspaces, verifier excluded, no uploads OK/);
+  assert.match(result.stdout, /shared candidate without DAC_OVERRIDE OK/);
   t.diagnostic(result.stdout.trim());
 });
