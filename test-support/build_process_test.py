@@ -24,6 +24,31 @@ class BuildProcessTests(unittest.IsolatedAsyncioTestCase):
         self.addCleanup(self.temporary.cleanup)
         self.root = Path(self.temporary.name).resolve()
 
+    async def test_supervisor_buffered_output_preserves_command_exit_status(self):
+        for status in (0, 7):
+            with self.subTest(status=status):
+                child = ("import sys; print('child stdout'); print('child stderr', file=sys.stderr); "
+                         f"sys.exit({status})")
+                code = (
+                    f"import asyncio, sys; sys.path.insert(0, {str(BRIDGE)!r}); "
+                    "from hitch_build_process import supervise; "
+                    "sys.stdout.write('buffered supervisor stdout'); "
+                    "sys.stderr.write('buffered supervisor stderr'); "
+                    f"raise SystemExit(asyncio.run(supervise([sys.executable, '-c', {child!r}])))"
+                )
+                process = await asyncio.create_subprocess_exec(sys.executable, "-I", "-B", "-c", code,
+                    stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+                try:
+                    stdout, stderr = await asyncio.wait_for(cache_module.communicate(process), 5)
+                    self.assertEqual(process.returncode, status)
+                    self.assertEqual(stdout, b"child stdout\n")
+                    self.assertEqual(stderr, b"child stderr\n")
+                finally:
+                    process.stdin.close()
+                    if process.returncode is None:
+                        process.kill()
+                        await process.wait()
+
     async def test_sigkill_delivery_does_not_release_a_live_helpers_lock(self):
         killed = asyncio.Event()
         released = False

@@ -77,8 +77,12 @@ async def supervise(command):
         # The liveness pipe and inherited locks belong to this supervisor only;
         # Docker and its plugins receive neither, including through stdin.
         process = await asyncio.create_subprocess_exec(*command, stdin=asyncio.subprocess.DEVNULL, start_new_session=True)
-        os.close(sys.stdout.fileno())
-        os.close(sys.stderr.fileno())
+        # Release our copies of the output pipes while keeping Python's
+        # streams valid. Buffered output or shutdown diagnostics must not
+        # replace the command's exit status with a stream-flush failure.
+        with open(os.devnull, "wb") as sink:
+            os.dup2(sink.fileno(), sys.stdout.fileno())
+            os.dup2(sink.fileno(), sys.stderr.fileno())
         exited = asyncio.create_task(process.wait())
         control = asyncio.create_task(reader.read(1))
         stopped = asyncio.create_task(interrupted.wait())
