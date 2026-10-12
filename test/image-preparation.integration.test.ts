@@ -26,6 +26,6 @@ test("real Compose preserves shared build tags on cold starts and after source c
   t.after(() => forceRemove(directory));
   const result = await runCommand(process.env.HITCH_HARBOR_TEST_PYTHON || "python3",
     ["test-support/compose_image_reuse_docker.py", directory], { timeoutMs: 110_000 });
-  assert.match(result.stdout, /native control, cold cache, stale tag and qualified alias OK/);
+  assert.match(result.stdout, /explicit and implicit collisions, native controls, cold cache, stale tags and aliases OK/);
   t.diagnostic(result.stdout.trim());
 });

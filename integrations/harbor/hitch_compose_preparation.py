@@ -12,6 +12,7 @@ from hitch_image_cache import ImagePreparationCache, atomic_json, docker
 
 _DEFAULT_COMMAND = ["sh", "-c", "sleep infinity"]
 _MANAGED_COMMAND = ["sh", "-c", 'trap \'kill "$child"; wait "$child"; exit 0\' TERM INT; sleep infinity & child=$!; wait "$child"']
+_LIFECYCLE_FIELDS = ("init", "stop_signal", "stop_grace_period", "pre_stop")
 
 
 def compose_services(output):
@@ -64,9 +65,10 @@ def require_independent_build_images(services):
     # Leave tag publication, pull policy and competing producers to Compose.
     if any(len(uses) > 1 and any(uses) for uses in references.values()):
         raise UnsupportedBuild("shared-build-image")
-    # An image-only service can also consume a project-generated build tag.
-    # Without an explicit producer name, conservatively preserve Compose.
-    if unnamed_build and image_only:
+    # Any explicitly named service can consume or overwrite a generated tag,
+    # including another builder. Do not guess Compose's project-name rules.
+    # All-unnamed builders remain independent: service names are unique.
+    if unnamed_build and (references or image_only):
         raise UnsupportedBuild("implicit-build-image")
 
 
@@ -101,6 +103,8 @@ class ComposePreparation:
         try:
             services = compose_services(result.stdout)
             builds = {name: value for name, value in services.items() if value.get("build")}
+            if not builds:
+                return result.model_copy(update={"stdout": "", "stderr": ""})
             # A composition with unsupported inputs uses its original build path
             # as a whole, including inter-service dependencies and extra contexts.
             require_independent_build_images(services)
@@ -132,7 +136,8 @@ class ComposePreparation:
             service = compose_services(result.stdout)["main"]
         except UnsupportedBuild:
             return
-        if service.get("command") != _DEFAULT_COMMAND or service.get("entrypoint"):
+        if (service.get("command") != _DEFAULT_COMMAND or service.get("entrypoint")
+                or any(key in service for key in _LIFECYCLE_FIELDS)):
             return
         raw = await docker(["image", "inspect", "--format", "{{json .}}", service.get("image") or env._main_image_name],
                            env=env._compose_env_vars(), timeout=30, check=False)
@@ -151,9 +156,23 @@ class ComposePreparation:
         env = self.environment
         for source in [env._environment_docker_compose_path, *env.extra_docker_compose_paths]:
             if source.exists():
-                document = yaml.safe_load(source.read_text())
-                main = (document or {}).get("services", {}).get("main", {})
-                if any(key in main for key in ("command", "entrypoint", "init", "stop_signal", "stop_grace_period", "pre_stop")):
+                try:
+                    document = yaml.safe_load(source.read_text(encoding="utf-8"))
+                except yaml.YAMLError:
+                    # Compose supports tags such as !reset and !override that
+                    # PyYAML does not. Leave their interpretation to Compose.
+                    return True
+                if document is None:
+                    continue
+                if not isinstance(document, dict) or "include" in document:
+                    return True
+                services = document.get("services") or {}
+                if not isinstance(services, dict):
+                    return True
+                main = services.get("main") or {}
+                # An extended/included definition may explicitly choose even
+                # the default command; we cannot attribute it to Harbor.
+                if not isinstance(main, dict) or any(key in main for key in ("extends", "command", "entrypoint", *_LIFECYCLE_FIELDS)):
                     return True
         return False
 

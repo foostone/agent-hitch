@@ -105,6 +105,7 @@ async def verify_environment(environment: Any, controller_payload: Path, artifac
     template = '{"mounts":{{json .Mounts}},"privileged":{{json .HostConfig.Privileged}},"cap_add":{{json .HostConfig.CapAdd}}}'
     process = await asyncio.create_subprocess_exec(
         "docker", "inspect", "--format", template, identity,
+        env=environment._compose_env_vars(),
         stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
     )
     try:

@@ -5,12 +5,14 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "integrations/harbor"))
 import hitch_shared_runtime as shared
 
 
-class SharedMountTests(unittest.TestCase):
+class SharedMountTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
@@ -69,6 +71,22 @@ class SharedMountTests(unittest.TestCase):
         (self.root / "link").symlink_to(self.root / "artifact")
         with self.assertRaises(ValueError):shared.configure({**self.raw, "artifact_directory": str(self.root / "link")}, "task__env")
         with self.assertRaises(ValueError):shared.configure({**self.raw, "extra": "unexpected"}, "task__env")
+
+    async def test_mount_inspection_uses_the_same_docker_connection_as_compose(self):
+        connection = {"DOCKER_HOST": "unix:///custom/docker.sock", "DOCKER_CONFIG": "/custom/client"}
+        env = SimpleNamespace(
+            _hitch_shared_runtime=self.sources, _compose_env_vars=lambda: connection,
+            _run_docker_compose_command=AsyncMock(return_value=SimpleNamespace(stdout="a" * 64)),
+        )
+        process = SimpleNamespace(returncode=0, communicate=AsyncMock(return_value=(json.dumps(self.inspected).encode(), b"")))
+
+        async def spawn(*args, **kwargs):
+            self.assertEqual(kwargs.get("env"), connection, "inspection must target the daemon that created the candidate")
+            self.assertEqual(args[-1], "a" * 64)
+            return process
+
+        with patch.object(shared.asyncio, "create_subprocess_exec", spawn):
+            self.assertTrue(await shared.verify_environment(env, self.root / "controller/payload", self.root / "artifact"))
 
 
 if __name__ == "__main__":

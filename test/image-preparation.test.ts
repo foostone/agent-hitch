@@ -3,8 +3,13 @@ import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { harborEnvironmentConfig, harborPreparationOptions } from "../src/backends/harbor/environment-config.js";
 
-test("generic image preparation identity, concurrent reuse, failures and keepalive semantics", () => {
+test("generic image preparation identity, concurrent reuse and failures", () => {
   const result = spawnSync("python3", ["test-support/image_preparation_test.py"], { encoding: "utf8", timeout: 30_000 });
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+});
+
+test("Compose preparation preserves shared image names and task lifecycle declarations", () => {
+  const result = spawnSync("python3", ["test-support/compose_preparation_test.py"], { encoding: "utf8", timeout: 30_000 });
   assert.equal(result.status, 0, result.stderr || result.stdout);
 });
 

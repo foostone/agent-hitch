@@ -119,6 +119,29 @@ async def main(root, image):
         assert not any(event["event"] == "managed-keepalive" for event in customized._hitch_preparation.receipts)
         await customized.stop(True)
         environments.remove(customized)
+        # Compose tags and inherited choices are valid task declarations, even
+        # if the selected command happens to match Harbor's default exactly.
+        command = ["sh", "-c", "sleep infinity"]
+        for style in ("tagged", "extended"):
+            context = root / style
+            shutil.copytree(source, context)
+            if style == "tagged":
+                definition = "services:\n  main:\n    command: !override " + json.dumps(command) + "\n"
+            else:
+                (context / "lifecycle.yaml").write_text(json.dumps({"services": {"template": {"command": command, "init": True}}}))
+                definition = "services:\n  main:\n    extends: {file: lifecycle.yaml, service: template}\n"
+            (context / "docker-compose.yaml").write_text(definition)
+            declared = environment(context, "__" + style)
+            await declared.start(False)
+            assert not any(event["event"] == "managed-keepalive" for event in declared._hitch_preparation.receipts)
+            identity = (await declared._run_docker_compose_command(["ps", "--quiet", "main"])).stdout.strip()
+            observed = json.loads(await docker(["inspect", "--format", "{{json .}}", identity], env=dict(os.environ)))
+            assert observed["Config"]["Cmd"] == command
+            if style == "extended":
+                assert observed["HostConfig"]["Init"] is True
+            await declared._run_docker_compose_command(["down", "--timeout", "1", "--volumes"])
+            await declared.stop(True)
+            environments.remove(declared)
         (root / "result.json").write_text(json.dumps({"cross_process": receipts, "timings": timings, "isolation": True, "custom_command_preserved": True}, indent=2))
         print("image preparation: cross-process build once, warm roles, nested verifier isolation, eviction and graceful stop OK", flush=True)
     finally:

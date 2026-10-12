@@ -1,9 +1,12 @@
 """Real read-only Docker/Compose mounts; no model, registry or network calls."""
 import asyncio
 import json
+import os
+import subprocess
 import sys
 import uuid
 from pathlib import Path
+from unittest.mock import patch
 
 from harbor_node_runtime_docker import DockerEnvironment, bridge
 
@@ -15,10 +18,18 @@ class SharedEnvironment(DockerEnvironment):
     def __init__(self, docker, container, sources):
         super().__init__(docker, container, False)
         self._hitch_shared_runtime = sources
+        self.connection = dict(os.environ)
+
+    def call(self, *args):
+        return subprocess.run([self.docker, *args], env=self._compose_env_vars(),
+                              text=True, capture_output=True, check=True, timeout=60)
 
     async def _run_docker_compose_command(self, args):
         assert args == ["ps", "--all", "--quiet", "main"]
         return self.call("inspect", "--format", "{{.Id}}", self.container)
+
+    def _compose_env_vars(self):
+        return self.connection
 
     async def hitch_verify_shared_runtime(self, payload, artifact):
         return await shared.verify_environment(self, payload, artifact)
@@ -65,6 +76,10 @@ async def main():
             await agent.setup(candidate)
             assert agent._setup_complete
             assert agent._artifact_transport_status == "shared_readonly_bind"
+            # The process default must not redirect mount inspection away from
+            # the Docker connection used by this environment's Compose calls.
+            with patch.dict(os.environ, {"DOCKER_HOST": "unix:///nonexistent-hitch-test.sock"}):
+                assert await candidate.hitch_verify_shared_runtime(Path(controller_path) / "payload", Path(artifact_path))
             result = await candidate.exec(agent._node_prefix() + " node /opt/hitch-harness-artifact/entry.js", user=65534)
             assert result.return_code == 0 and "offline harness OK" in result.stdout, result.stderr
             for target in shared.TARGETS:

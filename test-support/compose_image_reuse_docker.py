@@ -70,7 +70,62 @@ async def scenario(root, prefix, *, cached, stale, qualified):
                 await docker(["image", "rm", json.loads(record.read_text())["tag"]], env=process_env, check=False)
 
 
+async def implicit_collision(root, prefix, *, cached, implicit_service, qualified=False):
+    root.mkdir(parents=True)
+    tag = f"{prefix}-{implicit_service}:latest"
+    services = {}
+    for name in ("main", "worker"):
+        context = root / name
+        context.mkdir()
+        (context / "Dockerfile").write_text('FROM scratch\nCOPY value /value\nCMD ["/unused"]\n')
+        (context / "value").write_text(name)
+        services[name] = {"build": {"context": f"./{name}"}, "command": ["/unused"]}
+        if name != implicit_service:
+            services[name]["image"] = f"docker.io/library/{tag}" if qualified else tag
+    (root / "docker-compose.yaml").write_text(json.dumps({"services": services}))
+    paths = TrialPaths(root / "trial")
+    paths.mkdir()
+    cache = root / "cache"
+    environment = HitchHarborDockerEnvironment(
+        environment_dir=root, environment_name=prefix, session_id=prefix,
+        trial_paths=paths, task_env_config=EnvironmentConfig(cpus=1, memory_mb=512),
+        mounts=[], hitch_image_cache_dir=str(cache) if cached else None,
+    )
+    process_env = dict(os.environ)
+    try:
+        await environment._run_docker_compose_command(["build"])
+        await environment._run_docker_compose_command(["create", "--no-build", "--pull", "never"])
+        images, contents = [], []
+        for name in services:
+            container = (await environment._run_docker_compose_command(["ps", "--all", "--quiet", name])).stdout.strip()
+            info = json.loads(await docker(["inspect", "--format", "{{json .}}", container], env=process_env))
+            images.append(info["Image"])
+            output = root / f"{name}-value"
+            await docker(["cp", f"{container}:/value", str(output)], env=process_env)
+            contents.append(output.read_text())
+        # Compose controls which producer publishes last. Regardless of that
+        # order, both consumers must see the same image and filesystem.
+        assert len(set(images)) == 1 and len(set(contents)) == 1, {"images": images, "contents": contents}
+        assert contents[0] in services
+        if cached:
+            prep = environment._hitch_preparation
+            assert prep.receipts == [{"event": "fallback", "reason": "implicit-build-image"}]
+            assert prep.path is None and not list(cache.glob("image-*.json"))
+        return {"cached": cached, "implicit_service": implicit_service, "qualified": qualified,
+                "images": images, "contents": contents}
+    finally:
+        try:
+            await environment._run_docker_compose_command(["down", "--volumes", "--remove-orphans"])
+        finally:
+            await docker(["image", "rm", tag], env=process_env, check=False)
+            for record in cache.glob("image-*.json"):
+                await docker(["image", "rm", json.loads(record.read_text())["tag"]], env=process_env, check=False)
+
+
 async def main(root):
+    # Bake can race two exports to the same tag even with Compose's parallel
+    # limit set. Exercise native sequential publication in both test arms.
+    os.environ.update(COMPOSE_BAKE="false", COMPOSE_PARALLEL_LIMIT="1")
     root = Path(root).resolve()
     prefix = "hitch-compose-reuse-" + uuid.uuid4().hex[:12]
     results = []
@@ -83,10 +138,18 @@ async def main(root):
                                           cached=cached, stale=stale, qualified=qualified))
         except Exception as error:
             failures.append({"case": name, "error": str(error)})
+    for implicit_service in ("main", "worker"):
+        for cached, qualified in ((False, False), (True, False), (True, True)):
+            name = f"implicit-{implicit_service}-cache-{int(cached)}-qualified-{int(qualified)}"
+            try:
+                results.append(await implicit_collision(root / name, prefix + "-" + name,
+                                                       cached=cached, implicit_service=implicit_service, qualified=qualified))
+            except Exception as error:
+                failures.append({"case": name, "error": str(error)})
     evidence = {"results": results, "failures": failures}
     (root / "result.json").write_text(json.dumps(evidence, indent=2))
     assert not failures, json.dumps(evidence, indent=2)
-    print("Compose image reuse: native control, cold cache, stale tag and qualified alias OK", flush=True)
+    print("Compose image reuse: explicit and implicit collisions, native controls, cold cache, stale tags and aliases OK", flush=True)
 
 
 if __name__ == "__main__":
