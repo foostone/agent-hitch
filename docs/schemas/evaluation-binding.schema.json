@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agent-hitch.local/schemas/evaluation-binding.schema.json",
+  "title": "Hitch resident evaluation environment binding",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "binding_id", "model", "pass_env", "expires_at_ms"],
+  "properties": {
+    "schema_version": { "const": "1" },
+    "binding_id": { "type": "string", "pattern": "^hmac-sha256:[a-f0-9]{64}$" },
+    "model": { "type": "string", "minLength": 1, "maxLength": 1024, "pattern": "^[^\\u0000\\r\\n]+$" },
+    "pass_env": { "type": "array", "maxItems": 128, "uniqueItems": true, "items": { "type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_]*$" } },
+    "expires_at_ms": { "type": ["integer", "null"], "minimum": 0 }
+  }
+}

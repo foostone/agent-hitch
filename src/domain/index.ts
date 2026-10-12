@@ -22,7 +22,7 @@ export * from "./verifier-evidence.js";
 export * from "./verifier-evidence-validation.js";
 export * from "./verifier-score-contract.js";
 export * from "./validation.js";
-export type { EvalRequest } from "./evals.js";
+export type { EvalRequest, EvalArtifactPinV1 } from "./evals.js";
 export type { InferenceRuntimeObservationV1 } from "./inference.js";
 export type { TrainingExternalBindingV1, TrainingProxyIdentityV1, RemoteModelBindingV2 } from "./training.js";
 export type { ControllerRuntimeObservationV2, ResidentRuntimeObservationV2, ExecutableObservationV2, HarborEnvironmentObservationV2, ExecutionObservationSourceV2 } from "./execution-observation.js";
@@ -32,3 +32,4 @@ export type { RemoteWorkerExecutionOwnershipV2, RemoteWorkerExecutionAdmissionV2
 export type { RemoteWorkerCleanupChallengeV2, RemoteWorkerCleanupObservationV2, RemoteWorkerCleanupReceiptV2, RemoteWorkerGenerationReleaseV3 } from "./worker-recovery.js";
 export type { RemoteWorkerHostIdentityV1, RemoteWorkerExecutionOwnership, RemoteWorkerExecutionOwnershipV3 } from "./worker-recovery.js";
 export type { RemoteWorkerCleanupObservation, RemoteWorkerRebootCleanupObservationV3, RemoteWorkerCleanupReceipt, RemoteWorkerCleanupReceiptV3 } from "./worker-recovery.js";
+export type { EvaluationBindingV1 } from "./evaluation-binding.js";

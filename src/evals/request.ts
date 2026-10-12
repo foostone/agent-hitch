@@ -1,4 +1,5 @@
 import { readResourceInput } from "../resources/index.js";
+import { parseEvalArtifactPins } from "../backends/index.js";
 import { parseModelNodeBinding } from "../domain/index.js";
 export const DEFAULT_EVAL_TIMEOUT_MS = 15 * 60 * 1_000;
 export const DEFAULT_EVAL_SETUP_TIMEOUT_MS = 30 * 60 * 1_000;
@@ -35,6 +36,8 @@ export interface EvalRequestInput {
   pass_env?: unknown;
   local_inference?: unknown;
   training_binding?: unknown;
+  environment_binding?: unknown;
+  artifact_pins?: unknown;
 }
 
 export async function validateEvalRequest(input: EvalRequestInput): Promise<EvalRequest> {
@@ -42,7 +45,7 @@ export async function validateEvalRequest(input: EvalRequestInput): Promise<Eval
   const allowed = new Set([
     "schema_version", "backend", "dataset", "harness_ref", "model", "attempts",
     "max_concurrent", "infrastructure_retries", "infrastructure_retry_backoff_ms",
-    "timeout_ms", "setup_timeout_ms", "agent_args", "pass_env", "local_inference", "training_binding",
+    "timeout_ms", "setup_timeout_ms", "agent_args", "pass_env", "local_inference", "training_binding", "environment_binding", "artifact_pins",
   ]);
   const unexpected = Object.keys(input).find((field) => !allowed.has(field));
   if (unexpected) throw invalidInput(`unknown eval request field: ${unexpected}`);
@@ -82,6 +85,11 @@ export async function validateEvalRequest(input: EvalRequestInput): Promise<Eval
     throw invalidInput("training-external requires training-tool, one logical attempt, zero automatic retries, no argument/env overrides, and its exact training/<bindingId> model");
   }
   if (!training && String(input.model).startsWith("training/")) throw invalidInput("training models require an explicit training binding");
+  if (input.environment_binding !== undefined && (typeof input.environment_binding !== "string"
+    || !/^hmac-sha256:[a-f0-9]{64}$/.test(input.environment_binding) || localInference || training
+    || timeout <= 0 || !Number.isSafeInteger(timeout + setupTimeout) || timeout + setupTimeout > 24 * 60 * 60 * 1000)) {
+    throw invalidInput("environment binding requires an exact binding ID and a bounded external-model evaluation");
+  }
   const agentArgs = Array.isArray(input.agent_args) ? [...input.agent_args] as string[] : [];
   if (benchmark.manifest) {
     await assertStandardBenchmarkCandidate(input.dataset.trim(), benchmark.manifest, reference.harness_id, agentArgs);
@@ -106,6 +114,8 @@ export async function validateEvalRequest(input: EvalRequestInput): Promise<Eval
     benchmark_revision: benchmark.benchmark_revision,
     ...(localInference ? { local_inference: localInference } : {}),
     ...(training ? { training_binding: training } : {}),
+    ...(typeof input.environment_binding === "string" ? { environment_binding: input.environment_binding } : {}),
+    ...(input.artifact_pins === undefined ? {} : { artifact_pins: parseEvalArtifactPins(input.artifact_pins) }),
   };
 }
 

@@ -2,7 +2,7 @@ import { rm } from "node:fs/promises";
 import path from "node:path";
 import type { EvalControlV1, EvalExecutionPolicyV1, EvalId, EvalRequest, EvalSubmissionV1, ExecutionLeaseV1, ExecutionProviderStatusV1, ExecutionWorkerV1, ManagedInferenceCoordinator, ModelCapturePlanV1, ResourceVectorV1 } from "../domain/index.js";
 import { HitchError, SCHEMA_VERSION, atomicWriteJSON, credentialValuesFromEnv, ensureDir, hitchRootId, readJSON, safeDiagnosticMessage, sha256Bytes, sha256JSON, statePaths, withFileLock } from "../foundation/index.js";
-import { parseEvalExecutionPlan, readEvalState, readExecutionLeases, reapOwnedDockerResources, resolveLocalDatasetTaskIds, runEval, validateEvalId } from "../evals/index.js";
+import { assertEvalEnvironmentBinding, prepareEvaluationBinding, parseEvalExecutionPlan, readEvalState, readExecutionLeases, reapOwnedDockerResources, resolveLocalDatasetTaskIds, runEval, validateEvalId } from "../evals/index.js";
 import type { EvalDockerResourceReaper, EvalEnvironmentImageBuilder, EvalEnvironmentImageResolver, EvalRequestInput, EvalResult, RunEvalOptions } from "../evals/index.js";
 import { ResourceLedger, scaleResources, type ResourceLease } from "./resources.js";
 import { CollisionLockManager, type CollisionLease } from "./collisions.js";
@@ -192,6 +192,9 @@ export class EvalScheduler {
   }
 
   private async persistSubmission(normalized: EvalRequest, execution: EvalExecutionPolicyV1, modelCapturePlan: ModelCapturePlanV1, submissionDigest: `sha256:${string}`, keyHash?: `sha256:${string}`, reservedEvalId?: EvalId): Promise<QueuedEval> {
+    if (normalized.artifact_pins && execution.provider !== "local-docker") throw new HitchError("artifact pins require local-docker execution", { code: "eval_artifact_pin_unsupported", exitCode: 12 });
+    if (normalized.environment_binding && (execution.provider !== this.provider || ["proxy", "hybrid"].includes(modelCapturePlan.effective_mode))) throw new HitchError("environment bindings require local execution without a model proxy", { code: "evaluation_binding_unsupported", exitCode: 12 });
+    await assertEvalEnvironmentBinding(normalized, this.root, this.credentialEnv);
     const { evalId, directory } = await persistEvalSubmission({ evalsRoot: this.evalsRoot, request: normalized, execution, modelCapturePlan, submissionDigest,
       ...(keyHash ? { keyHash } : {}), ...(reservedEvalId ? { reservedEvalId } : {}), emit: (directory, id, event) => this.emitPersisted(directory, id, event) });
     return this.queuedEval(evalId, normalized, execution, modelCapturePlan, directory);
@@ -361,6 +364,11 @@ export class EvalScheduler {
         this.scheduleDrain();
       });
     this.completions.set(entry.evalId, completion);
+  }
+
+  async prepareEnvironmentBinding(input: { model: string; passEnv: string[]; minimumValidityMs: number; signal?: AbortSignal }) {
+    if (this.provider !== "local-docker") throw new HitchError("environment bindings require the local Docker executor", { code: "evaluation_binding_unsupported", exitCode: 12 });
+    return prepareEvaluationBinding({ ...input, root: this.root, env: this.credentialEnv });
   }
 
   private async execute(entry: QueuedEval, parallelism: number, fineGrained: boolean, lease: ResourceLease | undefined, controller: AbortController): Promise<void> {

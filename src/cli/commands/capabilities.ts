@@ -19,6 +19,8 @@ export function capabilitiesCommand(args: string[]): void {
     model_node_usage: "2",
     model_node_storage: "1",
     ordered_eval_control: "2",
+    evaluation_environment_binding: "3",
+    evaluation_artifact_pins: "1",
     controller_runtime_observation: "2",
     local_execution_observation: "2",
     remote_execution_observation: "2",

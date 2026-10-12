@@ -79,6 +79,7 @@ hitch run --harness HARNESS_REF [--prompt TEXT | --prompt-file PATH] [RUN_OPTION
 | --- | --- |
 | `hitch eval setup harbor [--version VERSION] [--python PATH] [--force] [--json]` | 在隔离工具目录安装 Hitch 固定的 Harbor；`--force` 重建该安装。 |
 | `hitch eval doctor [--harbor PATH] [--python PATH] [--docker PATH] [--json]` | 检查依赖，不启动评测。 |
+| `hitch eval bind --model MODEL [--pass-env NAME ...] [--minimum-validity DURATION] --json` | 绑定驻留 daemon 的模型环境、冻结凭据、Harbor Python 运行时及支持的环境引用文件；最低有效期默认为 `30m`。详见[绑定协议](../../evaluation-bindings.zh-CN.md)。 |
 | `hitch eval run --dataset REF --harness REF [EVAL_OPTIONS]` | 执行并等待结果，默认输出 JSON。 |
 | `hitch eval submit --dataset REF --harness REF [EVAL_OPTIONS]` | 提交给已运行的 daemon，立即以 JSON 返回受理 ID。 |
 | `hitch eval watch EVAL_ID [--output json\|jsonl]` | 跟踪 daemon 评测，默认 JSONL。 |
@@ -102,6 +103,8 @@ hitch run --harness HARNESS_REF [--prompt TEXT | --prompt-file PATH] [RUN_OPTION
 | `--timeout DURATION`, `--setup-timeout DURATION` | 候选执行和准备阶段的预算。标准编译任务保留任务预算，除非显式覆盖；其他默认值见[评测契约](../../evals.md)。 |
 | `--infrastructure-retries N`, `--infrastructure-retry-backoff DURATION` | 控制符合条件的基础设施重试；N 可为 0，表示禁用。 |
 | `--agent-arg VALUE`, `--pass-env NAME` | 可重复，分别传递 Harness 参数和转发到容器的认证/环境变量名称。 |
+| `--environment-binding ID` | 准入和每次 Harbor 执行前检查 `eval bind` 返回的绑定；支持本地 Docker、外部模型及 capture `off`/`native`。 |
+| `--artifact-pin JSON` | 每个使用的平台传一条，固定 `platform`、`artifact_id`、`artifact_integrity` 和 `entrypoint_integrity`，任务执行前核对。详见[产物约束协议](../../evaluation-artifact-pins.zh-CN.md)。 |
 | `--device auto\|cpu\|cuda`, `--local-profile baseline\|throughput`, `--offline` | 托管模型推理，硬件与 Harness 要求见[模型推理](model-inference.md)。 |
 | `--inference SHA256`, `--model-node-file JSON` | 使用精确推理锁及远程节点绑定，省略 device/profile 覆盖参数。 |
 | `--training-binding-file JSON` | 将受支持的训练 episode 绑定到外部训练网关，见[训练集成](../../slime-training-binding.zh-CN.md)。 |

@@ -1,3 +1,4 @@
+import { evalBindingCommand } from "./eval-binding.js";
 import { DEFAULT_HARBOR_VERSION, doctorHarbor, setupHarbor } from "../../backends/index.js";
 import { readOrderedEvalIntent as readControl } from "../../control-plane/index.js";
 import type { EvalExecutionPolicyV1, ResourceVectorV1 } from "../../domain/index.js";
@@ -11,6 +12,7 @@ import { ensureLocalInferenceDaemon } from "./daemon.js";
 export async function evalCommand(args: string[], root: string): Promise<void> {
   const action = args.shift();
   switch (action) {
+    case "bind": return evalBindingCommand(args, root);
     case "run": return evalRunCommand(args, root);
     case "submit": return evalSubmitCommand(args, root);
     case "control": return evalControlCommand(args, root);
@@ -22,7 +24,7 @@ export async function evalCommand(args: string[], root: string): Promise<void> {
     case "inspect": return evalInspectCommand(args, root);
     case "setup": return evalSetupCommand(args, root);
     case "doctor": return evalDoctorCommand(args, root);
-    default: throw invalidInput("eval requires run, submit, watch, cancel, rerun, rerun-cancel, list, inspect, setup, or doctor");
+    default: throw invalidInput("eval requires bind, run, submit, watch, cancel, rerun, rerun-cancel, list, inspect, setup, or doctor");
   }
 }
 

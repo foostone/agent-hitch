@@ -3,7 +3,7 @@ import path from "node:path";
 import { resolveHarness } from "../artifacts/index.js";
 import { HitchError, SCHEMA_VERSION, atomicWriteJSON, beginEvalEnvironmentImagePlanning, ensureDir, invalidInput, statePaths, withEnvironmentImageReferenceLock, writeEvalEnvironmentImageReferences } from "../foundation/index.js";
 import { parseHarnessReference } from "../revisions/index.js";
-import { buildLocalGitTransport, lockedHarnessRef, runHarborBackend, verifyLocalGitTransport } from "../backends/index.js";
+import { assertHarborArtifactPins, buildLocalGitTransport, lockedHarnessRef, runHarborBackend, verifyLocalGitTransport } from "../backends/index.js";
 import type { HarborBackendResult, LocalGitTransportUse } from "../backends/index.js";
 import { ensureControllerRuntime, writeRuntimeReference, type ControllerRuntimeUseResult } from "../controller-runtime/index.js";
 import type { EvalProgressV1, EvalTrialRefV1 } from "../domain/index.js";
@@ -182,6 +182,7 @@ export async function runEval({ evalId = newEvalId(), request, root, env = proce
     const selectedArtifactBuilder = harborArtifactBuilder ?? (env.NODE_ENV === "test" && env.HITCH_TEST_HOST_ARTIFACT_BUILDER === "1" ? prepareHostHarborArtifactForTest : prepareHarborArtifact);
     const prepared = await prepareEvalArtifactAssignments({ builder: selectedArtifactBuilder, root, resolvedRevision, requestedReference, controllerRuntime, ...(localTransport ? { localTransport } : {}), taskRuntimeContracts: localPlanning.taskRuntimeContracts, sink, env, ...(signal ? { signal } : {}) });
     const preparedAssignments = prepared.assignments;
+    assertHarborArtifactPins(normalized.artifact_pins, preparedAssignments.map(entry => entry.artifact));
     const preparedArtifact = prepared.primary;
     const preparedArtifacts = prepared.artifactsById;
     const activeCaptureRuntime = await startEvalModelCaptureRuntime({

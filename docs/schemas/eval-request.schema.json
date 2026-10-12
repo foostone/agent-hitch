@@ -22,6 +22,15 @@
     "agent_args": { "type": "array", "items": { "type": "string" } },
     "pass_env": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
     "local_inference": { "$ref": "local-inference-selection.schema.json" },
-    "training_binding": { "$ref": "training-external-binding.schema.json" }
+    "training_binding": { "$ref": "training-external-binding.schema.json" },
+    "environment_binding": { "type": "string", "pattern": "^hmac-sha256:[a-f0-9]{64}$" },
+    "artifact_pins": {
+      "type": "array", "minItems": 1, "maxItems": 2, "uniqueItems": true,
+      "items": { "$ref": "eval-artifact-pin.schema.json" },
+      "allOf": [
+        { "contains": { "type": "object", "required": ["platform"], "properties": { "platform": { "const": "linux-x64" } } }, "minContains": 0, "maxContains": 1 },
+        { "contains": { "type": "object", "required": ["platform"], "properties": { "platform": { "const": "linux-arm64" } } }, "minContains": 0, "maxContains": 1 }
+      ]
+    }
   }
 }

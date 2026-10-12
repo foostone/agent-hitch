@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agent-hitch.local/schemas/eval-artifact-pin.schema.json",
+  "title": "Hitch pre-submission Harbor artifact pin",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["platform", "artifact_id", "artifact_integrity", "entrypoint_integrity"],
+  "properties": {
+    "platform": { "enum": ["linux-x64", "linux-arm64"] },
+    "artifact_id": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" },
+    "artifact_integrity": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" },
+    "entrypoint_integrity": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" }
+  }
+}

@@ -392,6 +392,9 @@ const runtime_platform = task.endsWith("/two") ? "linux/arm64" : "linux/amd64";
 process.stdout.write(JSON.stringify({schema_version:"1",runtime_platform,task:{},verifier:{separate:false},compose_services:[{name:"main",replicas:1}],provider_sidecars:{main_egress:false,verifier_egress:false},environment_images:[],environment_image_fallbacks:[],environment_builds:[]}));
 `, { mode: 0o755 });
   const contracts: HarborTrialRuntimeContract[] = [];
+  const pins = ["linux-arm64", "linux-x64"].map(platform => ({ platform,
+    artifact_id: `sha256:${(platform === "linux-x64" ? "a" : "b").repeat(64)}`,
+    artifact_integrity: `sha256:${"c".repeat(64)}`, entrypoint_integrity: `sha256:${"d".repeat(64)}` }));
   const result = await runEvalProduction({
     root,
     harborExecutable: fakeHarbor,
@@ -406,6 +409,8 @@ process.stdout.write(JSON.stringify({schema_version:"1",runtime_platform,task:{}
         artifact: {
           ...prepared.artifact,
           artifact_id: `sha256:${digit.repeat(64)}`,
+          artifact_integrity: `sha256:${"c".repeat(64)}`,
+          entrypoint_integrity: `sha256:${"d".repeat(64)}`,
           platform: input.runtimeContract.artifactPlatform,
           node_version: input.runtimeContract.nodeVersion,
         },
@@ -415,6 +420,7 @@ process.stdout.write(JSON.stringify({schema_version:"1",runtime_platform,task:{}
       dataset,
       harness_ref: "pi@version:1.2.3",
       model: "openai/test-model",
+      artifact_pins: pins,
       attempts: 1,
       max_concurrent: 2,
       timeout_ms: 5_000,
@@ -425,6 +431,7 @@ process.stdout.write(JSON.stringify({schema_version:"1",runtime_platform,task:{}
     { dockerPlatform: "linux/arm64", artifactPlatform: "linux-arm64", nodeVersion: "v22.23.0" },
   ]);
   const evalDirectory = path.join(root, "evals", result.eval_id);
+  assert.deepEqual((await readJSON<{ artifact_pins: unknown }>(path.join(evalDirectory, "request.json"))).artifact_pins, pins);
   const plan = await readJSON<Record<string, unknown>>(path.join(evalDirectory, "plan.json"));
   assert.equal(plan.prepared_artifact, undefined);
   assert.deepEqual((plan.prepared_artifacts as Array<Record<string, unknown>>).map((entry) => ({
