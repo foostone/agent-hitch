@@ -96,6 +96,90 @@ class BuildProcessTests(unittest.IsolatedAsyncioTestCase):
              patch.object(process_module.os, "scandir", side_effect=PermissionError):
             self.assertTrue(process_module.group_has_live_members(321))
 
+    async def test_permission_errors_retain_ownership_until_group_disappears(self):
+        for denied in (signal.SIGTERM, 0, signal.SIGKILL):
+            with self.subTest(signal=denied):
+                observed = asyncio.Event()
+                released = False
+                key = self.root / f"permission-{denied}.lock"
+                process = SimpleNamespace(pid=123456789, wait=AsyncMock(return_value=0))
+
+                def killpg(pgid, signum):
+                    self.assertEqual(pgid, process.pid)
+                    if released:
+                        raise ProcessLookupError
+                    if signum == 0 and process.wait.await_count:
+                        observed.set()
+                    if signum == denied:
+                        raise PermissionError
+
+                async def cleanup():
+                    async with cache_module.lock([key]):
+                        await process_module.stop_group(process)
+
+                with patch.object(process_module.os, "killpg", killpg), \
+                     patch.object(process_module.sys, "platform", "other-posix"), \
+                     patch.object(process_module, "time", SimpleNamespace(monotonic=Mock(side_effect=[0, 1, 6]))):
+                    task = asyncio.create_task(cleanup())
+                    observation = asyncio.create_task(observed.wait())
+                    try:
+                        done, _ = await asyncio.wait([task, observation], timeout=1,
+                            return_when=asyncio.FIRST_COMPLETED)
+                        if task.done():
+                            await task
+                        self.assertIn(observation, done, "cleanup did not observe the remaining group")
+                        self.assertFalse(task.done(), "PermissionError released ownership before exit")
+                        with key.open("a") as handle, self.assertRaises(BlockingIOError):
+                            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    finally:
+                        released = True
+                        observation.cancel()
+                        await asyncio.gather(observation, return_exceptions=True)
+                        await asyncio.wait_for(task, 1)
+                with key.open("a") as handle:
+                    fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+    @unittest.skipUnless(sys.platform == "darwin", "macOS returns EPERM for zombie-only groups")
+    async def test_macos_unreaped_group_does_not_raise_or_appear_absent(self):
+        # Keep an exited child's group observable until its real parent reaps
+        # it. The parent leaves that group before we probe it.
+        code = (
+            "import os, sys\n"
+            "original = os.getpgrp()\nos.setpgid(0, 0)\ngroup = os.getpgrp()\n"
+            "child = os.fork()\n"
+            "if child == 0: os._exit(0)\n"
+            "os.setpgid(0, original)\nprint(group, flush=True)\n"
+            "sys.stdin.buffer.read(1)\nos.waitpid(child, 0)\n"
+        )
+        keeper = await asyncio.create_subprocess_exec(sys.executable, "-I", "-B", "-c", code,
+            stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE)
+        try:
+            pgid = int(await asyncio.wait_for(keeper.stdout.readline(), 3))
+            self.assertEqual(pgid, keeper.pid)
+            self.assertNotEqual(pgid, os.getpgrp())
+
+            async def wait_for_zombie():
+                while True:
+                    try:
+                        os.killpg(pgid, 0)
+                    except PermissionError:
+                        return
+                    await asyncio.sleep(0.01)
+
+            await asyncio.wait_for(wait_for_zombie(), 3)
+            self.assertTrue(process_module.group_has_live_members(pgid))
+            keeper.stdin.close()
+            await asyncio.wait_for(keeper.wait(), 3)
+            self.assertEqual(keeper.returncode, 0)
+            self.assertFalse(process_module.group_has_live_members(pgid))
+        finally:
+            keeper.stdin.close()
+            try:
+                await asyncio.wait_for(keeper.wait(), 3)
+            except asyncio.TimeoutError:
+                keeper.kill()
+                await keeper.wait()
+
     async def test_output_backpressure_errors_and_closed_output_timeout(self):
         executable = self.root / "docker"
         executable.write_text(

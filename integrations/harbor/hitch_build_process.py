@@ -19,6 +19,10 @@ def group_has_live_members(pgid):
         os.killpg(pgid, 0)
     except ProcessLookupError:
         return False
+    except PermissionError:
+        # macOS can return EPERM for a group awaiting zombie reaping. A real
+        # permission failure also cannot establish that its members exited.
+        return True
     if sys.platform != "linux":
         return True
     # An orphan zombie can remain until init reaps it, but cannot hold files
@@ -47,17 +51,21 @@ async def stop_group(process):
     except ProcessLookupError:
         await process.wait()
         return
+    except PermissionError:
+        pass
     deadline = time.monotonic() + 5
     while time.monotonic() < deadline:
         try:
             os.killpg(process.pid, 0)
         except ProcessLookupError:
             break
+        except PermissionError:
+            pass
         await asyncio.sleep(0.02)
     else:
         try:
             os.killpg(process.pid, signal.SIGKILL)
-        except ProcessLookupError:
+        except (ProcessLookupError, PermissionError):
             pass
     await process.wait()
     while group_has_live_members(process.pid):
