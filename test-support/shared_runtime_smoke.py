@@ -20,26 +20,25 @@ class SharedMountTests(unittest.IsolatedAsyncioTestCase):
         (self.root / "controller/payload").mkdir(parents=True)
         (self.root / "artifact").mkdir()
         self.raw = {"runtime_directory": str(self.root / "controller"), "artifact_directory": str(self.root / "artifact")}
-        self.sources = shared.configure(self.raw, "arbitrary-task__env")
+        self.sources = shared.configure(self.raw, True)
         self.inspected = {"privileged": False, "cap_add": None, "mounts": [
             {"Type": "bind", "Source": source, "Destination": target, "RW": False}
             for target, source in self.sources.items()
         ]}
 
     def test_candidate_only(self):
-        self.assertIsNone(shared.configure(None, "anything"))
-        for session in ["task__verifier__trial", "task__verifier__env", "truncated__verifier__01234567", "unknown"]:
-            self.assertIsNone(shared.configure(self.raw, session))
+        self.assertIsNone(shared.configure(None, True))
+        self.assertIsNone(shared.configure(self.raw, False))
         shared.validate_mounts(self.inspected, self.sources)
         for mount in shared.compose_mounts(self.sources):
             self.assertTrue(mount["read_only"])
             self.assertFalse(mount["bind"]["create_host_path"])
 
-    def test_roles_are_bound_to_trial_identity(self):
-        for trial in ("short", "task-" + "a" * 80, "task__verifier__name"):
-            self.assertEqual(shared.configure(self.raw, trial + "__env", trial), self.sources)
-            for session in (trial + "__verifier__env", trial[:53] + "__12345678", "other__env"):
-                self.assertIsNone(shared.configure(self.raw, session, trial))
+    def test_non_candidates_do_not_require_snapshot_directories(self):
+        raw = {key: value + "/missing" for key, value in self.raw.items()}
+        self.assertIsNone(shared.configure(raw, False))
+        with self.assertRaises(ValueError):
+            shared.configure(raw, True)
 
     def test_reject_rw_wrong_missing_and_nested_mounts(self):
         for mutation in [
@@ -67,10 +66,10 @@ class SharedMountTests(unittest.IsolatedAsyncioTestCase):
 
     def test_missing_and_symlink_sources_do_not_become_empty_mounts(self):
         broken = {**self.raw, "artifact_directory": str(self.root / "missing")}
-        with self.assertRaises(ValueError):shared.configure(broken, "task__env")
+        with self.assertRaises(ValueError):shared.configure(broken, True)
         (self.root / "link").symlink_to(self.root / "artifact")
-        with self.assertRaises(ValueError):shared.configure({**self.raw, "artifact_directory": str(self.root / "link")}, "task__env")
-        with self.assertRaises(ValueError):shared.configure({**self.raw, "extra": "unexpected"}, "task__env")
+        with self.assertRaises(ValueError):shared.configure({**self.raw, "artifact_directory": str(self.root / "link")}, True)
+        with self.assertRaises(ValueError):shared.configure({**self.raw, "extra": "unexpected"}, True)
 
     async def test_mount_inspection_uses_the_same_docker_connection_as_compose(self):
         connection = {"DOCKER_HOST": "unix:///custom/docker.sock", "DOCKER_CONFIG": "/custom/client"}

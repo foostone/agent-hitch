@@ -5,7 +5,6 @@ import json
 import logging
 import os
 from pathlib import Path
-import signal
 import sys
 import tempfile
 from types import SimpleNamespace
@@ -14,7 +13,6 @@ from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "integrations/harbor"))
 import hitch_image_cache as cache_module
-real_docker = cache_module.docker
 from hitch_image_cache import ImagePreparationCache
 from hitch_build_inputs import UnsupportedBuild, pinned_dockerfile
 from hitch_compose_preparation import ComposePreparation
@@ -194,6 +192,19 @@ class CacheTests(unittest.IsolatedAsyncioTestCase):
             await self.cache.prepare(self.service)
         self.assertEqual(len(self.builds), 0)
 
+    async def test_custom_frontend_arguments_and_source_policies_bypass_warm_cache(self):
+        await self.cache.prepare(self.service)
+        for reference in ("example.test/frontend:latest", BASE):
+            with self.subTest(frontend=reference), self.assertRaisesRegex(UnsupportedBuild, "custom-frontend"):
+                await self.cache.prepare({"build": {**self.service["build"], "args": {"BUILDKIT_SYNTAX": reference}}})
+        policy = self.root / "source-policy.json"
+        for contents in ('{"rules":[]}', '{"rules":[{"action":"DENY"}]}'):
+            policy.write_text(contents)
+            configured = ImagePreparationCache(self.root / "cache", {"EXPERIMENTAL_BUILDKIT_SOURCE_POLICY": str(policy)})
+            with self.subTest(policy=contents), self.assertRaisesRegex(UnsupportedBuild, "source-policy"):
+                await configured.prepare(self.service)
+        self.assertEqual(len(self.builds), 1)
+
     async def test_platform_and_implicit_build_values_do_not_alias(self):
         first = await self.cache.prepare(self.service)
         proxy_cache = ImagePreparationCache(self.root / "cache", {"HTTPS_PROXY": "http://private:secret@host"})
@@ -263,74 +274,6 @@ class CacheTests(unittest.IsolatedAsyncioTestCase):
                 {"build": {"context": str(self.source), "args": {"VALUE": str(index)}}}) for index in range(5)))
         self.assertEqual(maximum, 2)
 
-    async def test_cancelling_docker_waits_for_process_exit(self):
-        executable = self.root / "docker"; marker = self.root / "pid"
-        executable.write_text(f'#!{sys.executable}\nimport os,time\nopen({str(marker)!r},"w").write(str(os.getpid()))\ntime.sleep(60)\n')
-        executable.chmod(0o700)
-        task = asyncio.create_task(real_docker(["buildx", "build"], env={**os.environ, "PATH": str(self.root)}))
-        async with asyncio.timeout(5):
-            while not marker.exists(): await asyncio.sleep(0.01)
-        pid = int(marker.read_text())
-        task.cancel()
-        with self.assertRaises(asyncio.CancelledError): await task
-        with self.assertRaises(ProcessLookupError): os.kill(pid, 0)
-
-    async def test_repeated_cancellation_waits_for_stubborn_child(self):
-        executable = self.root / "docker"; marker = self.root / "pid"
-        executable.write_text(f'#!{sys.executable}\nimport os,time,signal\nsignal.signal(signal.SIGTERM, signal.SIG_IGN)\nopen({str(marker)!r},"w").write(str(os.getpid()))\ntime.sleep(60)\n')
-        executable.chmod(0o700)
-        task = asyncio.create_task(real_docker(["buildx", "build"], env={**os.environ, "PATH": str(self.root)}))
-        async with asyncio.timeout(5):
-            while not marker.exists(): await asyncio.sleep(0.01)
-        pid = int(marker.read_text())
-        task.cancel(); await asyncio.sleep(0.05); task.cancel()
-        with self.assertRaises(asyncio.CancelledError): await asyncio.wait_for(task, 8)
-        with self.assertRaises(ProcessLookupError): os.kill(pid, 0)
-
-    async def test_cancellation_stops_descendant_after_docker_cli_exits(self):
-        executable = self.root / "docker"
-        marker = self.root / "child"
-        executable.write_text(
-            f"#!{sys.executable}\n"
-            "import os, signal, time\n"
-            "if os.fork(): os._exit(0)\n"
-            "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
-            f"open({str(marker)!r}, 'w').write(str(os.getpid()))\n"
-            "time.sleep(60)\n"
-        )
-        executable.chmod(0o700)
-        processes = []
-        spawn = asyncio.create_subprocess_exec
-
-        async def observed_spawn(*args, **kwargs):
-            process = await spawn(*args, **kwargs)
-            processes.append(process)
-            return process
-
-        with patch.object(cache_module.asyncio, "create_subprocess_exec", observed_spawn):
-            task = asyncio.create_task(real_docker(["buildx", "build"], env={**os.environ, "PATH": str(self.root)}))
-            pid = None
-            try:
-                async with asyncio.timeout(5):
-                    while not marker.exists() or not processes or processes[0].returncode is None:
-                        await asyncio.sleep(0.01)
-                pid = int(marker.read_text())
-                task.cancel()
-                with self.assertRaises(asyncio.CancelledError):
-                    await asyncio.wait_for(task, 8)
-                # The orphan can briefly remain a zombie until init reaps it.
-                # A closed inherited pipe proves it cannot continue the build.
-                self.assertTrue(processes[0].stdout.at_eof())
-                self.assertTrue(processes[0].stderr.at_eof())
-            finally:
-                if pid is not None:
-                    try:
-                        os.kill(pid, signal.SIGKILL)
-                    except ProcessLookupError:
-                        pass
-                if not task.done():
-                    task.cancel()
-                    await asyncio.gather(task, return_exceptions=True)
 
 
 if __name__ == "__main__": unittest.main(verbosity=2)

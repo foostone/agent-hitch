@@ -3,12 +3,13 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import asynccontextmanager
+from contextvars import ContextVar
 import fcntl
 import json
 import os
 from pathlib import Path
 import re
-import signal
+import sys
 import tempfile
 import time
 
@@ -16,60 +17,64 @@ from hitch_build_inputs import UnsupportedBuild, build_spec, digest, pinned_dock
 
 _IMAGE_ID = re.compile(r"sha256:[a-f0-9]{64}")
 _PROXY_NAMES = ("HTTP_PROXY", "HTTPS_PROXY", "FTP_PROXY", "ALL_PROXY", "NO_PROXY")
+_LOCK_FDS = ContextVar("hitch_build_lock_fds", default=())
 
 
 async def docker(args, *, env, timeout=600, check=True):
-    """Cancellation must finish the child before releasing a build lock."""
-    process = await asyncio.create_subprocess_exec(
-        "docker", *args, env=env, start_new_session=True,
+    """Keep command lifetime and cache locks tied to the worker's liveness."""
+    spawning = asyncio.create_task(asyncio.create_subprocess_exec(
+        sys.executable, "-I", "-B", str(Path(__file__).with_name("hitch_build_process.py")), "docker", *args,
+        env=env, start_new_session=True, pass_fds=_LOCK_FDS.get(), stdin=asyncio.subprocess.PIPE,
         stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-    )
-    communication = asyncio.create_task(process.communicate())
+    ))
+    process = communication = None
     try:
+        # Do not lose ownership if cancellation arrives during process creation.
+        process = await asyncio.shield(spawning)
+        communication = asyncio.create_task(communicate(process))
         stdout, _ = await asyncio.wait_for(asyncio.shield(communication), timeout)
     except BaseException:
-        # A CLI can exit before its build plugin closes the inherited pipes.
-        # Terminate the group even if the leader already has a return code, and
-        # keep draining output so a full pipe cannot block process cleanup.
-        cleanup = asyncio.create_task(terminate(process, communication))
+        async def stop():
+            owned = process if process is not None else await spawning
+            owned.stdin.close()
+            await (communication if communication is not None else communicate(owned))
+
+        cleanup = asyncio.create_task(stop())
         while not cleanup.done():
             try:
                 await asyncio.shield(cleanup)
             except asyncio.CancelledError:
-                # Repeated cancellation must not release image/slot locks early.
+                # Repeated cancellation cannot release image/slot locks early.
                 pass
         cleanup.result()
         raise
+    finally:
+        if process is not None:
+            process.stdin.close()
     if check and process.returncode:
         # Do not surface build args, proxy credentials or registry stderr.
         raise RuntimeError(f"Hitch image preparation Docker {args[0]} failed ({process.returncode})")
     return stdout.decode("utf-8", errors="strict") if process.returncode == 0 else None
 
 
-async def terminate(process, communication):
-    async def finished():
-        await process.wait()
-        await asyncio.gather(communication, return_exceptions=True)
-
-    completion = asyncio.create_task(finished())
+async def communicate(process):
+    stdout, stderr = await asyncio.gather(process.stdout.read(), process.stderr.read())
     try:
-        os.killpg(process.pid, signal.SIGTERM)
-    except ProcessLookupError:
+        # Unlike Process.communicate(), keep stdin open while Docker runs. The
+        # supervisor also waits for descendants holding either output pipe.
+        process.stdin.write(b"1")
+        await process.stdin.drain()
+    except (BrokenPipeError, ConnectionResetError):
         pass
-    try:
-        await asyncio.wait_for(asyncio.shield(completion), 5)
-    except asyncio.TimeoutError:
-        try:
-            os.killpg(process.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
-        await completion
+    await process.wait()
+    return stdout, stderr
 
 
 @asynccontextmanager
 async def lock(paths):
     handles = []
     acquired = None
+    token = None
     try:
         for path in paths:
             fd = os.open(path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
@@ -84,8 +89,11 @@ async def lock(paths):
                     pass
             if acquired is None:
                 await asyncio.sleep(0.05)
+        token = _LOCK_FDS.set((*_LOCK_FDS.get(), acquired.fileno()))
         yield
     finally:
+        if token is not None:
+            _LOCK_FDS.reset(token)
         for handle in handles:
             handle.close()
 
@@ -122,6 +130,10 @@ class ImagePreparationCache:
         self.env, self.slots, self.daemon = env, slots, None
 
     async def identity(self):
+        # Source policies can deny or remap even digest-pinned base inputs.
+        # Their files and external policy dependencies are outside this key.
+        if self.env.get("EXPERIMENTAL_BUILDKIT_SOURCE_POLICY") or self.env.get("BUILDX_DEFAULT_POLICY"):
+            raise UnsupportedBuild("source-policy")
         if self.daemon is None:
             raw = await docker(["info", "--format", "{{json .}}"], env=self.env, timeout=30)
             data = json.loads(raw)

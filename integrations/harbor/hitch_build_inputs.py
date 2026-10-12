@@ -47,6 +47,10 @@ def build_spec(service, default_platform):
     for values in (args, labels):
         if not isinstance(values, dict) or any(not isinstance(k, str) or not k or not isinstance(v, str) for k, v in values.items()):
             raise UnsupportedBuild("unresolved-build-values")
+    if "BUILDKIT_SYNTAX" in args:
+        # This reserved argument selects a frontend just like a # syntax
+        # directive; even pinned frontends can introduce untracked inputs.
+        raise UnsupportedBuild("custom-frontend")
     if "io.hitch.prepared-key" in labels:
         raise UnsupportedBuild("reserved-cache-label")
     target = build.get("target")

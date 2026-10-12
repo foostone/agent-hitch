@@ -42,7 +42,7 @@ async def main():
     docker, image, artifact_path, controller_path, logs = sys.argv[1:]
     artifact = json.loads((Path(artifact_path) / "artifact.json").read_text())
     controller = json.loads((Path(controller_path) / "manifest.json").read_text())
-    sources = shared.configure({"runtime_directory": controller_path, "artifact_directory": artifact_path}, "test__env")
+    sources = shared.configure({"runtime_directory": controller_path, "artifact_directory": artifact_path}, True)
     transport = {key: artifact[key] for key in (
         "artifact_id", "artifact_integrity", "entrypoint_integrity", "harness_id", "revision_identity",
         "adapter_version", "recipe_version", "platform", "source_type",

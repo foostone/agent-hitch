@@ -12,7 +12,6 @@ from typing import Any, Mapping
 import yaml
 from harbor.constants import MAIN_SERVICE_NAME
 from harbor.environments.docker.docker import DockerEnvironment
-import hitch_shared_runtime as shared_runtime
 
 _LABEL_ROOT = "io.hitch.root-id"
 _LABEL_PROVIDER = "io.hitch.provider"
@@ -33,6 +32,15 @@ _ALLOWED_LABELS = _REQUIRED_LABELS | {_LABEL_TASK}
 _COMPOSE_RESET_MARKER = "__HITCH_COMPOSE_RESET_NULL__"
 _GPU_OVERRIDE_PREFIX = "__HITCH_GPU_OVERRIDE_"
 _HOST_CREDENTIAL_HELPER_ENV = "HITCH_HOST_CREDENTIAL_HELPER_JSON"
+
+
+def _candidate_session(session_id: str, trial_name: str | None) -> bool:
+    # Keep role selection self-contained: historical verifier repairs replace
+    # only this provider and retain the original runtime's module membership.
+    # Verifier sessions may truncate their role marker or use a step named env.
+    if trial_name is not None:
+        return session_id == f"{trial_name}__env"
+    return session_id.endswith("__env") and "__verifier__" not in session_id
 
 
 class HitchHarborDockerEnvironment(DockerEnvironment):
@@ -69,7 +77,8 @@ class HitchHarborDockerEnvironment(DockerEnvironment):
         session_id = kwargs.get("session_id", args[2] if len(args) > 2 else "")
         trial_paths = kwargs.get("trial_paths", args[3] if len(args) > 3 else None)
         trial_name = trial_paths.trial_dir.name if trial_paths is not None else None
-        if session_id and not shared_runtime.candidate_session(session_id, trial_name):
+        candidate = _candidate_session(session_id, trial_name)
+        if session_id and not candidate:
             self._hitch_prebuilt_task_image = None
         if hitch_image_cache_dir is not None and (not isinstance(hitch_image_cache_dir, str) or not Path(hitch_image_cache_dir).is_absolute()):
             raise ValueError("Hitch image cache directory must be absolute")
@@ -85,7 +94,10 @@ class HitchHarborDockerEnvironment(DockerEnvironment):
         if isinstance(hitch_main_gpu_count, bool) or not isinstance(hitch_main_gpu_count, int) or hitch_main_gpu_count < 0:
             raise ValueError("Hitch main GPU count is invalid")
         self._hitch_main_gpu_count = hitch_main_gpu_count
-        self._hitch_shared_runtime = shared_runtime.configure(hitch_shared_runtime, session_id, trial_name)
+        self._hitch_shared_runtime = None
+        if hitch_shared_runtime is not None:
+            import hitch_shared_runtime as shared_runtime
+            self._hitch_shared_runtime = shared_runtime.configure(hitch_shared_runtime, candidate)
         self._hitch_ownership_temp_dir: tempfile.TemporaryDirectory[str] | None = None
         self._hitch_ownership_compose_path: Path | None = None
         self._hitch_phase_compose_path: Path | None = None
@@ -201,6 +213,9 @@ class HitchHarborDockerEnvironment(DockerEnvironment):
         )
 
     async def hitch_verify_shared_runtime(self, controller_payload, artifact_directory):
+        if self._hitch_shared_runtime is None:
+            return False
+        import hitch_shared_runtime as shared_runtime
         return await shared_runtime.verify_environment(self, controller_payload, artifact_directory)
 
     async def _apply_network_policy(self, network_policy):
@@ -280,6 +295,8 @@ class HitchHarborDockerEnvironment(DockerEnvironment):
             await super().stop(delete)
 
     def _write_ownership_overlay(self) -> Path:
+        if self._hitch_shared_runtime:
+            import hitch_shared_runtime as shared_runtime
         services = {MAIN_SERVICE_NAME}
         if self._enable_egress_control:
             services.add(self._EGRESS_CONTROL_SERVICE_NAME)

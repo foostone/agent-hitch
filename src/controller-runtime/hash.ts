@@ -31,6 +31,7 @@ export const RUNTIME_HARBOR_BRIDGE_FILES = [
   "integrations/harbor/hitch_harbor_environment.py",
   "integrations/harbor/hitch_shared_runtime.py",
   "integrations/harbor/hitch_build_inputs.py",
+  "integrations/harbor/hitch_build_process.py",
   "integrations/harbor/hitch_image_cache.py",
   "integrations/harbor/hitch_compose_preparation.py",
   "integrations/harbor/hitch_host_credentials.py",

@@ -13,6 +13,11 @@ test("Compose preparation preserves shared image names and task lifecycle declar
   assert.equal(result.status, 0, result.stderr || result.stdout);
 });
 
+test("Docker command supervision preserves lifetime and build locks across cancellation and parent death", () => {
+  const result = spawnSync("python3", ["test-support/build_process_test.py"], { encoding: "utf8", timeout: 30_000 });
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+});
+
 test("Harbor preparation is opt-in and validates host configuration", () => {
   assert.deepEqual(harborPreparationOptions({}), {});
   assert.deepEqual(harborEnvironmentConfig(), { type: "docker", delete: true });

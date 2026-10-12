@@ -17,16 +17,7 @@ ARTIFACT_TARGET = "/opt/hitch-harness-artifact"
 TARGETS = (CONTROLLER_TARGET, ARTIFACT_TARGET)
 
 
-def candidate_session(session_id: str, trial_name: str | None = None) -> bool:
-    # Verifier names can be truncated before their role marker, or end in
-    # '__env' when a multi-step task uses 'env' as its verifier step name.
-    # Harbor gives both roles the same TrialPaths, so bind to that exact trial.
-    if trial_name is not None:
-        return session_id == f"{trial_name}__env"
-    return session_id.endswith("__env") and "__verifier__" not in session_id
-
-
-def configure(raw: Any, session_id: str, trial_name: str | None = None) -> dict[str, str] | None:
+def configure(raw: Any, candidate: bool) -> dict[str, str] | None:
     if raw is None:
         return None
     if not isinstance(raw, dict) or set(raw) != {"runtime_directory", "artifact_directory"}:
@@ -36,7 +27,7 @@ def configure(raw: Any, session_id: str, trial_name: str | None = None) -> dict[
             raise ValueError("shared runtime transport requires absolute host paths")
     # Harbor also forwards environment kwargs to separate verifier containers.
     # Only the candidate session receives harness code.
-    if not candidate_session(session_id, trial_name):
+    if not candidate:
         return None
     result = {
         CONTROLLER_TARGET: str(Path(raw["runtime_directory"]) / "payload"),
