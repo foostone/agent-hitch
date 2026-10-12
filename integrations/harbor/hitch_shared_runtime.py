@@ -40,9 +40,10 @@ def configure(raw: Any, candidate: bool) -> dict[str, str] | None:
 
 
 def reject_conflicts(config: dict[str, Any]) -> None:
+    """Validate Compose's resolved main service before adding shared mounts."""
     if config.get("privileged") or any(str(cap).upper().removeprefix("CAP_") in {"ALL", "SYS_ADMIN"} for cap in (config.get("cap_add") or [])):
         raise ValueError("shared runtime requires an unprivileged candidate without CAP_SYS_ADMIN")
-    for mount in config.get("volumes", []):
+    for mount in config.get("volumes") or []:
         if isinstance(mount, dict):
             target = mount.get("target")
         elif isinstance(mount, str):

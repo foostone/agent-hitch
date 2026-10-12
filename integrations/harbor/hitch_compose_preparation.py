@@ -59,6 +59,12 @@ def require_independent_build_images(services):
             references.setdefault(image_tag_key(reference), []).append(builds)
         elif builds:
             unnamed_build = True
+        for mount in service.get("volumes") or []:
+            if isinstance(mount, dict) and mount.get("type") == "image":
+                source = mount.get("source")
+                if not isinstance(source, str) or not source:
+                    raise UnsupportedBuild("image-mount-source")
+                references.setdefault(image_tag_key(source), []).append(False)
         if not builds:
             image_only = True
     # Cached builds publish private tags, not Compose's shared mutable names.

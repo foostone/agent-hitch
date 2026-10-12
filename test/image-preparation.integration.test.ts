@@ -29,3 +29,29 @@ test("real Compose preserves shared build tags on cold starts and after source c
   assert.match(result.stdout, /explicit and implicit collisions, native controls, cold cache, stale tags and aliases OK/);
   t.diagnostic(result.stdout.trim());
 });
+
+test("real Compose image mounts consume the current build through cold and stale tags", {
+  skip: process.env.HITCH_IMAGE_PREPARATION_DOCKER_TEST !== "1", timeout: 240_000,
+}, async t => {
+  const directory = await mkdtemp(path.join(tmpdir(), "hitch-compose-image-mounts-"));
+  t.after(() => forceRemove(directory));
+  const image = process.env.HITCH_IMAGE_PREPARATION_TEST_IMAGE;
+  assert.match(image ?? "", /@sha256:[a-f0-9]{64}$/);
+  const result = await runCommand(process.env.HITCH_HARBOR_TEST_PYTHON || "python3",
+    ["test-support/compose_image_reuse_docker.py", directory, image!], { timeoutMs: 230_000 });
+  assert.match(result.stdout, /native, cold, stale and aliased data images OK/);
+  t.diagnostic(result.stdout.trim());
+});
+
+test("real Compose resolves task privileges and inherited mounts before sharing installations", {
+  skip: process.env.HITCH_IMAGE_PREPARATION_DOCKER_TEST !== "1", timeout: 240_000,
+}, async t => {
+  const directory = await mkdtemp(path.join(tmpdir(), "hitch-shared-configuration-"));
+  t.after(() => forceRemove(directory));
+  const image = process.env.HITCH_IMAGE_PREPARATION_TEST_IMAGE;
+  assert.match(image ?? "", /@sha256:[a-f0-9]{64}$/);
+  const result = await runCommand(process.env.HITCH_HARBOR_TEST_PYTHON || "python3",
+    ["test-support/shared_configuration_docker.py", directory, image!], { timeoutMs: 230_000 });
+  assert.match(result.stdout, /resolved false values, inherited settings, unsafe privileges and mounts OK/);
+  t.diagnostic(result.stdout.trim());
+});

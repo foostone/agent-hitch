@@ -12,7 +12,7 @@ from unittest.mock import AsyncMock, patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "integrations/harbor"))
 from hitch_image_cache import ImagePreparationCache
 from hitch_build_inputs import UnsupportedBuild
-from hitch_compose_preparation import ComposePreparation, _DEFAULT_COMMAND, compose_services
+from hitch_compose_preparation import ComposePreparation, _DEFAULT_COMMAND, compose_services, require_independent_build_images
 
 BASE = "example.test/base@sha256:" + "a" * 64
 
@@ -74,6 +74,24 @@ class ComposeTests(unittest.IsolatedAsyncioTestCase):
             identity.assert_not_awaited()
         self.assertEqual(prep.receipts, [])
         self.assertIsNone(prep.path)
+
+    async def test_image_mounts_participate_in_build_tag_dependencies(self):
+        for built, source in (("app:local", "app:local"), ("app", "docker.io/library/app:latest"),
+                              (None, "project-main:latest")):
+            for consumer in ("main", "worker"):
+                with self.subTest(built=built, source=source, consumer=consumer):
+                    main = {"build": {"context": str(self.root)}}
+                    if built:
+                        main["image"] = built
+                    services = {"main": main, "worker": {"image": "reader:local"}}
+                    services[consumer]["volumes"] = [{"type": "image", "source": source, "target": "/data"}]
+                    self.spec = {"services": services}
+                    prep = ComposePreparation(self.env, str(self.root / "cache"))
+                    with patch.object(ImagePreparationCache, "identity", side_effect=AssertionError("must fall back before preparing")):
+                        self.assertIsNone(await prep.build(self.compose_call))
+                    self.assertIsNone(prep.path)
+        require_independent_build_images({"main": {"build": {"context": str(self.root)}, "image": "independent:local",
+            "volumes": [{"type": "image", "source": "external-data:local", "target": "/data"}]}})
 
     async def test_compose_tags_and_indirect_lifecycle_declarations_are_preserved(self):
         for content in (

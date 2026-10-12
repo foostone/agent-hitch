@@ -110,6 +110,8 @@ HITCH_HARBOR_RUNTIME_TRANSPORT=readonly-bind hitch --root ROOT eval run \
 
 任务的工作目录、状态、凭据和 Node 解包目录仍各自隔离。bridge 与容器内原有内容校验保留，不使用路径、mtime 或“校验过一次”的全局缓存跳过检查。bridge 检查 Docker 实际挂载源、只读标志、嵌套遮挡和候选容器权限；冲突、缺失或内容错误会失败。额外的 verifier 容器不会获得这些安装目录。
 
+每次启动前，先由 Compose 合并配置、解析变量与继承关系，再检查 main 的实际权限和任务挂载，最后添加共享安装目录。字符串或变量表达式最终解析为 privileged=false 时可正常使用；危险权限和继承的挂载冲突在创建候选容器之前被拒绝。
+
 此模式要求 harness 运行时不改写安装目录，并使用能够访问快照路径的本地 Linux Docker daemon；远程 worker 不支持该选项。需要改写安装目录的 harness 使用默认上传方式：不设置该变量，或设置为 `upload`。显式选用共享模式后不会因挂载错误静默回退。
 
 快照保留在 `<eval-directory>/shared-runtime/`，随 eval 的本地工作文件一起留存，避免取消、恢复或另一轮执行清理仍在使用的文件。原缓存的后续改写不会改变已发布快照；宿主自身仍是受信任边界，不能由同权限进程改写这些快照。只在确认该 eval 的容器全部结束且无需保留本地 job 重放后，才能清理其快照。持久化的 artifact 身份不包含这些临时传输路径，既有恢复和远程交付继续采用原上传路径。
@@ -160,7 +162,7 @@ bridge 在 Harbor 的实际环境目录上读取 Compose 最终解析后的构�
 
 目前缓存支持普通文件/目录的本地上下文、标准 Dockerfile、固定摘要基础镜像、build args、target 和 labels。基础镜像配置也检查继承的 ONBUILD。可变基础镜像、自定义 frontend、ADD、RUN 外部挂载、SSH/secrets、额外上下文、符号链接/特殊文件/xattr、显式 pull/no_cache 等不能完整确定输入的配置，整组 Compose 保留原构建路径。宿主 Python 不提供扩展属性检查（如 macOS），或文件系统不支持、拒绝该检查时，也回退原构建流程，不假定扩展属性为空。首次获取基础镜像配置可能需要 registry；校验后的固定摘要配置可在后续直接复用。force_build 绕过准备缓存。只有 Harbor 显式发出的 build 请求进入缓存；已选择预构建镜像时，up 保留原有镜像及 pull policy 的优先级。
 
-如果一个服务构建的镜像名还被其他服务引用，整组 Compose 回退原构建路径，由 Compose 发布共享 tag 并处理 pull policy，避免冷启动缺少镜像或复用旧 tag。检测包含默认 latest、Docker Hub 名称别名及多个构建服务使用同名镜像的情况。未显式指定 image 的构建服务与任何声明 image 的服务混用时，也保守回退，包括后者同样声明 build 的情况，因为它可能引用或覆盖 Compose 自动生成的镜像名。全部使用隐式名称的构建服务、显式名称互不依赖的服务仍可使用缓存。没有 build 服务时不探测 builder。
+如果一个服务构建的镜像名还被其他服务引用，整组 Compose 回退原构建路径，由 Compose 发布共享 tag 并处理 pull policy，避免冷启动缺少镜像或复用旧 tag。检测包含服务的 image 字段、type=image 数据卷的 source、默认 latest、Docker Hub 名称别名及多个构建服务使用同名镜像的情况。未显式指定 image 的构建服务与任何声明 image 的服务混用时，也保守回退，包括后者同样声明 build 的情况，因为它可能引用或覆盖 Compose 自动生成的镜像名。全部使用隐式名称的构建服务、显式名称互不依赖的服务仍可使用缓存。没有 build 服务时不探测 builder。
 
 通过 `build.args.BUILDKIT_SYNTAX` 选择自定义 frontend，或设置 `EXPERIMENTAL_BUILDKIT_SOURCE_POLICY` / `BUILDX_DEFAULT_POLICY` 时，同样回退原构建路径；不能通过缓存跳过 frontend 或外部策略对输入的解释。
 

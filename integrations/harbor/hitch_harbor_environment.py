@@ -34,6 +34,10 @@ _GPU_OVERRIDE_PREFIX = "__HITCH_GPU_OVERRIDE_"
 _HOST_CREDENTIAL_HELPER_ENV = "HITCH_HOST_CREDENTIAL_HELPER_JSON"
 
 
+class _SharedRuntimeConfigurationError(ValueError):
+    """No candidate was started; cleanup must preserve existing images."""
+
+
 def _candidate_session(session_id: str, trial_name: str | None) -> bool:
     # Keep role selection self-contained: historical verifier repairs replace
     # only this provider and retain the original runtime's module membership.
@@ -161,6 +165,19 @@ class HitchHarborDockerEnvironment(DockerEnvironment):
 
     async def _run_docker_compose_command(self, command, *args, **kwargs):
         run = super()._run_docker_compose_command
+        if command[:1] == ["up"] and self._hitch_shared_runtime:
+            import hitch_shared_runtime as shared_runtime
+            from hitch_compose_preparation import compose_services
+            # Resolve the task's merged/interpolated configuration before our
+            # bind mounts can hide a conflicting task mount. Revalidate on every
+            # start, and never expose host snapshots to a privileged candidate.
+            try:
+                self._hitch_ownership_compose_path = self._write_ownership_overlay()
+                resolved = await run(["config", "--format", "json"])
+                shared_runtime.reject_conflicts(compose_services(resolved.stdout)[MAIN_SERVICE_NAME])
+                self._hitch_ownership_compose_path = self._write_ownership_overlay(include_shared_runtime=True)
+            except Exception as error:
+                raise _SharedRuntimeConfigurationError(str(error)) from error
         preparation = self._hitch_preparation
         if preparation:
             if command == ["build"]:
@@ -265,10 +282,10 @@ class HitchHarborDockerEnvironment(DockerEnvironment):
                 await self._verify_static_network()
             if self._hitch_benchmark:
                 await self._hitch_benchmark.prepare()
-        except BaseException:
+        except BaseException as error:
             # Harbor may abort setup before entering its normal teardown path.
             try:
-                await self.stop(delete=True)
+                await self.stop(delete=not isinstance(error, _SharedRuntimeConfigurationError))
             except BaseException:
                 pass
             raise
@@ -294,8 +311,8 @@ class HitchHarborDockerEnvironment(DockerEnvironment):
         finally:
             await super().stop(delete)
 
-    def _write_ownership_overlay(self) -> Path:
-        if self._hitch_shared_runtime:
+    def _write_ownership_overlay(self, *, include_shared_runtime=False) -> Path:
+        if include_shared_runtime and self._hitch_shared_runtime:
             import hitch_shared_runtime as shared_runtime
         services = {MAIN_SERVICE_NAME}
         if self._enable_egress_control:
@@ -319,8 +336,6 @@ class HitchHarborDockerEnvironment(DockerEnvironment):
             services.update(_mapping_names(document.get("services"), "services", source))
             for name, config in (document.get("services") or {}).items():
                 if isinstance(config, dict):
-                    if name == MAIN_SERVICE_NAME and self._hitch_shared_runtime:
-                        shared_runtime.reject_conflicts(config)
                     if 'platform' in config:
                         if config['platform'] is not None:
                             declared_platforms.add(name)
@@ -341,7 +356,7 @@ class HitchHarborDockerEnvironment(DockerEnvironment):
         service_overlays: dict[str, dict[str, Any]] = {}
         for name in sorted(services):
             config: dict[str, Any] = {}
-            if name == MAIN_SERVICE_NAME and self._hitch_shared_runtime:
+            if name == MAIN_SERVICE_NAME and include_shared_runtime and self._hitch_shared_runtime:
                 config["volumes"] = shared_runtime.compose_mounts(self._hitch_shared_runtime)
             # The benchmark default must not replace explicit per-service
             # architecture, e.g. an ARM QEMU sidecar beside an AMD64 candidate.

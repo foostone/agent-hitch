@@ -15,7 +15,7 @@ test("Harbor ownership environment labels every controlled Compose resource and 
   }));
   const source = path.resolve("integrations/harbor/hitch_harbor_environment.py");
   const script = String.raw`
-import importlib.util, json, pathlib, sys, types
+import asyncio, importlib.util, json, pathlib, sys, types
 root, source = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2])
 sys.path.insert(0, str(source.parent))
 class DockerEnvironment:
@@ -29,6 +29,13 @@ class DockerEnvironment:
     def _docker_compose_paths(self): return [pathlib.Path("base.json")]
     def _compose_env_vars(self, include_os_env=True):
         return {"HITCH_HOST_CREDENTIAL_HELPER_JSON": "host-only-helper", "SAFE_COMPOSE_VALUE": "kept"}
+    async def _run_docker_compose_command(self, command, *args, **kwargs):
+        self.commands = getattr(self, "commands", []) + [command]
+        return types.SimpleNamespace(stdout=json.dumps({"services": {"main": getattr(self, "resolved_main", {})}}))
+    async def start(self, force_build):
+        await self._run_docker_compose_command(["up", "--wait"])
+    async def stop(self, delete):
+        self.stop_requests = getattr(self, "stop_requests", []) + [delete]
 harbor = types.ModuleType("harbor")
 constants = types.ModuleType("harbor.constants"); constants.MAIN_SERVICE_NAME = "main"
 environments = types.ModuleType("harbor.environments")
@@ -94,6 +101,8 @@ assert gateway_overlay["services"]["database"] == {}
 (root / "artifact").mkdir()
 shared_paths = {"runtime_directory": str(root / "controller"), "artifact_directory": str(root / "artifact")}
 shared_env = module.HitchHarborDockerEnvironment(environment_dir=root, session_id="task__env", hitch_shared_runtime=shared_paths)
+assert "volumes" not in json.loads(shared_env._hitch_ownership_compose_path.read_text())["services"]["main"]
+asyncio.run(shared_env._run_docker_compose_command(["up", "--wait"]))
 shared_overlay = json.loads(shared_env._hitch_ownership_compose_path.read_text())
 assert len(shared_overlay["services"]["main"]["volumes"]) == 2
 assert all(mount["read_only"] for mount in shared_overlay["services"]["main"]["volumes"])
@@ -149,6 +158,28 @@ else: raise AssertionError("cross-repository image mapping accepted")
 try: module._validate_prebuilt_task_image("hitch-environment:mutable")
 except ValueError: pass
 else: raise AssertionError("mutable prebuilt task image accepted")
+original = (root / "docker-compose.yaml").read_text()
+try:
+    for raw in ({"privileged": "false"}, {"privileged": "$" + "{ENABLE_PRIVILEGED:-false}", "volumes": None},
+                {"extends": {"file": "template.yaml", "service": "template"}}):
+        (root / "docker-compose.yaml").write_text(json.dumps({"services": {"main": raw}}))
+        for resolved in ({"privileged": False, "volumes": None}, {"privileged": True},
+                         {"cap_add": ["SYS_ADMIN"]}, {"volumes": [{"type": "bind", "source": "/task", "target": "/opt/hitch"}]}):
+            candidate = module.HitchHarborDockerEnvironment(environment_dir=root, session_id="task__env", hitch_shared_runtime=shared_paths)
+            candidate.resolved_main = resolved
+            if resolved == {"privileged": False, "volumes": None}:
+                asyncio.run(candidate._run_docker_compose_command(["up", "--wait"]))
+                assert candidate.commands == [["config", "--format", "json"], ["up", "--wait"]]
+            else:
+                try: asyncio.run(candidate.start(False))
+                except ValueError: pass
+                else: raise AssertionError("unsafe resolved configuration accepted")
+                assert candidate.commands == [["config", "--format", "json"]]
+                assert candidate.stop_requests == [False]
+                assert "volumes" not in json.loads(candidate._hitch_ownership_compose_path.read_text())["services"]["main"]
+            candidate._hitch_ownership_temp_dir.cleanup()
+finally:
+    (root / "docker-compose.yaml").write_text(original)
 `;
   const result = spawnSync("python3", ["-c", script, directory, source], { encoding: "utf8" });
   assert.equal(result.status, 0, result.stderr || result.stdout);
