@@ -14,6 +14,33 @@ import sys
 import time
 
 
+def group_has_live_members(pgid):
+    try:
+        os.killpg(pgid, 0)
+    except ProcessLookupError:
+        return False
+    if sys.platform != "linux":
+        return True
+    # An orphan zombie can remain until init reaps it, but cannot hold files
+    # or execute. A live D-state helper, however, can outlast SIGKILL.
+    try:
+        with os.scandir("/proc") as entries:
+            for entry in entries:
+                if not entry.name.isdecimal():
+                    continue
+                try:
+                    with open(f"{entry.path}/stat") as stream:
+                        fields = stream.read().rpartition(")")[2].split()
+                except (FileNotFoundError, ProcessLookupError):
+                    continue
+                if int(fields[2]) == pgid and fields[0] not in ("Z", "X"):
+                    return True
+    except (OSError, ValueError, IndexError):
+        # Failed observation cannot authorize release of build ownership.
+        return True
+    return False
+
+
 async def stop_group(process):
     try:
         os.killpg(process.pid, signal.SIGTERM)
@@ -33,6 +60,8 @@ async def stop_group(process):
         except ProcessLookupError:
             pass
     await process.wait()
+    while group_has_live_members(process.pid):
+        await asyncio.sleep(0.05)
 
 
 async def supervise(command):

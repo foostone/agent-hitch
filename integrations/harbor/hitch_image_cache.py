@@ -9,6 +9,7 @@ import json
 import os
 from pathlib import Path
 import re
+import stat
 import sys
 import tempfile
 import time
@@ -117,6 +118,62 @@ def read_json(path):
         return None
 
 
+def image_matches_platform(info, platform):
+    variants = (None, "", "v8") if platform == "linux/arm64" else (None, "")
+    return (isinstance(info, dict)
+            and f"{info.get('Os', info.get('os'))}/{info.get('Architecture', info.get('architecture'))}" == platform
+            and info.get("Variant", info.get("variant")) in variants)
+
+
+def recover_contexts(directory):
+    # Called under the registry lock. Legacy/unrecognized directories have no
+    # ownership proof and are retained. Never use PID age or a time threshold.
+    for candidate in directory.glob(".context-*"):
+        if candidate.is_symlink() or not candidate.is_dir():
+            continue
+        try:
+            fd = os.open(candidate / ".owner.lock", os.O_RDWR | os.O_NOFOLLOW)
+        except OSError:
+            continue
+        with os.fdopen(fd, "a") as owner:
+            info = os.fstat(owner.fileno())
+            if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid():
+                continue
+            try:
+                fcntl.flock(owner, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                continue
+            if candidate.exists():
+                remove_snapshot(candidate)
+
+
+@asynccontextmanager
+async def context_snapshot(directory):
+    temporary = owner = token = None
+    try:
+        # Serialize publication of the directory and its already-held lock.
+        # No copier/builder starts before ownership has been established.
+        async with lock([directory / "context-registry.lock"]):
+            recover_contexts(directory)
+            temporary = Path(tempfile.mkdtemp(dir=directory, prefix=".context-"))
+            fd = os.open(temporary / ".owner.lock", os.O_CREAT | os.O_EXCL | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+            owner = os.fdopen(fd, "a")
+            fcntl.flock(owner, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        # Supervisors inherit this descriptor along with key/slot locks. A
+        # dead parent cannot make a live build's context eligible for recovery.
+        token = _LOCK_FDS.set((*_LOCK_FDS.get(), owner.fileno()))
+        yield temporary
+    finally:
+        try:
+            if temporary is not None:
+                remove_snapshot(temporary)
+        finally:
+            if token is not None:
+                _LOCK_FDS.reset(token)
+            if owner is not None:
+                owner.close()
+
+
 class ImagePreparationCache:
     def __init__(self, directory, env, slots=2):
         self.directory = Path(directory)
@@ -130,6 +187,18 @@ class ImagePreparationCache:
         self.env, self.slots, self.daemon = env, slots, None
 
     async def identity(self):
+        if self.env.get("DOCKER_BUILDKIT", "").lower() in ("0", "f", "false"):
+            raise UnsupportedBuild("legacy-builder")
+        try:
+            return await self._identity()
+        except UnsupportedBuild:
+            raise
+        except (RuntimeError, TimeoutError, OSError, ValueError, TypeError, AttributeError) as error:
+            # Optional capability probes must not prevent native Compose
+            # builds. Actual image build failures remain errors in prepare().
+            raise UnsupportedBuild("builder-capabilities") from error
+
+    async def _identity(self):
         # Source policies can deny or remap even digest-pinned base inputs.
         # Their files and external policy dependencies are outside this key.
         if self.env.get("EXPERIMENTAL_BUILDKIT_SOURCE_POLICY") or self.env.get("BUILDX_DEFAULT_POLICY"):
@@ -179,30 +248,44 @@ class ImagePreparationCache:
             self.daemon = {"id": data["ID"], "platform": f"linux/{architecture}", "builder": digest(builder), "builder_name": name, "proxy_config": digest(proxies)}
         return self.daemon
 
-    async def inspect(self, image):
-        raw = await docker(["image", "inspect", "--format", "{{json .}}", image], env=self.env, timeout=30, check=False)
+    async def inspect(self, image, *, platform=None):
+        selection = ["--platform", platform] if platform else []
+        raw = await docker(["image", "inspect", *selection, "--format", "{{json .}}", image], env=self.env, timeout=30, check=False)
         return json.loads(raw) if raw else None
+
+    async def _inspect_for_reuse(self, image, *, platform=None):
+        try:
+            return await self.inspect(image, platform=platform)
+        except (TimeoutError, OSError, ValueError) as error:
+            # A failed optional probe cannot certify reuse, but must not block
+            # native Compose. Post-build verification remains strict below.
+            raise UnsupportedBuild("image-inspection") from error
 
     async def check_bases(self, bases, platform):
         # Digest-pinned base definitions can contain inherited ONBUILD triggers.
         # Inspect the immutable config once; a registry error falls back to Harbor.
         for base in bases:
-            key = digest(["base-v1", base, platform])
+            # Older receipts did not validate variant selection.
+            key = digest(["base-v2", base, platform])
             path = self.directory / f"base-{key}.json"
             async with lock([self.directory / f"base-{key}.lock"]):
                 cached = read_json(path)
                 if cached == {"base": base, "platform": platform, "no_onbuild": True}:
                     continue
-                info = await self.inspect(base)
-                if info is None or f"{info.get('Os')}/{info.get('Architecture')}" != platform:
+                # Ask Docker to select the requested index member. A default
+                # inspection can refer to another pre-pulled variant, even
+                # when its config omits the optional Variant field. Older
+                # daemons lacking this option use the registry/fallback path.
+                info = await self._inspect_for_reuse(base, platform=platform)
+                if not image_matches_platform(info, platform):
                     try:
                         raw = await docker(["buildx", "imagetools", "inspect", base, "--format", "{{json .Image}}"], env=self.env, timeout=30)
                         info = json.loads(raw)
                         info = info.get(platform, info)
                         config = info.get("config")
-                        if not isinstance(config, dict) or info.get("os") != "linux" or f"linux/{info.get('architecture')}" != platform:
+                        if not isinstance(config, dict) or not image_matches_platform(info, platform):
                             raise UnsupportedBuild("base-platform")
-                    except (RuntimeError, asyncio.TimeoutError, ValueError, AttributeError) as error:
+                    except (RuntimeError, asyncio.TimeoutError, OSError, ValueError, AttributeError) as error:
                         raise UnsupportedBuild("base-config-unavailable") from error
                 else:
                     config = info.get("Config", {})
@@ -217,8 +300,7 @@ class ImagePreparationCache:
         source, spec = build_spec(service, self.env.get("DOCKER_DEFAULT_PLATFORM") or daemon["platform"])
         if self.directory.is_relative_to(source):
             raise UnsupportedBuild("cache-inside-context")
-        temporary = Path(tempfile.mkdtemp(dir=self.directory, prefix=".context-"))
-        try:
+        async with context_snapshot(self.directory) as temporary:
             context = temporary / "context"
             phase = time.monotonic()
             context_digest = await snapshot_context(source, context)
@@ -242,7 +324,7 @@ class ImagePreparationCache:
                 cached = read_json(record)
                 if isinstance(cached, dict) and cached.get("key") == key and _IMAGE_ID.fullmatch(str(cached.get("image"))):
                     phase = time.monotonic()
-                    info = await self.inspect(cached["image"])
+                    info = await self._inspect_for_reuse(cached["image"])
                     phases["probe_seconds"] = time.monotonic() - phase
                     if self.valid_image(info, key, spec["platform"]):
                         return {"image": info["Id"], "cache_key": key, "cache_hit": True, "seconds": time.monotonic() - started, "phases": phases}
@@ -267,11 +349,9 @@ class ImagePreparationCache:
                         raise RuntimeError("Hitch prepared image identity/platform mismatch")
                     atomic_json(record, {"key": key, "image": info["Id"], "platform": spec["platform"], "tag": tag})
                     return {"image": info["Id"], "cache_key": key, "cache_hit": False, "seconds": time.monotonic() - started, "phases": phases}
-        finally:
-            remove_snapshot(temporary)
 
     @staticmethod
     def valid_image(info, key, platform):
         return (isinstance(info, dict) and _IMAGE_ID.fullmatch(str(info.get("Id")))
-                and f"{info.get('Os')}/{info.get('Architecture')}" == platform
+                and image_matches_platform(info, platform)
                 and (info.get("Config", {}).get("Labels") or {}).get("io.hitch.prepared-key") == key)

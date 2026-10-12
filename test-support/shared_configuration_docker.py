@@ -31,13 +31,24 @@ async def main(root, image):
             ({"privileged": "${HITCH_SHARED_FIXTURE_PRIVILEGED:-true}"}, False),
             ({"cap_add": ["${HITCH_SHARED_FIXTURE_CAPABILITY:-SYS_ADMIN}"]}, False),
             ({"volumes": ["/unused-task-volume:/opt/hitch"], "inherited": True}, False),
+            ({"sidecars": {"worker": {"volumes_from": ["main"], "privileged": True}}}, False),
+            ({"sidecars": {"worker": {"volumes_from": ["main:ro"]}}}, False),
+            ({"sidecars": {"relay": {"volumes_from": ["main"]},
+                           "worker": {"volumes_from": ["relay"], "cap_add": ["SYS_ADMIN"]}}}, False),
+            ({"sidecars": {"worker": {"privileged": True}}}, False),
+            ({"sidecars": {"worker": {"pid": "service:main", "cap_add": ["SYS_ADMIN"]}}}, False),
+            ({"sidecars": {"worker": {"cap_add": ["NET_ADMIN"]}}}, True),
         ]
         for index, (definition, allowed) in enumerate(shared_cases):
             context = root / f"shared-{index}"; context.mkdir()
+            sidecars = definition.pop("sidecars", {})
             if definition.pop("inherited", False):
                 (context / "template.yaml").write_text(json.dumps({"services": {"base": definition}}))
                 definition = {"extends": {"file": "template.yaml", "service": "base"}}
-            (context / "docker-compose.yaml").write_text(json.dumps({"services": {"main": definition}}))
+            services = {"main": definition}
+            for name, config in sidecars.items():
+                services[name] = {"image": image, "command": ["sh", "-c", "sleep infinity"], **config}
+            (context / "docker-compose.yaml").write_text(json.dumps({"services": services}))
             trial = prefix + f"-shared-{index}"
             paths = TrialPaths(root / trial); paths.mkdir()
             shared = HitchHarborDockerEnvironment(
@@ -64,6 +75,8 @@ async def main(root, image):
             results.append({"case": index, "allowed": allowed, "status": "passed"})
         (root / "result.json").write_text(json.dumps(results, indent=2))
         print("shared configuration: resolved false values, inherited settings, unsafe privileges and mounts OK", flush=True)
+        print("volume inheritance: direct, readonly and transitive sidecar sharing refused before startup OK", flush=True)
+        print("sidecar privileges: privileged and SYS_ADMIN refused, unrelated capability allowed OK", flush=True)
     finally:
         for environment in environments:
             try:

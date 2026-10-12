@@ -42,12 +42,16 @@ def build_spec(service, default_platform):
     if service.get("pull_policy") not in (None, "build", "missing", "if_not_present", "never"):
         raise UnsupportedBuild("pull-policy")
     context = build.get("context")
+    dockerfile = build.get("dockerfile", "Dockerfile")
+    # Resolved config re-escapes paths too, so an existing '$$' sibling could
+    # otherwise be mistaken for Compose's actual '$' input tree or Dockerfile.
+    if any(isinstance(value, str) and "$" in value for value in (context, dockerfile)):
+        raise UnsupportedBuild("escaped-build-paths")
     if not isinstance(context, str) or not Path(context).is_absolute():
         raise UnsupportedBuild("nonlocal-context")
     source = Path(context)
     if source.resolve() != source or not source.is_dir():
         raise UnsupportedBuild("context-path")
-    dockerfile = build.get("dockerfile", "Dockerfile")
     if (not isinstance(dockerfile, str) or not dockerfile or "\\" in dockerfile
             or Path(dockerfile).is_absolute() or any(p in ("", ".", "..") for p in dockerfile.split("/"))):
         raise UnsupportedBuild("dockerfile-path")
@@ -58,6 +62,10 @@ def build_spec(service, default_platform):
     for values in (args, labels):
         if not isinstance(values, dict) or any(not isinstance(k, str) or not k or not isinstance(v, str) for k, v in values.items()):
             raise UnsupportedBuild("unresolved-build-values")
+        # Compose config serializes literal dollars differently from its
+        # execution plan. Keep native interpolation/escaping for such inputs.
+        if any("$" in key or "$" in value for key, value in values.items()):
+            raise UnsupportedBuild("escaped-build-values")
     if "BUILDKIT_SYNTAX" in args:
         # This reserved argument selects a frontend just like a # syntax
         # directive; even pinned frontends can introduce untracked inputs.
@@ -74,7 +82,12 @@ def pinned_dockerfile(source):
     with read_context():
         if source.stat().st_size > 1024 * 1024:
             raise UnsupportedBuild("dockerfile-size")
-        content = source.read_text(encoding="utf-8")
+        try:
+            content = source.read_text(encoding="utf-8")
+        except UnicodeDecodeError as error:
+            # Docker can accept non-UTF-8 comment bytes. Preserve its parser
+            # and the original input instead of decoding lossily for caching.
+            raise UnsupportedBuild("dockerfile-encoding") from error
     # Restrict parser directives and syntax we cannot unambiguously inspect.
     if "\0" in content or "<<" in content or re.search(r"(?im)^\s*#\s*escape\s*=", content):
         raise UnsupportedBuild("dockerfile-syntax")

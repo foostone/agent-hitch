@@ -7,7 +7,10 @@ import { spawnSync } from "node:child_process";
 import { ensureControllerRuntime, useControllerRuntimeDirectory } from "../src/controller-runtime/index.js";
 import { artifactDirectoryIntegrity, verifyPreparedArtifact } from "../src/artifacts/index.js";
 import { SharedRuntimeSnapshots } from "../src/evals/shared-runtime.js";
+import { validateEvalRequest } from "../src/evals/index.js";
 import { harborPreparedArtifact } from "../src/evals/prepared-harness.js";
+import { runHarborBackend } from "../src/backends/harbor/index.js";
+import type { HarborPreparedArtifactUse } from "../src/backends/harbor/index.js";
 import { nodeRuntimeHarnessFixture } from "../test-support/harbor-node-runtime-fixture.js";
 import { forceRemove } from "../test-support/helpers.js";
 
@@ -78,6 +81,52 @@ test("corrupt dependencies are rejected before a snapshot is published; upload r
   assert.throws(() => new SharedRuntimeSnapshots(base, controller, "typo"), /must be upload or readonly-bind/);
   const cancellation = new AbortController(); cancellation.abort();
   await assert.rejects(new SharedRuntimeSnapshots(base, controller, "readonly-bind").prepare(artifact, cancellation.signal), /abort/i);
+});
+
+test("Harbor imports and checks the selected snapshot after the source cache changes", { skip: process.platform !== "linux" }, async (t) => {
+  const root = await mkdtemp(path.join(tmpdir(), "hitch-shared-bridge-"));
+  t.after(() => forceRemove(root));
+  const controller = await ensureControllerRuntime({ root });
+  const fixture = await nodeRuntimeHarnessFixture(root);
+  const artifact = { ...harborPreparedArtifact(root, { ...fixture.manifest, executable: "node", entrypoint_args: [], cache_hit: false }), directory: fixture.directory };
+  const request = await validateEvalRequest({ dataset: "fixture@1.0", harness_ref: "pi@version:1.2.3", timeout_ms: 1_000, pass_env: ["FIXTURE_TOKEN"] });
+  const executable = path.join(root, "harbor-probe.mjs");
+  const python = process.env.HITCH_TEST_PYTHON_PATH || "python3";
+  await writeFile(executable, `#!/usr/bin/env node
+import { spawnSync } from "node:child_process";
+if (process.argv.includes("--version")) { console.log("harbor 0.21.0"); process.exit(0); }
+const result = spawnSync(${JSON.stringify(python)}, ["-c", "import hitch_benchmark; print(hitch_benchmark.__file__)"], { env: process.env, encoding: "utf8" });
+process.stdout.write(result.stdout || "");
+process.stderr.write(result.stderr || "");
+process.exit(result.status ?? 1);
+`, { mode: 0o755 });
+  const sourceBridge = path.join(controller.directory, "payload", "integrations", "harbor");
+  // The executable fixture imports the real bridge; no helper or model runs.
+  const env = { PATH: process.env.PATH, PYTHONPATH: sourceBridge,
+    HITCH_HOST_CREDENTIAL_HELPER_JSON: JSON.stringify({ version: 1, argv: [executable], credentialNames: ["FIXTURE_TOKEN"], timeoutMs: 1_000 }) };
+  async function run(name: string, preparedArtifact: HarborPreparedArtifactUse, expectedDirectory: string): Promise<void> {
+    const evalDirectory = path.join(root, name);
+    const result = await runHarborBackend({ root, evalId: `eval_${"a".repeat(32)}`, evalDirectory, request,
+      resolvedRevision: fixture.manifest.resolved_revision, runtimeDirectory: controller.directory,
+      runtimeId: controller.runtime_id, preparedArtifact, harborExecutable: executable, env });
+    const stderr = await readFile(path.join(evalDirectory, result.backend.stderr_path!), "utf8");
+    assert.equal(result.backend.process_exit_code, 0, stderr);
+    const imported = await readFile(path.join(evalDirectory, result.backend.stdout_path!), "utf8");
+    assert.equal(imported.trim(), path.join(expectedDirectory, "payload", "integrations", "harbor", "hitch_benchmark.py"));
+    const config = JSON.parse(await readFile(path.join(evalDirectory, result.backend.config_path), "utf8"));
+    assert.equal(config.agents[0].kwargs.hitch_runtime_dir, expectedDirectory);
+  }
+  await run("upload", artifact, controller.directory);
+  const prepared = await new SharedRuntimeSnapshots(path.join(root, "shared"), controller, "readonly-bind").prepare(artifact);
+  const original = path.join(sourceBridge, "hitch_benchmark.py");
+  await chmod(original, 0o644);
+  await writeFile(original, "raise RuntimeError('changed original bridge imported')\n");
+  await chmod(sourceBridge, 0o755);
+  await unlink(path.join(sourceBridge, "hitch_host_credentials.py"));
+  const snapshot = prepared.sharedRuntime!.runtime_directory;
+  await useControllerRuntimeDirectory(snapshot, controller.runtime_id);
+  await run("shared", prepared, snapshot);
+  await useControllerRuntimeDirectory(snapshot, controller.runtime_id);
 });
 
 test("shared runtime bridge enforces read-only mounts and verifier isolation", () => {

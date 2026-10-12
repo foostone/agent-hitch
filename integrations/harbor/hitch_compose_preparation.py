@@ -8,7 +8,7 @@ import tempfile
 import yaml
 
 from hitch_build_inputs import UnsupportedBuild, build_spec, digest, pinned_dockerfile
-from hitch_image_cache import ImagePreparationCache, atomic_json, docker
+from hitch_image_cache import ImagePreparationCache, atomic_json, docker, image_matches_platform
 
 _DEFAULT_COMMAND = ["sh", "-c", "sleep infinity"]
 _MANAGED_COMMAND = ["sh", "-c", 'trap \'kill "$child"; wait "$child"; exit 0\' TERM INT; sleep infinity & child=$!; wait "$child"']
@@ -72,6 +72,10 @@ def image_tag_key(reference):
     if ":" not in repository.rsplit("/", 1)[-1]:
         repository += ":latest"
     return f"{registry}/{repository}"
+
+
+def refreshes_latest(reference, policy):
+    return policy not in ("never", "build") and image_tag_key(reference).endswith(":latest")
 
 
 def require_independent_build_images(services):
@@ -140,6 +144,11 @@ class ComposePreparation:
             # A composition with unsupported inputs uses its original build path
             # as a whole, including inter-service dependencies and extra contexts.
             require_independent_build_images(services)
+            # Preserve documented latest refresh semantics across Compose
+            # versions. Leave the native choice of local or pulled image to up.
+            if any(service.get("image") and refreshes_latest(service["image"], service.get("pull_policy"))
+                   for service in builds.values()):
+                raise UnsupportedBuild("refreshable-build-image")
             plan = await run(["build", "--print"], check=False)
             if plan.return_code != 0:
                 # Older Compose versions and conflicting defaults retain their
@@ -193,16 +202,22 @@ class ComposePreparation:
         # A successful local inspection says nothing about a replacement image
         # pulled or rebuilt by up. Compose also refreshes latest under missing.
         if (policy not in (None, "never", "missing", "if_not_present")
-                or (policy != "never" and image_tag_key(reference).endswith(":latest"))):
+                or refreshes_latest(reference, policy)):
             return
-        raw = await docker(["image", "inspect", "--format", "{{json .}}", reference],
-                           env=env._compose_env_vars(), timeout=30, check=False)
-        if not raw:
+        try:
+            raw = await docker(["image", "inspect", "--format", "{{json .}}", reference],
+                               env=env._compose_env_vars(), timeout=30, check=False)
+            if not raw:
+                return
+            image = json.loads(raw)
+        except (TimeoutError, OSError, ValueError):
+            # Metadata is optional for native startup. The Docker supervisor
+            # has already drained command cleanup before a timeout reaches us.
+            self.record({"event": "fallback", "reason": "keepalive-image-inspection"})
             return
-        image = json.loads(raw)
-        variants = (None, "", "v8") if platform == "linux/arm64" else (None, "")
-        if platform and (f"{image.get('Os')}/{image.get('Architecture')}" != platform
-                         or image.get("Variant") not in variants):
+        if not isinstance(image, dict) or not isinstance(image.get("Config", {}), dict):
+            return
+        if platform and not image_matches_platform(image, platform):
             # Compose may pull/select a different variant if its default
             # local inspection does not match the requested runtime platform.
             return

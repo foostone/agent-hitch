@@ -39,10 +39,21 @@ def configure(raw: Any, candidate: bool) -> dict[str, str] | None:
     return result
 
 
-def reject_conflicts(config: dict[str, Any]) -> None:
-    """Validate Compose's resolved main service before adding shared mounts."""
-    if config.get("privileged") or any(str(cap).upper().removeprefix("CAP_") in {"ALL", "SYS_ADMIN"} for cap in (config.get("cap_add") or [])):
-        raise ValueError("shared runtime requires an unprivileged candidate without CAP_SYS_ADMIN")
+def reject_conflicts(services: dict[str, Any]) -> None:
+    """Validate resolved services before exposing any shared installation."""
+    # Volume inheritance can copy main's mounts into sidecars transitively,
+    # or import unknown external mounts into main. A read-only declaration
+    # cannot protect a mount inherited by a privileged consumer. Require
+    # explicit mounts throughout this composition instead of guessing which
+    # container aliases or inheritance chains remain isolated.
+    if any(service.get("volumes_from") for service in services.values()):
+        raise ValueError("shared runtime does not support Compose volume inheritance")
+    # A sidecar can also join main's PID namespace and enter its mount
+    # namespace. Apply the privilege boundary to the entire composition.
+    for service in services.values():
+        if service.get("privileged") or any(str(cap).upper().removeprefix("CAP_") in {"ALL", "SYS_ADMIN"} for cap in (service.get("cap_add") or [])):
+            raise ValueError("shared runtime requires unprivileged services without CAP_SYS_ADMIN")
+    config = services["main"]
     for mount in config.get("volumes") or []:
         if isinstance(mount, dict):
             target = mount.get("target")

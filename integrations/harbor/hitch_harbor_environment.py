@@ -174,7 +174,7 @@ class HitchHarborDockerEnvironment(DockerEnvironment):
             try:
                 self._hitch_ownership_compose_path = self._write_ownership_overlay()
                 resolved = await run(["config", "--format", "json"])
-                shared_runtime.reject_conflicts(compose_services(resolved.stdout)[MAIN_SERVICE_NAME])
+                shared_runtime.reject_conflicts(compose_services(resolved.stdout))
                 self._hitch_ownership_compose_path = self._write_ownership_overlay(include_shared_runtime=True)
             except Exception as error:
                 raise _SharedRuntimeConfigurationError(str(error)) from error

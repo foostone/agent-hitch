@@ -9,7 +9,7 @@ import sys
 import tempfile
 from types import SimpleNamespace
 import unittest
-from unittest.mock import Mock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "integrations/harbor"))
 import hitch_image_cache as cache_module
@@ -88,6 +88,57 @@ class CacheTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.builds), 1)
         self.assertEqual(list((self.root / "cache").glob(".context-*")), [])
 
+    async def test_dockerfile_encoding_failure_preserves_source_and_cleans_snapshot(self):
+        dockerfile = self.source / "Dockerfile"
+        for comment in (b"# caf\xe9\n", b"# truncated \xe2\x82\n"):
+            original = comment + f"FROM {BASE}\nCOPY value /value\n".encode()
+            dockerfile.write_bytes(original)
+            with self.subTest(comment=comment), self.assertRaisesRegex(UnsupportedBuild, "^dockerfile-encoding$"):
+                await self.cache.prepare(self.service)
+            self.assertEqual(dockerfile.read_bytes(), original)
+            self.assertEqual(list(self.cache.directory.glob(".context-*")), [])
+            self.assertEqual(list(self.cache.directory.glob("image-*.json")), [])
+            self.assertEqual(self.builds, [])
+        # Unicode comments remain eligible when they are valid UTF-8.
+        original = ("# café 中文\n" + f"FROM {BASE}\nCOPY value /value\n").encode()
+        dockerfile.write_bytes(original)
+        first = await self.cache.prepare(self.service)
+        second = await self.cache.prepare(self.service)
+        self.assertFalse(first["cache_hit"])
+        self.assertTrue(second["cache_hit"])
+        self.assertEqual(first["image"], second["image"])
+        self.assertEqual(dockerfile.read_bytes(), original)
+
+    async def test_legacy_builder_and_unavailable_capabilities_use_native_compose(self):
+        cases = [({"DOCKER_BUILDKIT": value}, None, None, "legacy-builder") for value in ("0", "false", "False", "f")]
+        for command in (("info",), ("buildx", "inspect"), ("buildx", "ls"), ("context", "show")):
+            for error in (RuntimeError("plugin unavailable"), TimeoutError(), OSError("unavailable")):
+                cases.append(({}, command, error, "builder-capabilities"))
+        for settings, command, failure, reason in cases:
+            with self.subTest(settings=settings, command=command, failure=type(failure).__name__):
+                env = SimpleNamespace(_compose_env_vars=lambda: settings, logger=logging.getLogger("test"),
+                                      trial_paths=SimpleNamespace(trial_dir=self.root / "trial"), session_id="candidate")
+                prep = ComposePreparation(env, cache_directory=str(self.root / "cache"))
+                async def compose(args, **kwargs):
+                    document = ({"services": {"main": self.service}} if args[0] == "config"
+                                else {"target": {"main": {}}})
+                    return SimpleNamespace(stdout=json.dumps(document), return_code=0)
+                async def unavailable(args, **kwargs):
+                    if command is None:
+                        self.fail("legacy builder must not require Buildx probes")
+                    if tuple(args[:len(command)]) == command:
+                        raise failure
+                    return await self.docker(args, **kwargs)
+                with patch.object(cache_module, "docker", unavailable):
+                    self.assertIsNone(await prep.build(compose))
+                self.assertEqual(prep.receipts, [{"event": "fallback", "reason": reason}])
+                self.assertEqual(prep.overlay, {})
+                self.assertIsNone(prep.path)
+        self.assertEqual(self.builds, [])
+        with patch.object(cache_module, "docker", AsyncMock(side_effect=asyncio.CancelledError)), \
+             self.assertRaises(asyncio.CancelledError):
+            await self.cache.identity()
+
     async def test_bytes_modes_args_target_dockerignore_invalidate(self):
         previous = await self.cache.prepare(self.service)
         original = (self.source / "value").stat()
@@ -142,6 +193,74 @@ class CacheTests(unittest.IsolatedAsyncioTestCase):
             await self.cache.prepare(self.service)
         self.assertEqual(self.builds[0]["content"], "first")
         self.assertFalse((await self.cache.prepare(self.service))["cache_hit"])
+
+    async def test_optional_image_inspection_failures_preserve_native_compose(self):
+        async def compose_call(args, **kwargs):
+            if args == ["build", "--print"]:
+                return SimpleNamespace(return_code=0, stdout=json.dumps({"target": {"main": {}}}))
+            self.assertEqual(args, ["config", "--format", "json"])
+            return SimpleNamespace(stdout=json.dumps({"services": {"main": self.service}}))
+
+        for stage in ("base", "registry", "cached"):
+            errors = (TimeoutError("metadata timeout"), OSError(errno.EIO, "metadata unavailable"),
+                      json.JSONDecodeError("invalid metadata", "x", 0), asyncio.CancelledError("cancelled"))
+            for index, error in enumerate(errors):
+                with self.subTest(stage=stage, error=type(error).__name__):
+                    directory = self.root / f"inspection-{stage}-{index}"
+                    cache = ImagePreparationCache(directory, {})
+                    selected = BASE
+                    if stage == "cached":
+                        selected = (await cache.prepare(self.service))["image"]
+                    records = {p.name: p.read_bytes() for p in directory.glob("image-*.json")}
+                    before = len(self.builds)
+
+                    async def unavailable(args, **kwargs):
+                        if args[:2] == ["image", "inspect"] and args[-1] == selected:
+                            if stage == "registry":
+                                return None
+                            raise error
+                        if stage == "registry" and args[:3] == ["buildx", "imagetools", "inspect"]:
+                            raise error
+                        return await self.docker(args, **kwargs)
+
+                    environment = SimpleNamespace(_compose_env_vars=lambda: {}, logger=logging.getLogger("test"),
+                        trial_paths=SimpleNamespace(trial_dir=self.root / "trial"), session_id=f"{stage}-{index}")
+                    preparation = ComposePreparation(environment, cache_directory=str(directory))
+                    with patch.object(cache_module, "docker", unavailable):
+                        if isinstance(error, asyncio.CancelledError):
+                            with self.assertRaises(asyncio.CancelledError) as raised:
+                                await preparation.build(compose_call)
+                            self.assertIs(raised.exception, error)
+                            self.assertEqual(preparation.receipts, [])
+                        else:
+                            self.assertIsNone(await preparation.build(compose_call))
+                            reason = "base-config-unavailable" if stage == "registry" else "image-inspection"
+                            self.assertEqual(preparation.receipts, [{"event": "fallback", "reason": reason}])
+                    self.assertEqual(len(self.builds), before)
+                    self.assertEqual(preparation.images, {})
+                    self.assertIsNone(preparation.path)
+                    self.assertEqual({p.name: p.read_bytes() for p in directory.glob("image-*.json")}, records)
+                    self.assertEqual(list(directory.glob(".context-*")), [])
+
+    async def test_built_image_inspection_failure_remains_an_error(self):
+        errors = (TimeoutError("final verification timeout"), OSError(errno.EIO, "image unavailable"),
+                  json.JSONDecodeError("invalid metadata", "x", 0), asyncio.CancelledError("cancelled"))
+        for index, error in enumerate(errors):
+            with self.subTest(error=type(error).__name__):
+                cache = ImagePreparationCache(self.root / f"built-inspection-{index}", {})
+
+                async def unavailable(args, **kwargs):
+                    if args[:2] == ["image", "inspect"] and args[-1].startswith("hitch-prepared:"):
+                        raise error
+                    return await self.docker(args, **kwargs)
+
+                before = len(self.builds)
+                with patch.object(cache_module, "docker", unavailable), self.assertRaises(type(error)) as raised:
+                    await cache.prepare(self.service)
+                self.assertIs(raised.exception, error)
+                self.assertEqual(len(self.builds), before + 1)
+                self.assertEqual(list(cache.directory.glob("image-*.json")), [])
+                self.assertEqual(list(cache.directory.glob(".context-*")), [])
 
     async def test_uninspectable_metadata_falls_back_without_publishing(self):
         async def compose_call(args, **kwargs):
@@ -251,6 +370,86 @@ class CacheTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.builds, [])
         self.assertEqual(list((self.root / "cache").glob("image-*.json")), [])
         self.assertEqual(list((self.root / "cache").glob(".context-*")), [])
+
+    async def test_literal_dollars_in_build_values_use_native_compose(self):
+        for kind in ("args", "labels"):
+            for values in ({"LITERAL": "$$foo"}, {"dollar$key": "value"}):
+                with self.subTest(kind=kind, values=values), self.assertRaisesRegex(UnsupportedBuild, "escaped-build-values"):
+                    await self.cache.prepare({"build": {**self.service["build"], kind: values}})
+        self.assertEqual(self.builds, [])
+
+    async def test_literal_dollars_in_build_paths_use_native_compose(self):
+        for name in ("source$one", "source$$one"):
+            directory = self.root / name
+            directory.mkdir()
+            (directory / "Dockerfile").write_text(f"FROM {BASE}\nCOPY value /value\n")
+            (directory / "value").write_text(name)
+        for name in ("Dockerfile$one", "Dockerfile$$one"):
+            (self.source / name).write_text(f"FROM {BASE}\nCOPY value /value\n")
+        for build in ({"context": str(self.root / "source$$one")},
+                      {"context": str(self.source), "dockerfile": "Dockerfile$$one"}):
+            with self.subTest(build=build), self.assertRaisesRegex(UnsupportedBuild, "escaped-build-paths"):
+                await self.cache.prepare({"build": build})
+        self.assertEqual(self.builds, [])
+
+    async def test_base_variants_and_old_receipts_cannot_certify_the_wrong_config(self):
+        cases = [
+            ({"Os": "linux", "Architecture": "arm64", "Variant": "v9", "Config": {}},
+             {"os": "linux", "architecture": "arm64", "variant": "v8", "config": {"OnBuild": ["ADD https://fixture.invalid /value"]}},
+             "inherited-onbuild"),
+            (None, {"os": "linux", "architecture": "arm64", "variant": "v9", "config": {}}, "base-config-unavailable"),
+            ({"Os": "linux", "Architecture": "arm64", "Variant": "v8", "Config": {"OnBuild": ["ADD https://fixture.invalid /value"]}},
+             None, "inherited-onbuild"),
+        ]
+        for index, (local, remote, reason) in enumerate(cases):
+            cache = ImagePreparationCache(self.root / f"variant-{index}", {})
+            legacy = cache.directory / f"base-{cache_module.digest(['base-v1', BASE, 'linux/arm64'])}.json"
+            legacy.write_text(json.dumps({"base": BASE, "platform": "linux/arm64", "no_onbuild": True}))
+            with self.subTest(case=index), patch.object(cache, "inspect", AsyncMock(return_value=local)), \
+                 patch.object(cache_module, "docker", AsyncMock(return_value=json.dumps(remote))), \
+                 self.assertRaisesRegex(UnsupportedBuild, reason):
+                await cache.check_bases([BASE], "linux/arm64")
+            self.assertEqual(list(cache.directory.glob("base-*.json")), [legacy])
+
+    async def test_context_recovery_preserves_live_legacy_and_symlink_entries(self):
+        directory = self.root / "cache"
+        legacy = directory / ".context-legacy"; legacy.mkdir()
+        (legacy / "value").write_text("unrecognized")
+        outside = self.root / "outside"; outside.mkdir()
+        (outside / "value").write_text("outside")
+        (directory / ".context-symlink").symlink_to(outside, target_is_directory=True)
+        async with cache_module.context_snapshot(directory) as live:
+            (live / "value").write_text("live")
+            async with cache_module.context_snapshot(directory):
+                self.assertEqual((live / "value").read_text(), "live")
+        self.assertFalse(live.exists())
+        self.assertEqual((legacy / "value").read_text(), "unrecognized")
+        self.assertEqual((outside / "value").read_text(), "outside")
+
+    async def test_context_recovery_removes_a_dead_copiers_readonly_partial_tree(self):
+        code = """
+import asyncio, os, sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+from hitch_image_cache import context_snapshot
+async def main():
+    async with context_snapshot(Path(sys.argv[2])) as stage:
+        context = stage / 'context'
+        context.mkdir()
+        (context / 'value').write_text('partial copy')
+        context.chmod(0o555)
+        os._exit(0)
+asyncio.run(main())
+"""
+        directory = self.root / "cache"
+        process = await asyncio.create_subprocess_exec(sys.executable, "-B", "-c", code,
+            str(Path(cache_module.__file__).parent), str(directory))
+        self.assertEqual(await process.wait(), 0)
+        abandoned = list(directory.glob(".context-*"))
+        self.assertEqual(len(abandoned), 1)
+        async with cache_module.context_snapshot(directory):
+            self.assertFalse(abandoned[0].exists())
+        self.assertEqual(list(directory.glob(".context-*")), [])
 
     async def test_hardlink_topology_cannot_alias_an_independent_warm_context(self):
         other = self.source / "other"

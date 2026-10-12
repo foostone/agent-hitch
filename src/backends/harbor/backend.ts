@@ -114,6 +114,8 @@ async function executeHarborBackend({
   prebuiltTaskImage,
   modelProxy,
 }: RunHarborBackendOptions): Promise<HarborBackendResult> {
+  // Host imports and capability checks must use the same payload as the job.
+  const executionRuntimeDirectory = preparedArtifact.sharedRuntime?.runtime_directory ?? runtimeDirectory;
   const backendDirectory = await ensureDir(requestedBackendDirectory ?? path.join(evalDirectory, "harbor"));
   if (logicalAttempt !== undefined && (!Number.isSafeInteger(logicalAttempt) || logicalAttempt < 1)) {
     throw invalidInput("Harbor logical attempt must be a positive safe integer");
@@ -129,7 +131,7 @@ async function executeHarborBackend({
       exitCode: 3,
     });
   }
-  if (hostCredentialHelper !== null) await assertHostCredentialRuntimeSupport(runtimeDirectory);
+  if (hostCredentialHelper !== null) await assertHostCredentialRuntimeSupport(executionRuntimeDirectory);
   const identity = await fingerprintExecutable(executable);
   const jobName = "job";
   const configPath = path.join(backendDirectory, "job.json");
@@ -139,7 +141,7 @@ async function executeHarborBackend({
     evalId,
     request,
     resolvedRevision,
-    runtimeDirectory,
+    runtimeDirectory: executionRuntimeDirectory,
     runtimeId,
     preparedArtifact,
     backendDirectory,
@@ -172,7 +174,7 @@ async function executeHarborBackend({
   try {
     invocation = await invokeHarbor(executable, ["run", "--config", configPath, "--yes"], {
       cwd: evalDirectory,
-      env: withBridgePythonPath(withHostCredentialPlaceholders(env, hostCredentialNames), runtimeDirectory),
+      env: withBridgePythonPath(withHostCredentialPlaceholders(env, hostCredentialNames), executionRuntimeDirectory),
       stdoutPath: path.join(backendDirectory, "stdout.log"),
       stderrPath: path.join(backendDirectory, "stderr.log"),
       ...(signal ? { signal } : {}),

@@ -1,4 +1,5 @@
 """Compose-level preparation preserves build sharing and task lifecycle choices."""
+import asyncio
 import copy
 import json
 import logging
@@ -56,6 +57,19 @@ class ComposeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('$$child', self.prep.path.read_text())
         self.assertEqual(self.prep.receipts[-1]["event"], "managed-keepalive")
         self.assertEqual(set(self.prep.overlay["main"]), {"command"})
+
+    async def test_unavailable_keepalive_metadata_preserves_native_startup(self):
+        for failure in (TimeoutError(), OSError("unavailable"), ValueError("invalid metadata")):
+            with self.subTest(failure=type(failure).__name__):
+                prep = ComposePreparation(self.env, managed_keepalive=True)
+                with patch("hitch_compose_preparation.docker", AsyncMock(side_effect=failure)):
+                    await prep.runtime(self.compose_call)
+                self.assertIsNone(prep.path)
+                self.assertEqual(prep.overlay, {})
+                self.assertEqual(prep.receipts, [{"event": "fallback", "reason": "keepalive-image-inspection"}])
+        with patch("hitch_compose_preparation.docker", AsyncMock(side_effect=asyncio.CancelledError)), \
+             self.assertRaises(asyncio.CancelledError):
+            await self.prep.runtime(self.compose_call)
 
     async def test_keepalive_skips_images_that_up_can_replace(self):
         for reference, policy in (("app:local", "always"), ("app:local", "daily"),
@@ -147,6 +161,25 @@ class ComposeTests(unittest.IsolatedAsyncioTestCase):
                     prepare.assert_not_awaited()
                 self.assertIsNone(prep.path)
 
+    async def test_refreshable_build_images_keep_native_pull_selection(self):
+        (self.root / "Dockerfile").write_text("FROM scratch\n")
+        for reference, policy in (("app:latest", None), ("app", "missing"),
+                                  ("docker.io/library/app:latest", "if_not_present")):
+            with self.subTest(reference=reference, policy=policy):
+                self.spec = {"services": {"main": {"build": {"context": str(self.root)},
+                                                   "image": reference, "pull_policy": policy}}}
+                prep = ComposePreparation(self.env, str(self.root / "cache"))
+                with patch.object(ImagePreparationCache, "identity", new_callable=AsyncMock, return_value={"platform": "linux/amd64"}), \
+                     patch.object(ImagePreparationCache, "prepare", new_callable=AsyncMock,
+                                  return_value={"image": "sha256:" + "a" * 64}) as prepare:
+                    try:
+                        self.assertIsNone(await prep.build(self.compose_call))
+                        prepare.assert_not_awaited()
+                        self.assertEqual(prep.receipts, [{"event": "fallback", "reason": "refreshable-build-image"}])
+                    finally:
+                        if prep.temporary:
+                            prep.temporary.cleanup()
+
     async def test_custom_runtime_declarations_and_entrypoints_are_preserved(self):
         for key in ("command", "entrypoint", "init", "stop_signal", "stop_grace_period", "pre_stop"):
             for content in (json.dumps({"services": {"main": {key: None}}}), f"services:\n  main:\n    {key}: null\n"):
@@ -161,6 +194,23 @@ class ComposeTests(unittest.IsolatedAsyncioTestCase):
             candidate = ComposePreparation(self.env, managed_keepalive=True)
             with patch("hitch_compose_preparation.docker", self.docker): await candidate.runtime(self.compose_call)
             self.assertIsNone(candidate.path)
+
+    async def test_nonrefreshing_latest_builds_remain_cacheable(self):
+        (self.root / "Dockerfile").write_text("FROM scratch\n")
+        for policy in ("never", "build"):
+            with self.subTest(policy=policy):
+                self.spec = {"services": {"main": {"build": {"context": str(self.root)},
+                                                   "image": "app:latest", "pull_policy": policy}}}
+                prep = ComposePreparation(self.env, str(self.root / "cache"))
+                try:
+                    with patch.object(ImagePreparationCache, "identity", new_callable=AsyncMock, return_value={"platform": "linux/amd64"}), \
+                         patch.object(ImagePreparationCache, "prepare", new_callable=AsyncMock,
+                                      return_value={"image": "sha256:" + "a" * 64}) as prepare:
+                        self.assertEqual(await prep.build(self.compose_call), "prepared")
+                        prepare.assert_awaited_once()
+                finally:
+                    if prep.temporary:
+                        prep.temporary.cleanup()
 
     async def test_force_build_bypasses_cache(self):
         self.prep.cache_directory = str(self.root / "cache")
@@ -305,6 +355,29 @@ class ComposeTests(unittest.IsolatedAsyncioTestCase):
         finally:
             if prep.temporary:
                 prep.temporary.cleanup()
+
+    async def test_non_utf8_dockerfile_falls_back_before_preparing_any_service(self):
+        services = {}
+        for name in ("main", "worker"):
+            context = self.root / name
+            context.mkdir()
+            (context / "Dockerfile").write_bytes(b"FROM scratch\n")
+            services[name] = {"build": {"context": str(context)}}
+        original = b"# caf\xe9\nFROM scratch\n"
+        (self.root / "worker/Dockerfile").write_bytes(original)
+        self.spec = {"services": services}
+        original_spec = copy.deepcopy(self.spec)
+        prep = ComposePreparation(self.env, str(self.root / "cache"))
+        with patch.object(ImagePreparationCache, "identity", new_callable=AsyncMock, return_value={"platform": "linux/amd64"}), \
+             patch.object(ImagePreparationCache, "prepare", new_callable=AsyncMock) as prepare:
+            self.assertIsNone(await prep.build(self.compose_call))
+            prepare.assert_not_awaited()
+        self.assertEqual(prep.receipts, [{"event": "fallback", "reason": "dockerfile-encoding"}])
+        self.assertEqual(prep.images, {})
+        self.assertEqual(prep.overlay, {})
+        self.assertIsNone(prep.path)
+        self.assertEqual(self.spec, original_spec)
+        self.assertEqual((self.root / "worker/Dockerfile").read_bytes(), original)
 
     async def test_compose_warnings_do_not_break_json_or_change_services(self):
         self.assertEqual(compose_services('warning: ${UNSET} defaults to empty\n' + json.dumps(self.spec)), self.spec['services'])

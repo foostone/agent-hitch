@@ -7,12 +7,14 @@ import signal
 import subprocess
 import sys
 import tempfile
+from types import SimpleNamespace
 import unittest
-from unittest.mock import patch
+from unittest.mock import AsyncMock, Mock, mock_open, patch
 
 BRIDGE = Path(__file__).resolve().parents[1] / "integrations/harbor"
 sys.path.insert(0, str(BRIDGE))
 import hitch_image_cache as cache_module
+import hitch_build_process as process_module
 real_docker = cache_module.docker
 
 
@@ -21,6 +23,53 @@ class BuildProcessTests(unittest.IsolatedAsyncioTestCase):
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
         self.root = Path(self.temporary.name).resolve()
+
+    async def test_sigkill_delivery_does_not_release_a_live_helpers_lock(self):
+        killed = asyncio.Event()
+        released = False
+        key = self.root / "retained.lock"
+        process = SimpleNamespace(pid=123456789, wait=AsyncMock(return_value=0))
+
+        def killpg(pgid, signum):
+            self.assertEqual(pgid, process.pid)
+            if released:
+                raise ProcessLookupError
+            if signum == signal.SIGKILL:
+                killed.set()
+
+        async def cleanup():
+            async with cache_module.lock([key]):
+                await process_module.stop_group(process)
+
+        with patch.object(process_module.os, "killpg", killpg), \
+             patch.object(process_module.sys, "platform", "other-posix"), \
+             patch.object(process_module, "time", SimpleNamespace(monotonic=Mock(side_effect=[0, 6]))):
+            task = asyncio.create_task(cleanup())
+            try:
+                await asyncio.wait_for(killed.wait(), 1)
+                await asyncio.sleep(0.01)
+                self.assertFalse(task.done(), "SIGKILL delivery released ownership before exit")
+                with key.open("a") as handle, self.assertRaises(BlockingIOError):
+                    fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            finally:
+                released = True
+                await asyncio.wait_for(task, 1)
+        with key.open("a") as handle:
+            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+    def test_linux_liveness_distinguishes_blocked_helpers_from_zombies(self):
+        for state, alive in (("D", True), ("S", True), ("Z", False), ("X", False)):
+            listing = Mock()
+            listing.__enter__ = Mock(return_value=iter([SimpleNamespace(name="42", path="/proc/42")]))
+            listing.__exit__ = Mock(return_value=False)
+            with self.subTest(state=state), patch.object(process_module.sys, "platform", "linux"), \
+                 patch.object(process_module.os, "killpg"), patch.object(process_module.os, "scandir", return_value=listing), \
+                 patch("builtins.open", mock_open(read_data=f"42 (helper) with spaces) {state} 1 321 0\n")):
+                self.assertEqual(process_module.group_has_live_members(321), alive)
+        with patch.object(process_module.sys, "platform", "linux"), \
+             patch.object(process_module.os, "killpg"), \
+             patch.object(process_module.os, "scandir", side_effect=PermissionError):
+            self.assertTrue(process_module.group_has_live_members(321))
 
     async def test_output_backpressure_errors_and_closed_output_timeout(self):
         executable = self.root / "docker"
@@ -58,18 +107,29 @@ class BuildProcessTests(unittest.IsolatedAsyncioTestCase):
         )
         executable.chmod(0o700)
         paths = [self.root / "key.lock", self.root / "slot.lock"]
+        source = self.root / "input"; source.mkdir()
+        (source / "Dockerfile").write_text("FROM scratch\nCOPY value /value\n")
+        (source / "value").write_text("immutable input")
+        cache_directory = self.root / "cache"
         code = """
 import asyncio, os, sys
 from pathlib import Path
+from unittest.mock import AsyncMock
 sys.path.insert(0, sys.argv[1])
-from hitch_image_cache import docker, lock
+from hitch_image_cache import ImagePreparationCache, lock
 async def main():
+    # Exercise real context copies, kernel locks and processes on both CI OSes;
+    # metadata support and daemon responses are fixtures for this lifetime test.
+    os.listxattr = lambda *_args, **_kwargs: []
+    cache = ImagePreparationCache(Path(sys.argv[4]), dict(os.environ))
+    cache.identity = AsyncMock(return_value={'id':'test', 'platform':'linux/amd64', 'builder_name':'default'})
+    cache.inspect = AsyncMock(return_value=None)
     async with lock([Path(sys.argv[2])]):
         async with lock([Path(sys.argv[3])]):
-            await docker(['buildx', 'build'], env=dict(os.environ), timeout=None)
+            await cache.prepare({'build': {'context':sys.argv[5]}})
 asyncio.run(main())
 """
-        parent = subprocess.Popen([sys.executable, "-B", "-c", code, str(BRIDGE), *map(str, paths)],
+        parent = subprocess.Popen([sys.executable, "-B", "-c", code, str(BRIDGE), *map(str, paths), str(cache_directory), str(source)],
                                   env={**os.environ, "PATH": str(self.root)}, start_new_session=True,
                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         try:
@@ -83,6 +143,10 @@ asyncio.run(main())
                     await asyncio.sleep(0.01)
             os.killpg(parent.pid, signal.SIGKILL)
             await asyncio.to_thread(parent.wait, 5)
+            snapshots = list(cache_directory.glob(".context-*"))
+            self.assertEqual(len(snapshots), 1)
+            async with cache_module.context_snapshot(cache_directory):
+                self.assertEqual((snapshots[0] / "context/value").read_text(), "immutable input")
             async with asyncio.timeout(8):
                 while True:
                     try:
@@ -112,6 +176,9 @@ asyncio.run(main())
                             except BlockingIOError:
                                 pass
                         await asyncio.sleep(0.01)
+            async with cache_module.context_snapshot(cache_directory):
+                self.assertFalse(snapshots[0].exists(), "dead parent's context was not reclaimed")
+            self.assertEqual(list(cache_directory.glob(".context-*")), [])
         finally:
             if parent.poll() is None:
                 os.killpg(parent.pid, signal.SIGKILL)

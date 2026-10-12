@@ -61,8 +61,26 @@ class SharedMountTests(unittest.IsolatedAsyncioTestCase):
             {"privileged": True}, {"cap_add": ["SYS_ADMIN"]}, {"cap_add": ["CAP_SYS_ADMIN"]},
         ]:
             with self.assertRaises(ValueError):
-                shared.reject_conflicts(config)
-        shared.reject_conflicts({"volumes": ["/host:/workspace:rw"], "cap_add": ["NET_ADMIN"]})
+                shared.reject_conflicts({"main": config})
+        shared.reject_conflicts({"main": {"volumes": ["/host:/workspace:rw"], "cap_add": ["NET_ADMIN"]}})
+
+    def test_volume_inheritance_cannot_expose_shared_installations(self):
+        for services in (
+            {"main": {}, "worker": {"privileged": True, "volumes_from": ["main"]}},
+            {"main": {}, "worker": {"volumes_from": ["main:ro"]}},
+            {"main": {}, "relay": {"volumes_from": ["main"]},
+             "worker": {"cap_add": ["SYS_ADMIN"], "volumes_from": ["relay"]}},
+            {"main": {"volumes_from": ["container:external"]}},
+        ):
+            with self.subTest(services=services), self.assertRaisesRegex(ValueError, "volume inheritance"):
+                shared.reject_conflicts(services)
+
+    def test_sidecar_privileges_cannot_bypass_the_mount_boundary(self):
+        for worker in ({"privileged": True}, {"pid": "service:main", "cap_add": ["SYS_ADMIN"]},
+                       {"cap_add": ["ALL"]}, {"cap_add": ["CAP_SYS_ADMIN"]}):
+            with self.subTest(worker=worker), self.assertRaisesRegex(ValueError, "unprivileged services"):
+                shared.reject_conflicts({"main": {}, "worker": worker})
+        shared.reject_conflicts({"main": {}, "worker": {"cap_add": ["NET_ADMIN"]}})
 
     def test_missing_and_symlink_sources_do_not_become_empty_mounts(self):
         broken = {**self.raw, "artifact_directory": str(self.root / "missing")}

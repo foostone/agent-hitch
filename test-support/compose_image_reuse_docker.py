@@ -7,6 +7,7 @@ import json
 import os
 from pathlib import Path
 import sys
+import time
 import uuid
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "integrations/harbor"))
@@ -122,7 +123,7 @@ async def implicit_collision(root, prefix, *, cached, implicit_service, qualifie
                 await docker(["image", "rm", json.loads(record.read_text())["tag"]], env=process_env, check=False)
 
 
-async def main(root):
+async def main(root, group="all"):
     # Bake can race two exports to the same tag even with Compose's parallel
     # limit set. Exercise native sequential publication in both test arms.
     os.environ.update(COMPOSE_BAKE="false", COMPOSE_PARALLEL_LIMIT="1")
@@ -130,26 +131,35 @@ async def main(root):
     prefix = "hitch-compose-reuse-" + uuid.uuid4().hex[:12]
     results = []
     failures = []
-    for cached, stale, qualified in [(False, False, False), (True, False, False),
-                                     (True, True, False), (True, False, True)]:
+    assert group in ("all", "explicit", "main", "worker"), group
+    explicit_cases = [(False, False, False), (True, False, False), (True, True, False), (True, False, True)]
+    for cached, stale, qualified in explicit_cases if group in ("all", "explicit") else []:
         name = f"cache-{int(cached)}-stale-{int(stale)}-qualified-{int(qualified)}"
+        started = time.monotonic()
         try:
             results.append(await scenario(root / name, prefix + "-" + name,
                                           cached=cached, stale=stale, qualified=qualified))
         except Exception as error:
             failures.append({"case": name, "error": str(error)})
+        finally:
+            print(json.dumps({"case": name, "seconds": time.monotonic() - started}), flush=True)
     for implicit_service in ("main", "worker"):
+        if group not in ("all", implicit_service):
+            continue
         for cached, qualified in ((False, False), (True, False), (True, True)):
             name = f"implicit-{implicit_service}-cache-{int(cached)}-qualified-{int(qualified)}"
+            started = time.monotonic()
             try:
                 results.append(await implicit_collision(root / name, prefix + "-" + name,
                                                        cached=cached, implicit_service=implicit_service, qualified=qualified))
             except Exception as error:
                 failures.append({"case": name, "error": str(error)})
+            finally:
+                print(json.dumps({"case": name, "seconds": time.monotonic() - started}), flush=True)
     evidence = {"results": results, "failures": failures}
     (root / "result.json").write_text(json.dumps(evidence, indent=2))
     assert not failures, json.dumps(evidence, indent=2)
-    print("Compose image reuse: explicit and implicit collisions, native controls, cold cache, stale tags and aliases OK", flush=True)
+    print(f"Compose image reuse [{group}]: requested collision cases and native controls OK", flush=True)
 
 
 async def image_mounts(root, runner_image):
@@ -205,7 +215,9 @@ async def image_mounts(root, runner_image):
 
 
 if __name__ == "__main__":
-    if len(sys.argv) == 3:
+    if len(sys.argv) == 3 and sys.argv[2].startswith("--group="):
+        asyncio.run(main(sys.argv[1], sys.argv[2].removeprefix("--group=")))
+    elif len(sys.argv) == 3:
         asyncio.run(image_mounts(*sys.argv[1:]))
     else:
         asyncio.run(main(sys.argv[1]))

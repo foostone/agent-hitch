@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import time
 from types import SimpleNamespace
 import uuid
 
@@ -61,6 +62,15 @@ async def main(root, base_image):
     native_images = set()
     preparations = []
     results = {"platforms": [], "conflicts": [], "ignored": []}
+    last_phase = time.monotonic()
+
+    def phase(name):
+        nonlocal last_phase
+        now = time.monotonic()
+        timing = {"phase": name, "seconds": now - last_phase}
+        results.setdefault("timings", []).append(timing)
+        print(json.dumps(timing), flush=True)
+        last_phase = now
 
     def preparation():
         instance = ComposePreparation(env, str(cache))
@@ -90,6 +100,7 @@ async def main(root, base_image):
             results["platforms"].append(prep.receipts[0])
         assert keys[0] != keys[1] and keys[0] == keys[2]
         assert results["platforms"][-1]["cache_hit"]
+        phase("build-platforms")
 
         service["platform"] = "linux/amd64"
         definition()
@@ -103,6 +114,7 @@ async def main(root, base_image):
             assert prep.receipts == [{"event": "fallback", "reason": "compose-build-plan"}]
             results["conflicts"].append({"exported": exported, "fallback": True})
         environment.pop("DOCKER_DEFAULT_PLATFORM", None)
+        phase("platform-conflicts")
 
         # Actual permissions matter here; root can read mode 000 and does not
         # encounter this failure. Unit tests also inject EACCES on every host.
@@ -128,6 +140,7 @@ async def main(root, base_image):
                         ignored.rmdir()
                     else:
                         ignored.unlink()
+        phase("ignored-permissions")
         # Docker's directory COPY preserves links. An independent snapshot
         # must not silently split them or alias an unlinked context's key.
         os.link(context / "value", context / "other")
@@ -138,6 +151,7 @@ async def main(root, base_image):
         assert prep.receipts == [{"event": "fallback", "reason": "context-hardlinks"}]
         results["hardlinks"] = {"native_passed": True, "fallback": True}
         (context / "other").unlink()
+        phase("hardlinks")
 
         # Git metadata may live outside the build context, so copying its
         # bytes into an unrelated cache directory loses requested labels.
@@ -165,6 +179,58 @@ async def main(root, base_image):
         assert await prep.build(run) is None
         assert prep.receipts == [{"event": "fallback", "reason": "git-build-metadata"}]
         results["git_labels"] = {"native_labels": labels, "fallback": True}
+        phase("git-labels")
+        environment.pop("BUILDX_GIT_LABELS", None)
+        environment["COMPOSE_BAKE"] = "false"
+        (context / "Dockerfile").write_text("FROM scratch\nARG LITERAL\nENV OBSERVED=$LITERAL\n")
+        service = {"image": tag, "platform": "linux/amd64", "build": {"context": str(context),
+            "args": {"LITERAL": "$$foo"}, "labels": {"fixture.literal": "$$bar"}}}
+        definition()
+        await native_build()
+        async def literal_values(image):
+            config = json.loads((await command(["image", "inspect", "--format", "{{json .Config}}", image])).stdout)
+            return {"env": config["Env"], "label": config["Labels"]["fixture.literal"]}
+        native = await literal_values(tag)
+        assert "OBSERVED=$foo" in native["env"] and native["label"] == "$bar", native
+        prep = preparation()
+        fallback = await prep.build(run) is None
+        observed = await literal_values(prep.images.get("main", tag))
+        results["dollar_literals"] = {"native": native, "prepared": observed, "fallback": fallback}
+        (root / "dollar-result.json").write_text(json.dumps(results["dollar_literals"], indent=2) + "\n")
+        assert fallback and observed == native, results["dollar_literals"]
+        assert prep.receipts == [{"event": "fallback", "reason": "escaped-build-values"}]
+        phase("literal-values")
+        results["dollar_paths"] = []
+        for kind in ("context", "dockerfile"):
+            directory = root / ("literal-" + kind)
+            directory.mkdir()
+            build = {"context": str(directory)}
+            for suffix, marker in (("$one", "native"), ("$$one", "wrong")):
+                if kind == "context":
+                    selected = directory / ("source" + suffix)
+                    selected.mkdir()
+                    dockerfile = selected / "Dockerfile"
+                else:
+                    dockerfile = directory / ("Dockerfile" + suffix)
+                dockerfile.write_text(f"FROM scratch\nENV SELECTED={marker}\n")
+            if kind == "context":
+                build["context"] = str(directory / "source$$one")
+            else:
+                build["dockerfile"] = "Dockerfile$$one"
+            service = {"image": tag, "platform": "linux/amd64", "build": build}
+            definition()
+            await native_build()
+            native = json.loads((await command(["image", "inspect", "--format", "{{json .Config.Env}}", tag])).stdout)
+            assert "SELECTED=native" in native, native
+            prep = preparation()
+            fallback = await prep.build(run) is None
+            observed = json.loads((await command(["image", "inspect", "--format", "{{json .Config.Env}}", prep.images.get("main", tag)])).stdout)
+            evidence = {"kind": kind, "native": native, "prepared": observed, "fallback": fallback}
+            results["dollar_paths"].append(evidence)
+            (root / "dollar-paths-result.json").write_text(json.dumps(results["dollar_paths"], indent=2) + "\n")
+            assert fallback and observed == native, evidence
+            assert prep.receipts == [{"event": "fallback", "reason": "escaped-build-paths"}]
+            phase("literal-" + kind)
         # The compose file now models Harbor's generated base definition; no
         # task file declares a custom keepalive. Inspect real local metadata
         # without starting the scratch image or pulling another architecture.
@@ -190,10 +256,13 @@ async def main(root, base_image):
             if managed:
                 assert set(runtime.overlay["main"]) == {"command"}
             results["runtime_platforms"].append({"explicit": explicit, "default": default, "managed": managed})
+        phase("runtime-platforms")
         (root / "result.json").write_text(json.dumps(results, indent=2) + "\n")
         print("Compose build inputs: dotenv platforms, warm identity, native conflicts and ignored input fallback OK", flush=True)
         print("context metadata: native hardlinks and Git-derived labels preserved by fallback OK", flush=True)
         print("runtime platform: explicit and dotenv selection, mismatch refusal and probe isolation OK", flush=True)
+        print("Compose literal dollars: native build args and labels preserved by fallback OK", flush=True)
+        print("Compose literal paths: native context and Dockerfile selected despite dollar siblings OK", flush=True)
         if os.geteuid() == 0:
             print("unreadable input cases skipped: root can read mode 000", flush=True)
     finally:
