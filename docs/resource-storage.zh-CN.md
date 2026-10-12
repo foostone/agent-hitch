@@ -158,6 +158,8 @@ bridge 在 Harbor 的实际环境目录上读取 Compose 最终解析后的构�
 
 目前缓存支持普通文件/目录的本地上下文、标准 Dockerfile、固定摘要基础镜像、build args、target 和 labels。基础镜像配置也检查继承的 ONBUILD。可变基础镜像、自定义 frontend、ADD、RUN 外部挂载、SSH/secrets、额外上下文、符号链接/特殊文件/xattr、显式 pull/no_cache 等不能完整确定输入的配置，整组 Compose 保留原构建路径。宿主 Python 不提供扩展属性检查（如 macOS），或文件系统不支持、拒绝该检查时，也回退原构建流程，不假定扩展属性为空。首次获取基础镜像配置可能需要 registry；校验后的固定摘要配置可在后续直接复用。force_build 绕过准备缓存。只有 Harbor 显式发出的 build 请求进入缓存；已选择预构建镜像时，up 保留原有镜像及 pull policy 的优先级。
 
+如果一个服务构建的镜像名还被其他服务引用，整组 Compose 回退原构建路径，由 Compose 发布共享 tag 并处理 pull policy，避免冷启动缺少镜像或复用旧 tag。检测包含默认 latest、Docker Hub 名称别名及多个构建服务使用同名镜像的情况。未显式指定 image 的构建服务与仅声明 image 的服务混用时，也保守回退，因为后者可能引用 Compose 自动生成的镜像名。显式名称互不依赖的服务仍可使用缓存。
+
 命中后用不可变镜像 ID 启动，移除对应 build 字段并设置 pull_policy=never，防止 up 再次构建。候选、验证器和配套服务仍各自创建容器、可写层、工作目录和日志；缓存目录不挂入任何任务容器，评分、产物传递、资源和网络限制不变。候选预构建镜像参数不会传递成验证器的镜像。
 
 managed keepalive 只替换 Harbor 默认的 sh/sleep 保活命令，让 shell 接收停止信号、终止并等待 sleep、正常退出。任务声明 command、entrypoint、init、停止信号/超时或 pre_stop，镜像含 ENTRYPOINT 或使用其他停止信号时，保留其行为。不会缩短用户停止宽限期或复用有状态验证器。

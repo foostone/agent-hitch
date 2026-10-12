@@ -29,6 +29,47 @@ def compose_services(output):
     raise UnsupportedBuild("compose-config-output")
 
 
+def image_tag_key(reference):
+    # Compare Compose-resolved names using Docker's familiar-name defaults.
+    # Digest references are not mutable build tags. Keep their identity intact.
+    if "@" in reference:
+        return reference
+    registry, separator, repository = reference.partition("/")
+    if not separator or (registry != "localhost" and "." not in registry
+                         and ":" not in registry and registry == registry.lower()):
+        registry, repository = "docker.io", reference
+    if registry == "index.docker.io":
+        registry = "docker.io"
+    if registry == "docker.io" and "/" not in repository:
+        repository = "library/" + repository
+    if ":" not in repository.rsplit("/", 1)[-1]:
+        repository += ":latest"
+    return f"{registry}/{repository}"
+
+
+def require_independent_build_images(services):
+    references = {}
+    unnamed_build = False
+    image_only = False
+    for service in services.values():
+        builds = bool(service.get("build"))
+        reference = service.get("image")
+        if reference:
+            references.setdefault(image_tag_key(reference), []).append(builds)
+        elif builds:
+            unnamed_build = True
+        if not builds:
+            image_only = True
+    # Cached builds publish private tags, not Compose's shared mutable names.
+    # Leave tag publication, pull policy and competing producers to Compose.
+    if any(len(uses) > 1 and any(uses) for uses in references.values()):
+        raise UnsupportedBuild("shared-build-image")
+    # An image-only service can also consume a project-generated build tag.
+    # Without an explicit producer name, conservatively preserve Compose.
+    if unnamed_build and image_only:
+        raise UnsupportedBuild("implicit-build-image")
+
+
 class ComposePreparation:
     def __init__(self, environment, cache_directory=None, build_slots=2, managed_keepalive=False):
         self.environment = environment
@@ -62,6 +103,7 @@ class ComposePreparation:
             builds = {name: value for name, value in services.items() if value.get("build")}
             # A composition with unsupported inputs uses its original build path
             # as a whole, including inter-service dependencies and extra contexts.
+            require_independent_build_images(services)
             daemon = await cache.identity()
             for service in builds.values():
                 context, spec = build_spec(service, cache.env.get("DOCKER_DEFAULT_PLATFORM") or daemon["platform"])

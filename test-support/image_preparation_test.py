@@ -11,7 +11,7 @@ import sys
 import tempfile
 from types import SimpleNamespace
 import unittest
-from unittest.mock import Mock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "integrations/harbor"))
 import hitch_image_cache as cache_module
@@ -381,6 +381,69 @@ class ComposeTests(unittest.IsolatedAsyncioTestCase):
         self.prep.force_build = True
         async def forbidden(*args): raise AssertionError("cache must not inspect force-build inputs")
         self.assertIsNone(await self.prep.build(forbidden))
+
+    async def test_shared_build_tags_fall_back_before_preparation(self):
+        cases = [
+            ("app:local", "app:local"),
+            ("app", "app:latest"),
+            ("app:local", "docker.io/library/app:local"),
+            ("index.docker.io/app", "library/app:latest"),
+            ("team/app", "docker.io/team/app:latest"),
+            ("localhost:5000/team/app", "localhost:5000/team/app:latest"),
+            ("[::1]:5000/app", "[::1]:5000/app:latest"),
+            (None, "project-main:latest"),
+        ]
+        for built, consumed in cases:
+            for consumer_build in (False, True):
+                if built is None and consumer_build:
+                    continue
+                with self.subTest(built=built, consumed=consumed, consumer_build=consumer_build):
+                    producer = {"build": {"context": str(self.root)}}
+                    if built is not None:
+                        producer["image"] = built
+                    consumer = {"image": consumed, "pull_policy": "never"}
+                    if consumer_build:
+                        consumer["build"] = {"context": str(self.root / "other")}
+                    # Include an unrelated build first: fallback must cover the
+                    # entire composition without publishing a partial overlay.
+                    self.spec = {"services": {
+                        "unrelated": {"build": {"context": str(self.root)}, "image": "other:local"},
+                        "main": producer, "worker": consumer,
+                    }}
+                    original = copy.deepcopy(self.spec)
+                    prep = ComposePreparation(self.env, str(self.root / "cache"))
+                    with patch.object(ImagePreparationCache, "identity", new_callable=AsyncMock,
+                                      side_effect=AssertionError("shared-image composition reached cache probing")) as identity:
+                        self.assertIsNone(await prep.build(self.compose_call))
+                        identity.assert_not_awaited()
+                    reason = "implicit-build-image" if built is None else "shared-build-image"
+                    self.assertEqual(prep.receipts, [{"event": "fallback", "reason": reason}])
+                    self.assertEqual(prep.images, {})
+                    self.assertEqual(prep.overlay, {})
+                    self.assertIsNone(prep.path)
+                    self.assertEqual(self.spec, original)
+
+    async def test_unrelated_image_services_keep_preparation(self):
+        (self.root / "Dockerfile").write_text("FROM scratch\n")
+        producer = {"build": {"context": str(self.root)}, "image": "app:local"}
+        receipt = {"image": "sha256:" + "a" * 64, "cache_hit": True}
+        for image in ("app:other", "another:local", "example.test/app:local", "team/app:local", BASE):
+            with self.subTest(image=image):
+                self.spec = {"services": {"main": producer, "worker": {"image": image}}}
+                original = copy.deepcopy(self.spec)
+                result = SimpleNamespace(stdout=json.dumps(self.spec), model_copy=lambda **_: "prepared")
+                prep = ComposePreparation(self.env, str(self.root / "cache"))
+                try:
+                    with patch.object(ImagePreparationCache, "identity", new_callable=AsyncMock,
+                                      return_value={"platform": "linux/amd64"}), \
+                         patch.object(ImagePreparationCache, "prepare", new_callable=AsyncMock, return_value=receipt) as prepare:
+                        self.assertEqual(await prep.build(AsyncMock(return_value=result)), "prepared")
+                        prepare.assert_awaited_once_with(producer)
+                    self.assertEqual(set(prep.overlay), {"main"})
+                    self.assertEqual(self.spec, original)
+                finally:
+                    if prep.temporary:
+                        prep.temporary.cleanup()
 
     async def test_compose_warnings_do_not_break_json_or_change_services(self):
         self.assertEqual(compose_services('warning: ${UNSET} defaults to empty\n' + json.dumps(self.spec)), self.spec['services'])
