@@ -165,9 +165,35 @@ async def main(root, base_image):
         assert await prep.build(run) is None
         assert prep.receipts == [{"event": "fallback", "reason": "git-build-metadata"}]
         results["git_labels"] = {"native_labels": labels, "fallback": True}
+        # The compose file now models Harbor's generated base definition; no
+        # task file declares a custom keepalive. Inspect real local metadata
+        # without starting the scratch image or pulling another architecture.
+        env._environment_docker_compose_path = project / "absent-task-compose.yaml"
+        env.extra_docker_compose_paths = []
+        env._main_image_name = tag
+        results["runtime_platforms"] = []
+        for explicit, default, managed in (("linux/amd64", "", True), ("linux/arm64", "", False),
+                                           (None, "linux/arm64", False), (None, "linux/amd64", True),
+                                           ("linux/amd64", "linux/arm64", True)):
+            service = {"image": tag, "pull_policy": "never", "command": ["sh", "-c", "sleep infinity"]}
+            if explicit:
+                service["platform"] = explicit
+            if default:
+                dotenv.write_text(f"DOCKER_DEFAULT_PLATFORM={default}\n")
+            else:
+                dotenv.unlink(missing_ok=True)
+            definition()
+            runtime = ComposePreparation(env, managed_keepalive=True)
+            preparations.append(runtime)
+            await runtime.runtime(run)
+            assert bool(runtime.overlay) is managed, (explicit, default, runtime.overlay)
+            if managed:
+                assert set(runtime.overlay["main"]) == {"command"}
+            results["runtime_platforms"].append({"explicit": explicit, "default": default, "managed": managed})
         (root / "result.json").write_text(json.dumps(results, indent=2) + "\n")
         print("Compose build inputs: dotenv platforms, warm identity, native conflicts and ignored input fallback OK", flush=True)
         print("context metadata: native hardlinks and Git-derived labels preserved by fallback OK", flush=True)
+        print("runtime platform: explicit and dotenv selection, mismatch refusal and probe isolation OK", flush=True)
         if os.geteuid() == 0:
             print("unreadable input cases skipped: root can read mode 000", flush=True)
     finally:

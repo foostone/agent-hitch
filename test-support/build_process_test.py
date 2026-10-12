@@ -122,6 +122,52 @@ asyncio.run(main())
                 except ProcessLookupError:
                     pass
 
+    async def test_successful_leader_cannot_release_locks_with_silent_work_alive(self):
+        fifo = self.root / "alive"
+        os.mkfifo(fifo)
+        alive = os.open(fifo, os.O_RDONLY | os.O_NONBLOCK)
+        self.addCleanup(os.close, alive)
+        marker = self.root / "child"
+        executable = self.root / "docker"
+        executable.write_text(
+            f"#!{sys.executable}\nimport os, signal, time\n"
+            "if os.fork(): os._exit(0)\n"
+            "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+            f"alive = os.open({str(fifo)!r}, os.O_WRONLY)\n"
+            f"open({str(marker)!r}, 'w').write(str(os.getpid()))\n"
+            "os.write(alive, b'1')\nos.close(1); os.close(2)\ntime.sleep(60)\n"
+        )
+        executable.chmod(0o700)
+        key = self.root / "key.lock"
+        async def build():
+            async with cache_module.lock([key]):
+                return await real_docker(["buildx", "build"], env={**os.environ, "PATH": str(self.root)})
+        task = asyncio.create_task(build())
+        try:
+            async with asyncio.timeout(5):
+                while True:
+                    try:
+                        if os.read(alive, 1) == b"1":
+                            break
+                    except BlockingIOError:
+                        pass
+                    await asyncio.sleep(0.01)
+            self.assertEqual(await asyncio.wait_for(task, 8), "")
+            # EOF on a separate lifetime FD proves the helper stopped; output
+            # EOF alone did not, and would let the next caller take this lock.
+            self.assertEqual(os.read(alive, 1), b"")
+            with key.open("a") as handle:
+                fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        finally:
+            if marker.exists() and marker.read_text():
+                try:
+                    os.kill(int(marker.read_text()), signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+            if not task.done():
+                task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
     async def test_cancellation_during_spawn_retains_ownership(self):
         executable = self.root / "docker"
         executable.write_text(f"#!{sys.executable}\nimport time\ntime.sleep(60)\n")

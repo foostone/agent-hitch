@@ -37,6 +37,7 @@ class CacheTests(unittest.IsolatedAsyncioTestCase):
         (self.source / "value").write_text("first")
         self.builds, self.images, self.tags = [], {}, {}
         self.platform, self.onbuild, self.failure = "amd64", [], False
+        self.active_context = "unit-test"
         self.cache = ImagePreparationCache(self.root / "cache", {})
         self.service = {"platform": "linux/amd64", "build": {"context": str(self.source)}}
         self.mock = patch.object(cache_module, "docker", self.docker)
@@ -51,6 +52,8 @@ class CacheTests(unittest.IsolatedAsyncioTestCase):
             return json.dumps({"ID": "daemon-1", "OSType": "linux", "Architecture": "x86_64"})
         if args == ["buildx", "inspect"]:
             return "Name: unit-test\nDriver: docker\nBuildKit version: v1\n"
+        if args == ["context", "show"]:
+            return self.active_context + "\n"
         if args[:2] == ["buildx", "ls"]:
             return json.dumps({"Name": "unit-test", "Driver": "docker", "Nodes": [{"Name": "one", "Version": "v1"}]})
         if args[:2] == ["image", "inspect"]:
@@ -315,8 +318,14 @@ class CacheTests(unittest.IsolatedAsyncioTestCase):
             if args[:2] == ["buildx", "ls"]: return json.dumps({"Name": "changed", "Driver": "docker-container", "Nodes": [{"Name": "one", "Version": "v2"}]})
             return await original(args, **kwargs)
         with patch.object(cache_module, "docker", changed_builder):
-            changed = await ImagePreparationCache(self.root / "cache", {}).prepare(self.service)
-        self.assertNotEqual(first["cache_key"], changed["cache_key"])
+            with self.assertRaisesRegex(UnsupportedBuild, "nondefault-builder"):
+                await ImagePreparationCache(self.root / "cache", {}).prepare(self.service)
+        self.active_context = "another-docker-context"
+        with self.assertRaisesRegex(UnsupportedBuild, "nondefault-builder"):
+            await ImagePreparationCache(self.root / "cache", {}).prepare(self.service)
+        self.active_context = "unit-test"
+        args = self.builds[0]["args"]
+        self.assertEqual(args[args.index("--builder") + 1], "unit-test")
         home = self.root / "client-home"; (home / ".docker").mkdir(parents=True)
         (home / ".docker/config.json").write_text(json.dumps({"proxies": {"default": {"httpProxy": "http://changed"}}}))
         proxied = await ImagePreparationCache(self.root / "cache", {"HOME": str(home)}).prepare(self.service)

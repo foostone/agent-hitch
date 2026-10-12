@@ -166,6 +166,8 @@ bridge 在 Harbor 的实际环境目录上读取 Compose 最终解析后的构�
 
 每个缓存 Docker 命令通过独立监督进程运行。监督进程持有相同的 key/slot 锁描述符，以管道检测 Harbor 存活；即使 Harbor 被强制终止，也会停止该命令进程组后释放锁。正常退出需要命令及其输出管道完成。这个机制管理宿主 CLI/plugin 生命周期，不宣称任意远程 builder 已完成物理资源清理。
 
+正常退出也会收回剩余命令进程组：主进程成功和输出 EOF 不能证明关闭输出的后台 helper 已停止。缓存仅使用当前 Docker context 的内置 Docker builder，并在构建命令中固定其名称；自定义 builder 或另一个 context 的 builder 保留原 Compose 构建，避免误用不同 BuildKit 宿主的平台和默认设置。
+
 目前缓存支持普通文件/目录的本地上下文、标准 Dockerfile、固定摘要基础镜像、build args、target 和 labels。基础镜像配置也检查继承的 ONBUILD。可变基础镜像、自定义 frontend、ADD、RUN 外部挂载、SSH/secrets、额外上下文、符号链接/特殊文件/xattr、显式 pull/no_cache 等不能完整确定输入的配置，整组 Compose 保留原构建路径。宿主 Python 不提供扩展属性检查（如 macOS），或文件系统不支持、拒绝该检查时，也回退原构建流程，不假定扩展属性为空。首次获取基础镜像配置可能需要 registry；校验后的固定摘要配置可在后续直接复用。force_build 绕过准备缓存。只有 Harbor 显式发出的 build 请求进入缓存；已选择预构建镜像时，up 保留原有镜像及 pull policy 的优先级。
 
 如果一个服务构建的镜像名还被其他服务引用，整组 Compose 回退原构建路径，由 Compose 发布共享 tag 并处理 pull policy，避免冷启动缺少镜像或复用旧 tag。检测包含服务的 image 字段、type=image 数据卷的 source、默认 latest、Docker Hub 名称别名及多个构建服务使用同名镜像的情况。未显式指定 image 的构建服务与任何声明 image 的服务混用时，也保守回退，包括后者同样声明 build 的情况，因为它可能引用或覆盖 Compose 自动生成的镜像名。全部使用隐式名称的构建服务、显式名称互不依赖的服务仍可使用缓存。没有 build 服务时不探测 builder。
@@ -177,6 +179,8 @@ bridge 在 Harbor 的实际环境目录上读取 Compose 最终解析后的构�
 managed keepalive 只替换 Harbor 默认的 sh/sleep 保活命令，让 shell 接收停止信号、终止并等待 sleep、正常退出。任务声明 command、entrypoint、init、停止信号/超时或 pre_stop，镜像含 ENTRYPOINT 或使用其他停止信号时，保留其行为。也检查 Compose 解析后的生命周期设置；遇到 include、main 的 extends 或 PyYAML 无法解析的 Compose 标签时保守跳过，由 Compose 处理原配置。不会缩短用户停止宽限期或复用有状态验证器。
 
 如果 `up` 的 pull policy 可能拉取或重新构建镜像，跳过 keepalive 修改，避免用旧本地镜像的元数据判断新镜像的生命周期；这也覆盖 `missing` 策略下会刷新的 `latest` 标签。已经存在且不会被该策略刷新的镜像仍可使用优化。
+
+运行平台同时考虑服务声明和 Compose 项目 dotenv 默认值。通过仅供 `config` 使用的临时标签读取解析后的默认值，标签不会进入容器；本地镜像架构不匹配或平台格式无法确认时跳过优化，由 Compose 选择或拉取实际镜像。
 
 准备镜像持久保留；使用缓存的 down 不执行 --rmi local，容器、卷和网络仍按原参数清理。目录中的 image-*.json 给出对应的 Hitch 专用镜像 tag，可在确认不再被使用后按 tag 清理；删除缓存记录不等于删除 Docker 镜像。缓存镜像或记录被外部清理后，下次使用会重新准备。宿主同权限进程仍属于受信任边界。
 

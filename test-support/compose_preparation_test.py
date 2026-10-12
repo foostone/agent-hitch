@@ -24,7 +24,8 @@ class ComposeTests(unittest.IsolatedAsyncioTestCase):
             _compose_env_vars=lambda: {}, _main_image_name="sha256:" + "c" * 64,
             logger=logging.getLogger("test"), trial_paths=SimpleNamespace(trial_dir=self.root / "trial"), session_id="case__verifier__one")
         self.spec = {"services": {"main": {"command": _DEFAULT_COMMAND, "image": self.env._main_image_name}}}
-        self.image = {"Os": "linux", "Config": {}}
+        self.image = {"Os": "linux", "Architecture": "amd64", "Config": {}}
+        self.project_platform = ""
         self.prep = ComposePreparation(self.env, managed_keepalive=True)
 
     def tearDown(self):
@@ -36,6 +37,13 @@ class ComposeTests(unittest.IsolatedAsyncioTestCase):
             return SimpleNamespace(return_code=0, stdout=json.dumps({"target": {
                 name: {} for name, service in self.spec["services"].items() if service.get("build")
             }}))
+        if args[:1] == ["-f"]:
+            self.assertEqual(args[2:], ["config", "--format", "json"])
+            probe = json.loads(Path(args[1]).read_text())
+            label = next(iter(probe["services"]["main"]["labels"]))
+            document = copy.deepcopy(self.spec)
+            document["services"]["main"].setdefault("labels", {})[label] = self.project_platform
+            return SimpleNamespace(stdout=json.dumps(document))
         self.assertEqual(args, ["config", "--format", "json"])
         return SimpleNamespace(stdout=json.dumps(self.spec), model_copy=lambda **_: "prepared")
 
@@ -47,6 +55,7 @@ class ComposeTests(unittest.IsolatedAsyncioTestCase):
             await self.prep.runtime(self.compose_call)
         self.assertIn('$$child', self.prep.path.read_text())
         self.assertEqual(self.prep.receipts[-1]["event"], "managed-keepalive")
+        self.assertEqual(set(self.prep.overlay["main"]), {"command"})
 
     async def test_keepalive_skips_images_that_up_can_replace(self):
         for reference, policy in (("app:local", "always"), ("app:local", "daily"),
@@ -78,6 +87,27 @@ class ComposeTests(unittest.IsolatedAsyncioTestCase):
                 finally:
                     if prep.temporary:
                         prep.temporary.cleanup()
+
+    async def test_runtime_platform_must_match_the_inspected_image(self):
+        for service_platform, project_platform in (("linux/arm64", ""), (None, "linux/arm64")):
+            with self.subTest(service=service_platform, project=project_platform):
+                self.spec["services"]["main"].update(image="app:version", pull_policy="missing", platform=service_platform)
+                self.project_platform = project_platform
+                prep = ComposePreparation(self.env, managed_keepalive=True)
+                try:
+                    with patch("hitch_compose_preparation.docker", self.docker):
+                        await prep.runtime(self.compose_call)
+                    self.assertIsNone(prep.path)
+                finally:
+                    if prep.temporary:
+                        prep.temporary.cleanup()
+
+    async def test_explicit_runtime_platform_overrides_the_project_default(self):
+        self.spec["services"]["main"]["platform"] = "linux/amd64"
+        self.project_platform = "linux/arm64"
+        with patch("hitch_compose_preparation.docker", self.docker):
+            await self.prep.runtime(self.compose_call)
+        self.assertEqual(self.prep.receipts[-1]["event"], "managed-keepalive")
 
     async def test_effective_build_platform_comes_from_native_compose_plan(self):
         (self.root / "Dockerfile").write_text("FROM scratch\n")

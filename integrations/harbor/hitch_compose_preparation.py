@@ -13,6 +13,7 @@ from hitch_image_cache import ImagePreparationCache, atomic_json, docker
 _DEFAULT_COMMAND = ["sh", "-c", "sleep infinity"]
 _MANAGED_COMMAND = ["sh", "-c", 'trap \'kill "$child"; wait "$child"; exit 0\' TERM INT; sleep infinity & child=$!; wait "$child"']
 _LIFECYCLE_FIELDS = ("init", "stop_signal", "stop_grace_period", "pre_stop")
+_RUNTIME_PLATFORM_LABEL = "io.hitch.preparation.default-platform"
 
 
 def compose_document(output):
@@ -168,10 +169,21 @@ class ComposePreparation:
         env = self.environment
         if getattr(env, "_is_windows_container", False) or self.custom_keepalive():
             return
-        result = await run(["config", "--format", "json"])
+        # Resolve dotenv defaults through Compose itself. A config-only label
+        # yields an unambiguous JSON value even when other environment values
+        # contain newlines. This temporary probe never reaches container up.
+        with tempfile.TemporaryDirectory(prefix="hitch-compose-platform-") as directory:
+            probe = Path(directory) / "compose.json"
+            probe.write_text(json.dumps({"services": {"main": {"labels": {
+                _RUNTIME_PLATFORM_LABEL: "${DOCKER_DEFAULT_PLATFORM:-}",
+            }}}}))
+            result = await run(["-f", str(probe), "config", "--format", "json"])
         try:
             service = compose_services(result.stdout)["main"]
         except UnsupportedBuild:
+            return
+        platform = service.get("platform") or (service.get("labels") or {}).get(_RUNTIME_PLATFORM_LABEL)
+        if platform not in (None, "", "linux/amd64", "linux/arm64"):
             return
         if (service.get("command") != _DEFAULT_COMMAND or service.get("entrypoint")
                 or any(key in service for key in _LIFECYCLE_FIELDS)):
@@ -188,6 +200,12 @@ class ComposePreparation:
         if not raw:
             return
         image = json.loads(raw)
+        variants = (None, "", "v8") if platform == "linux/arm64" else (None, "")
+        if platform and (f"{image.get('Os')}/{image.get('Architecture')}" != platform
+                         or image.get("Variant") not in variants):
+            # Compose may pull/select a different variant if its default
+            # local inspection does not match the requested runtime platform.
+            return
         config = image.get("Config", {})
         stop_signal = service.get("stop_signal", config.get("StopSignal") or "SIGTERM")
         if image.get("Os") != "linux" or config.get("Entrypoint") or stop_signal not in ("SIGTERM", "SIGINT", "15", "2"):

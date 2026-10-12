@@ -157,6 +157,12 @@ class ImagePreparationCache:
             selected = next((entry for entry in builders if entry.get("Name") == name), None)
             if not selected or not selected.get("Driver") or not selected.get("Nodes"):
                 raise UnsupportedBuild("builder-identity")
+            # A custom builder can run on a different architecture and have
+            # different defaults from the daemon Compose will use. Optimize
+            # only the current Docker context's built-in builder; let native
+            # Compose select and configure all other builders.
+            if selected["Driver"] != "docker" or (await docker(["context", "show"], env=self.env, timeout=30)).strip() != name:
+                raise UnsupportedBuild("nondefault-builder")
             nodes = []
             for node in selected["Nodes"]:
                 normalized = {key: node.get(key) for key in ("Name", "Endpoint", "DriverOpts", "Flags", "Version", "ProxyConfig", "Labels")}
@@ -170,7 +176,7 @@ class ImagePreparationCache:
                 proxies = {}
             except (OSError, ValueError, AttributeError) as error:
                 raise UnsupportedBuild("docker-client-config") from error
-            self.daemon = {"id": data["ID"], "platform": f"linux/{architecture}", "builder": digest(builder), "proxy_config": digest(proxies)}
+            self.daemon = {"id": data["ID"], "platform": f"linux/{architecture}", "builder": digest(builder), "builder_name": name, "proxy_config": digest(proxies)}
         return self.daemon
 
     async def inspect(self, image):
@@ -244,7 +250,7 @@ class ImagePreparationCache:
                 phase = time.monotonic()
                 async with lock(slots):
                     phases["build_slot_wait_seconds"] = time.monotonic() - phase
-                    args = ["buildx", "build", "--load", "--progress", "plain", "--platform", spec["platform"],
+                    args = ["buildx", "build", "--builder", daemon["builder_name"], "--load", "--progress", "plain", "--platform", spec["platform"],
                             "--file", str(context / spec["dockerfile"]), "--tag", tag]
                     if spec["target"]:
                         args.extend(["--target", spec["target"]])

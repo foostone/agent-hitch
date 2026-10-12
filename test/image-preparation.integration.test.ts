@@ -67,5 +67,6 @@ test("real Compose build defaults and ignored unreadable inputs preserve native 
     ["test-support/compose_build_inputs_docker.py", directory, image!], { timeoutMs: 110_000 });
   assert.match(result.stdout, /dotenv platforms, warm identity, native conflicts and ignored input fallback OK/);
   assert.match(result.stdout, /native hardlinks and Git-derived labels preserved by fallback OK/);
+  assert.match(result.stdout, /explicit and dotenv selection, mismatch refusal and probe isolation OK/);
   t.diagnostic(result.stdout.trim());
 });

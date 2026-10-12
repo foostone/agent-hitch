@@ -61,6 +61,7 @@ async def main(root, image):
             assert observed["Image"] == receipts[0]["image"]
             assert all(str(cache) not in mount.get("Source", "") for mount in observed["Mounts"])
             assert "trap" in observed["Config"]["Cmd"][-1]
+            assert "io.hitch.preparation.default-platform" not in (observed["Config"].get("Labels") or {})
         assert ids[0] != ids[1]
         assert (await candidate.exec("printf candidate > /value")).return_code == 0
         assert (await verifier.exec("cat /value")).stdout == "immutable fixture"

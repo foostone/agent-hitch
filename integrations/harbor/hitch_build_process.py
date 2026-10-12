@@ -43,7 +43,6 @@ async def supervise(command):
     reader = asyncio.StreamReader()
     transport, _ = await loop.connect_read_pipe(lambda: asyncio.StreamReaderProtocol(reader), sys.stdin.buffer)
     process = None
-    complete = False
     pending = []
     try:
         # The liveness pipe and inherited locks belong to this supervisor only;
@@ -68,11 +67,12 @@ async def supervise(command):
                 control = asyncio.create_task(reader.read(1))
                 pending.append(control)
             if acknowledged and exited.done():
-                complete = True
                 code = exited.result()
                 return code if code >= 0 else 128 - code
     finally:
-        if process is not None and not complete:
+        # A successful leader and closed output pipes do not prove that a
+        # plugin's silent helper stopped. Reclaim the group on every exit.
+        if process is not None:
             await stop_group(process)
         for task in pending:
             if not task.done():
