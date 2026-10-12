@@ -31,9 +31,13 @@ class ComposeTests(unittest.IsolatedAsyncioTestCase):
         if self.prep.temporary: self.prep.temporary.cleanup()
         self.temp.cleanup()
 
-    async def compose_call(self, args):
+    async def compose_call(self, args, **kwargs):
+        if args == ["build", "--print"]:
+            return SimpleNamespace(return_code=0, stdout=json.dumps({"target": {
+                name: {} for name, service in self.spec["services"].items() if service.get("build")
+            }}))
         self.assertEqual(args, ["config", "--format", "json"])
-        return SimpleNamespace(stdout=json.dumps(self.spec))
+        return SimpleNamespace(stdout=json.dumps(self.spec), model_copy=lambda **_: "prepared")
 
     async def docker(self, args, **kwargs):
         return json.dumps(self.image)
@@ -43,6 +47,75 @@ class ComposeTests(unittest.IsolatedAsyncioTestCase):
             await self.prep.runtime(self.compose_call)
         self.assertIn('$$child', self.prep.path.read_text())
         self.assertEqual(self.prep.receipts[-1]["event"], "managed-keepalive")
+
+    async def test_keepalive_skips_images_that_up_can_replace(self):
+        for reference, policy in (("app:local", "always"), ("app:local", "daily"),
+                                  ("app:local", "every_12h"), ("app:local", "build"),
+                                  ("app:latest", None), ("app", "missing"),
+                                  ("docker.io/library/app:latest", "if_not_present")):
+            with self.subTest(reference=reference, policy=policy):
+                self.spec["services"]["main"].update(image=reference, pull_policy=policy)
+                prep = ComposePreparation(self.env, managed_keepalive=True)
+                try:
+                    with patch("hitch_compose_preparation.docker", self.docker):
+                        await prep.runtime(self.compose_call)
+                    self.assertIsNone(prep.path)
+                    self.assertEqual(prep.receipts, [])
+                finally:
+                    if prep.temporary:
+                        prep.temporary.cleanup()
+
+    async def test_existing_nonrefreshing_images_keep_managed_lifecycle(self):
+        for reference, policy in (("app:latest", "never"), ("app:version", "missing"),
+                                  (BASE, None), (self.env._main_image_name, "never")):
+            with self.subTest(reference=reference, policy=policy):
+                self.spec["services"]["main"].update(image=reference, pull_policy=policy)
+                prep = ComposePreparation(self.env, managed_keepalive=True)
+                try:
+                    with patch("hitch_compose_preparation.docker", self.docker):
+                        await prep.runtime(self.compose_call)
+                    self.assertEqual(prep.receipts[-1]["event"], "managed-keepalive")
+                finally:
+                    if prep.temporary:
+                        prep.temporary.cleanup()
+
+    async def test_effective_build_platform_comes_from_native_compose_plan(self):
+        (self.root / "Dockerfile").write_text("FROM scratch\n")
+        original = {"build": {"context": str(self.root)}, "image": "app:local"}
+        for platform in ("linux/arm64", "linux/amd64"):
+            with self.subTest(platform=platform):
+                result = SimpleNamespace(stdout=json.dumps({"services": {"main": original}}), model_copy=lambda **_: "prepared")
+                async def run(args, **kwargs):
+                    if args == ["build", "--print"]:
+                        return SimpleNamespace(return_code=0, stdout=json.dumps({"target": {"main": {"platforms": [platform]}}}))
+                    return result
+                prep = ComposePreparation(self.env, str(self.root / "cache"))
+                try:
+                    with patch.object(ImagePreparationCache, "identity", new_callable=AsyncMock, return_value={"platform": "linux/amd64"}), \
+                         patch.object(ImagePreparationCache, "prepare", new_callable=AsyncMock,
+                                      return_value={"image": "sha256:" + "a" * 64}) as prepare:
+                        self.assertEqual(await prep.build(run), "prepared")
+                        prepare.assert_awaited_once_with({**original, "platform": platform})
+                    self.assertNotIn("platform", original)
+                finally:
+                    if prep.temporary:
+                        prep.temporary.cleanup()
+
+    async def test_unavailable_or_ambiguous_build_plan_uses_original_build(self):
+        self.spec = {"services": {"main": {"build": {"context": str(self.root)}, "image": "app:local"}}}
+        for status, document in ((1, "unknown flag: --print"), (0, "no plan"),
+                                 (0, '{"target":{}}'), (0, '{"target":{"main":{"platforms":["linux/amd64","linux/arm64"]}}}')):
+            with self.subTest(status=status, document=document):
+                async def run(args, **kwargs):
+                    if args == ["build", "--print"]:
+                        return SimpleNamespace(return_code=status, stdout=document)
+                    return SimpleNamespace(stdout=json.dumps(self.spec))
+                prep = ComposePreparation(self.env, str(self.root / "cache"))
+                with patch.object(ImagePreparationCache, "identity", new_callable=AsyncMock, return_value={"platform": "linux/amd64"}), \
+                     patch.object(ImagePreparationCache, "prepare", new_callable=AsyncMock) as prepare:
+                    self.assertIsNone(await prep.build(run))
+                    prepare.assert_not_awaited()
+                self.assertIsNone(prep.path)
 
     async def test_custom_runtime_declarations_and_entrypoints_are_preserved(self):
         for key in ("command", "entrypoint", "init", "stop_signal", "stop_grace_period", "pre_stop"):
@@ -170,13 +243,12 @@ class ComposeTests(unittest.IsolatedAsyncioTestCase):
             with self.subTest(image=image):
                 self.spec = {"services": {"main": producer, "worker": {"image": image}}}
                 original = copy.deepcopy(self.spec)
-                result = SimpleNamespace(stdout=json.dumps(self.spec), model_copy=lambda **_: "prepared")
                 prep = ComposePreparation(self.env, str(self.root / "cache"))
                 try:
                     with patch.object(ImagePreparationCache, "identity", new_callable=AsyncMock,
                                       return_value={"platform": "linux/amd64"}), \
                          patch.object(ImagePreparationCache, "prepare", new_callable=AsyncMock, return_value=receipt) as prepare:
-                        self.assertEqual(await prep.build(AsyncMock(return_value=result)), "prepared")
+                        self.assertEqual(await prep.build(self.compose_call), "prepared")
                         prepare.assert_awaited_once_with(producer)
                     self.assertEqual(set(prep.overlay), {"main"})
                     self.assertEqual(self.spec, original)
@@ -191,13 +263,13 @@ class ComposeTests(unittest.IsolatedAsyncioTestCase):
             context.mkdir()
             (context / "Dockerfile").write_text("FROM scratch\n")
             services[name] = {"build": {"context": str(context)}}
-        result = SimpleNamespace(stdout=json.dumps({"services": services}), model_copy=lambda **_: "prepared")
+        self.spec = {"services": services}
         prep = ComposePreparation(self.env, str(self.root / "cache"))
         try:
             with patch.object(ImagePreparationCache, "identity", new_callable=AsyncMock, return_value={"platform": "linux/amd64"}), \
                  patch.object(ImagePreparationCache, "prepare", new_callable=AsyncMock,
                               return_value={"image": "sha256:" + "a" * 64, "cache_hit": True}) as prepare:
-                self.assertEqual(await prep.build(AsyncMock(return_value=result)), "prepared")
+                self.assertEqual(await prep.build(self.compose_call), "prepared")
                 self.assertEqual(prepare.await_count, 2)
             self.assertEqual(set(prep.images), set(services))
         finally:

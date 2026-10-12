@@ -141,7 +141,9 @@ class CacheTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse((await self.cache.prepare(self.service))["cache_hit"])
 
     async def test_uninspectable_metadata_falls_back_without_publishing(self):
-        async def compose_call(args):
+        async def compose_call(args, **kwargs):
+            if args == ["build", "--print"]:
+                return SimpleNamespace(return_code=0, stdout=json.dumps({"target": {"main": {}}}))
             self.assertEqual(args, ["config", "--format", "json"])
             return SimpleNamespace(stdout=json.dumps({"services": {"main": self.service}}))
 
@@ -174,6 +176,48 @@ class CacheTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(list((self.root / "cache").glob("image-*.json")), [])
                 self.assertEqual(list((self.root / "cache").glob(".context-*")), [])
 
+    async def test_unreadable_ignored_context_entries_fall_back_without_publishing(self):
+        ignored = self.source / "ignored"
+        (self.source / ".dockerignore").write_text("ignored\n")
+        async def compose_call(args, **kwargs):
+            if args == ["build", "--print"]:
+                return SimpleNamespace(return_code=0, stdout=json.dumps({"target": {"main": {"platforms": ["linux/amd64"]}}}))
+            return SimpleNamespace(stdout=json.dumps({"services": {"main": self.service}}))
+
+        for directory in (False, True):
+            with self.subTest(directory=directory):
+                if directory:
+                    ignored.mkdir()
+                    original = Path.iterdir
+                    def enumerate_source(path):
+                        if path == ignored:
+                            raise PermissionError(errno.EACCES, "unreadable ignored directory")
+                        return original(path)
+                    probe = patch.object(Path, "iterdir", enumerate_source)
+                else:
+                    ignored.write_text("unreadable to Docker's non-root caller")
+                    original = os.open
+                    def open_source(path, *args, **kwargs):
+                        if Path(path) == ignored:
+                            raise PermissionError(errno.EACCES, "unreadable ignored file")
+                        return original(path, *args, **kwargs)
+                    probe = patch.object(os, "open", open_source)
+                environment = SimpleNamespace(_compose_env_vars=lambda: {}, logger=logging.getLogger("test"),
+                    trial_paths=SimpleNamespace(trial_dir=self.root / "trial"), session_id="ignored-input")
+                preparation = ComposePreparation(environment, str(self.root / "cache"))
+                try:
+                    with probe:
+                        self.assertIsNone(await preparation.build(compose_call))
+                    self.assertEqual(preparation.receipts, [{"event": "fallback", "reason": "context-read"}])
+                    self.assertEqual(self.builds, [])
+                    self.assertEqual(list((self.root / "cache").glob("image-*.json")), [])
+                    self.assertEqual(list((self.root / "cache").glob(".context-*")), [])
+                finally:
+                    if directory:
+                        ignored.rmdir()
+                    else:
+                        ignored.unlink()
+
     async def test_unsupported_build_inputs_and_base_triggers_fall_back(self):
         for addition in ({"secrets": ["secret"]}, {"ssh": ["default"]}, {"pull": True}, {"no_cache": True}, {"additional_contexts": {"x": "service:peer"}}, {"args": {"UNRESOLVED": None}}, {"labels": {"io.hitch.prepared-key": "mine"}}):
             with self.subTest(addition=addition), self.assertRaises(UnsupportedBuild):
@@ -191,6 +235,19 @@ class CacheTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(UnsupportedBuild, "special-context-entry"):
             await self.cache.prepare(self.service)
         self.assertEqual(len(self.builds), 0)
+
+    async def test_snapshot_destination_failure_remains_an_error(self):
+        original = Path.open
+        def full_destination(path, *args, **kwargs):
+            if args and args[0] == "xb":
+                raise OSError(errno.ENOSPC, "snapshot destination is full")
+            return original(path, *args, **kwargs)
+        with patch.object(Path, "open", full_destination), self.assertRaises(OSError) as raised:
+            await self.cache.prepare(self.service)
+        self.assertEqual(raised.exception.errno, errno.ENOSPC)
+        self.assertEqual(self.builds, [])
+        self.assertEqual(list((self.root / "cache").glob("image-*.json")), [])
+        self.assertEqual(list((self.root / "cache").glob(".context-*")), [])
 
     async def test_custom_frontend_arguments_and_source_policies_bypass_warm_cache(self):
         await self.cache.prepare(self.service)

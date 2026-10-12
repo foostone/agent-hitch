@@ -55,3 +55,14 @@ test("real Compose resolves task privileges and inherited mounts before sharing 
   assert.match(result.stdout, /resolved false values, inherited settings, unsafe privileges and mounts OK/);
   t.diagnostic(result.stdout.trim());
 });
+
+test("real Compose build defaults and ignored unreadable inputs preserve native behavior", {
+  skip: process.env.HITCH_IMAGE_PREPARATION_DOCKER_TEST !== "1", timeout: 120_000,
+}, async t => {
+  const directory = await mkdtemp(path.join(tmpdir(), "hitch-compose-build-inputs-"));
+  t.after(() => forceRemove(directory));
+  const result = await runCommand(process.env.HITCH_HARBOR_TEST_PYTHON || "python3",
+    ["test-support/compose_build_inputs_docker.py", directory], { timeoutMs: 110_000 });
+  assert.match(result.stdout, /dotenv platforms, warm identity, native conflicts and ignored input fallback OK/);
+  t.diagnostic(result.stdout.trim());
+});

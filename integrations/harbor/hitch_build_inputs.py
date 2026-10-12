@@ -7,6 +7,7 @@ directory. Task names, runtime mounts and ownership labels are not build inputs.
 from __future__ import annotations
 
 import asyncio
+from contextlib import contextmanager
 import hashlib
 import json
 import os
@@ -18,6 +19,16 @@ from pathlib import Path
 
 class UnsupportedBuild(ValueError):
     pass
+
+
+@contextmanager
+def read_context():
+    # Docker can ignore unreadable entries using .dockerignore; our complete
+    # snapshot cannot. Only source I/O becomes fallback, not destination errors.
+    try:
+        yield
+    except OSError as error:
+        raise UnsupportedBuild("context-read") from error
 
 
 def digest(value):
@@ -60,9 +71,10 @@ def build_spec(service, default_platform):
 
 
 def pinned_dockerfile(source):
-    if source.stat().st_size > 1024 * 1024:
-        raise UnsupportedBuild("dockerfile-size")
-    content = source.read_text(encoding="utf-8")
+    with read_context():
+        if source.stat().st_size > 1024 * 1024:
+            raise UnsupportedBuild("dockerfile-size")
+        content = source.read_text(encoding="utf-8")
     # Restrict parser directives and syntax we cannot unambiguously inspect.
     if "\0" in content or "<<" in content or re.search(r"(?im)^\s*#\s*escape\s*=", content):
         raise UnsupportedBuild("dockerfile-syntax")
@@ -118,7 +130,8 @@ async def snapshot_context(source, target):
     entries = []
 
     async def copy(current, destination, relative):
-        info = current.lstat()
+        with read_context():
+            info = current.lstat()
         mode = stat.S_IMODE(info.st_mode)
         try:
             attributes = listxattr(current, follow_symlinks=False)
@@ -130,26 +143,35 @@ async def snapshot_context(source, target):
             raise UnsupportedBuild("context-xattrs")
         if stat.S_ISDIR(info.st_mode):
             destination.mkdir(mode=0o700)
-            children = sorted(current.iterdir(), key=lambda p: os.fsencode(p.name))
+            with read_context():
+                children = sorted(current.iterdir(), key=lambda p: os.fsencode(p.name))
             entries.append([relative, "directory", mode])
             for child in children:
                 await copy(child, destination / child.name, f"{relative}/{child.name}" if relative else child.name)
-            if [p.name for p in children] != sorted(os.listdir(current), key=os.fsencode):
-                raise UnsupportedBuild("context-changed")
+            with read_context():
+                if [p.name for p in children] != sorted(os.listdir(current), key=os.fsencode):
+                    raise UnsupportedBuild("context-changed")
             os.chmod(destination, mode)
             os.utime(destination, ns=(info.st_atime_ns, info.st_mtime_ns))
         elif stat.S_ISREG(info.st_mode):
             checksum = hashlib.sha256()
-            fd = os.open(current, os.O_RDONLY | os.O_NOFOLLOW)
+            with read_context():
+                fd = os.open(current, os.O_RDONLY | os.O_NOFOLLOW)
             with os.fdopen(fd, "rb") as reader, destination.open("xb") as writer:
-                before = os.fstat(reader.fileno())
+                with read_context():
+                    before = os.fstat(reader.fileno())
                 if (before.st_ino, before.st_dev) != (info.st_ino, info.st_dev):
                     raise UnsupportedBuild("context-changed")
-                while chunk := reader.read(1024 * 1024):
+                while True:
+                    with read_context():
+                        chunk = reader.read(1024 * 1024)
+                    if not chunk:
+                        break
                     checksum.update(chunk)
                     writer.write(chunk)
                     await asyncio.sleep(0)
-                after = os.fstat(reader.fileno())
+                with read_context():
+                    after = os.fstat(reader.fileno())
                 if (before.st_size, before.st_mtime_ns, before.st_ctime_ns) != (after.st_size, after.st_mtime_ns, after.st_ctime_ns):
                     raise UnsupportedBuild("context-changed")
             os.chmod(destination, mode)
