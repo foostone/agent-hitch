@@ -79,6 +79,7 @@ These options are also accepted by `hitch daemon submit`.
 | --- | --- |
 | `hitch eval setup harbor [--version VERSION] [--python PATH] [--force] [--json]` | Install Hitch’s pinned Harbor in an isolated tool directory; `--force` rebuilds that install. |
 | `hitch eval doctor [--harbor PATH] [--python PATH] [--docker PATH] [--json]` | Check prerequisites without starting an evaluation. |
+| `hitch eval bind --model MODEL [--pass-env NAME ...] [--minimum-validity DURATION] --json` | Bind the running daemon’s model environment, frozen credentials, Harbor Python runtime, and supported environment-referenced files; minimum validity defaults to `30m`. See the [binding protocol](../../evaluation-bindings.zh-CN.md). |
 | `hitch eval run --dataset REF --harness REF [EVAL_OPTIONS]` | Execute and wait for a result; default output is JSON. |
 | `hitch eval submit --dataset REF --harness REF [EVAL_OPTIONS]` | Submit to an already-running daemon and immediately return accepted IDs as JSON. |
 | `hitch eval watch EVAL_ID [--output json\|jsonl]` | Follow a daemon evaluation; default JSONL. |
@@ -102,6 +103,8 @@ Shared by `eval run` and `eval submit` unless a row limits the scope. Start with
 | `--timeout DURATION`, `--setup-timeout DURATION` | Candidate and setup budgets. Standard compiled tasks retain their task budget unless overridden; other defaults are described in the [evaluation contract](../../evals.md). |
 | `--infrastructure-retries N`, `--infrastructure-retry-backoff DURATION` | Control eligible infrastructure retries; N can be 0 to disable. |
 | `--agent-arg VALUE`, `--pass-env NAME` | Repeat for harness arguments and credential/environment variable names forwarded to the container. |
+| `--environment-binding ID` | Require the binding returned by `eval bind` at admission and before each Harbor execution; supports local Docker, external models, and capture `off`/`native`. |
+| `--artifact-pin JSON` | Repeat once per used platform to pin `platform`, `artifact_id`, `artifact_integrity`, and `entrypoint_integrity` before task execution. See the [artifact pin protocol](../../evaluation-artifact-pins.zh-CN.md). |
 | `--device auto\|cpu\|cuda`, `--local-profile baseline\|throughput`, `--offline` | Managed model inference; hardware and harness requirements are in [model inference](model-inference.md). |
 | `--inference SHA256`, `--model-node-file JSON` | Run with an exact inference lock and remote-node binding; omit device/profile overrides. |
 | `--training-binding-file JSON` | Bind a supported training episode to an external training gateway. See [training integration](../../slime-training-binding.zh-CN.md). |

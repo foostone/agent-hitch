@@ -96,3 +96,5 @@ export { stageRemoteRerunCompletion, readRemoteRerunCompletion, acknowledgeRemot
 
 export { parseRemoteExecutionAdmission, parseRemoteExecutionOwnership, parseRemoteWorkerHostIdentity, remoteExecutionBindingDigest } from "./remote-execution-ownership.js";
 export { parseRemoteWorkerCleanupChallenge, parseRemoteWorkerCleanupReceipt } from "./remote-worker-cleanup.js";
+export { prepareEvaluationBinding } from "../backends/index.js";
+export { assertEvalEnvironmentBinding } from "./environment-binding.js";

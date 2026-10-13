@@ -1,6 +1,14 @@
 import type { LocalInferenceSelectionV1 } from "./inference.js";
 import type { TrainingExternalBindingV1 } from "./training.js";
 
+/** Exact content selected before submission; local cache paths are not identity. */
+export interface EvalArtifactPinV1 {
+  platform: "linux-x64" | "linux-arm64";
+  artifact_id: string;
+  artifact_integrity: string;
+  entrypoint_integrity: string;
+}
+
 export interface EvalRequest {
   schema_version: string;
   backend: "harbor";
@@ -19,4 +27,7 @@ export interface EvalRequest {
   benchmark_revision: string;
   local_inference?: LocalInferenceSelectionV1;
   training_binding?: TrainingExternalBindingV1;
+  /** Private resident environment and resolved host credentials, prepared by the daemon. */
+  environment_binding?: string;
+  artifact_pins?: EvalArtifactPinV1[];
 }

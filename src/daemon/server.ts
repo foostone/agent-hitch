@@ -1,3 +1,4 @@
+import { evaluationBinding } from "./evaluation-binding.js";
 import { prepareInference } from "./inference-prepare.js";
 import { orderedEvalControl, withLegacyEvalMutation } from "../control-plane/index.js";
 import { executionObservation } from "./execution-observation.js";
@@ -33,7 +34,7 @@ export interface DaemonServerOptions {
   evalTrialResources?: ResourceVectorV1;
   evalExecutor?: EvalSchedulerOptions["executor"];
   evalRerunExecutor?: EvalRerunExecutor;
-  /** Test/deployment injection point; credential values remain process-local. */
+  /** Test/deployment injection point; credential values stay private; explicit environment bindings persist helper snapshots. */
   credentialEnv?: NodeJS.ProcessEnv;
   /** Wired by the CLI from the resident executor's environment, never registration metadata. */
   executionObserver?: ExecutionObservationSourceV2;
@@ -246,6 +247,10 @@ export class DaemonServer {
       return json(response, 401, { error: { code: "unauthorized", message: "missing or invalid daemon token" } });
     }
     if (!this.ready && !this.closing) return json(response, 503, { error: { code: "daemon_recovering", message: "daemon is reconciling persisted execution; retry after recovery" } });
+
+    if (request.method === "POST" && url.pathname === "/v1/evaluation-bindings") {
+      return evaluationBinding(request, response, { instanceId: this.instanceId, prepare: input => this.evalScheduler!.prepareEnvironmentBinding(input) });
+    }
 
     if (request.method === "POST" && url.pathname === "/v2/execution-observation") {
       return executionObservation(request, response, { source: this.executionObserver, local: this.evalScheduler?.providerSnapshot(), instanceId: this.instanceId, remote: this.remoteObservations });

@@ -1,3 +1,5 @@
+import { boundHarborEnvironment } from "./evaluation-binding.js";
+import { assertHarborArtifactPin } from "./artifact-pins.js";
 import { readdir } from "node:fs/promises";
 import { withResourceAdmission } from "./resource-admission.js";
 import path from "node:path";
@@ -114,8 +116,13 @@ async function executeHarborBackend({
   prebuiltTaskImage,
   modelProxy,
 }: RunHarborBackendOptions): Promise<HarborBackendResult> {
-  // Host imports and capability checks must use the same payload as the job.
+  assertHarborArtifactPin(request.artifact_pins, preparedArtifact);
+  if (request.environment_binding && modelProxy) throw new HitchError("environment bindings do not support a model proxy", { code: "evaluation_binding_unsupported", exitCode: 12 });
+  // Host imports, bound credentials and capability checks must use the same payload as the job.
   const executionRuntimeDirectory = preparedArtifact.sharedRuntime?.runtime_directory ?? runtimeDirectory;
+  if (request.environment_binding) env = await boundHarborEnvironment({ root, env, runtimeDirectory: executionRuntimeDirectory, bindingId: request.environment_binding,
+    ...(harborExecutable ? { harborExecutable } : {}),
+    model: request.model, passEnv: request.pass_env, minimumValidityMs: request.timeout_ms + request.setup_timeout_ms });
   const backendDirectory = await ensureDir(requestedBackendDirectory ?? path.join(evalDirectory, "harbor"));
   if (logicalAttempt !== undefined && (!Number.isSafeInteger(logicalAttempt) || logicalAttempt < 1)) {
     throw invalidInput("Harbor logical attempt must be a positive safe integer");

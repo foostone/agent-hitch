@@ -240,6 +240,8 @@ function persistedRequestInput(request: EvalRequest): EvalRequestInput {
     pass_env: request.pass_env,
     ...(request.local_inference ? { local_inference: request.local_inference } : {}),
     ...(request.training_binding ? { training_binding: request.training_binding } : {}),
+    ...(request.environment_binding ? { environment_binding: request.environment_binding } : {}),
+    ...(request.artifact_pins ? { artifact_pins: request.artifact_pins } : {}),
   };
 }
 
