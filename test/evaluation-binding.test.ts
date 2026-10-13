@@ -14,6 +14,8 @@ import { snapshotHostCredentials } from "../src/backends/harbor/credential-snaps
 import { EvalScheduler, ResourceLedger } from "../src/control-plane/index.js";
 import { parseEvalSubmission } from "../src/control-plane/eval-records.js";
 import { validateEvalRequest } from "../src/evals/index.js";
+import { harborPreparedArtifact } from "../src/evals/prepared-harness.js";
+import { nodeRuntimeHarnessFixture } from "../test-support/harbor-node-runtime-fixture.js";
 
 const cli = fileURLToPath(new URL("../bin/hitch.js", import.meta.url));
 const model = "provider/model", passEnv = ["PRIVATE_ENDPOINT", "PRIVATE_API_KEY"];
@@ -105,13 +107,54 @@ test("helper failures do not leak private stdout or stderr", async t => {
   }
 });
 
+test("bound Harbor execution reads frozen credentials from the selected shared runtime", async t => {
+  const root = await fixture(t), bin = path.join(root, "bin"), shared = path.join(root, "shared-runtime");
+  await mkdir(bin); await mkdir(shared);
+  await symlink(fileURLToPath(new URL("../../", import.meta.url)), path.join(shared, "payload"));
+  const harbor = path.join(bin, "harbor"), helper = path.join(root, "helper.cjs"), counter = path.join(root, "helper-calls");
+  await writeFile(helper, `const fs=require('node:fs');fs.appendFileSync(${JSON.stringify(counter)},'1');console.log(JSON.stringify({version:1,env:{TOKEN:'frozen-test-token'},expiresAtMs:${Date.now() + 120000}}));`);
+  await writeFile(harbor, `#!${python}
+import json, os, subprocess, sys
+if '--version' in sys.argv:
+    print('harbor 0.21.0')
+    sys.exit(0)
+helper = json.loads(os.environ['HITCH_HOST_CREDENTIAL_HELPER_JSON'])
+assert os.environ['TOKEN'] == ''
+reply = subprocess.run(helper['argv'], input=json.dumps({'version': 1, 'credentialNames': ['TOKEN'], 'minimumValidityMs': 1000}), text=True, capture_output=True, check=True)
+assert json.loads(reply.stdout)['env']['TOKEN'] == 'frozen-test-token'
+print(helper['argv'][1])
+`, { mode: 0o755 });
+  const supplied = { ...env, HITCH_HARBOR_PATH: harbor,
+    HITCH_HOST_CREDENTIAL_HELPER_JSON: JSON.stringify({ version: 1, argv: [process.execPath, helper], credentialNames: ["TOKEN"], timeoutMs: 5000 }) };
+  const binding = await prepareEvaluationBinding({ root, env: supplied, model, passEnv: ["TOKEN"], minimumValidityMs: 2000 });
+  const harness = await nodeRuntimeHarnessFixture(root);
+  const artifact = { ...harborPreparedArtifact(root, { ...harness.manifest, executable: "node", entrypoint_args: [], cache_hit: false }),
+    directory: harness.directory, sharedRuntime: { runtime_directory: shared, artifact_directory: harness.directory } };
+  const request = await validateEvalRequest({ dataset: "fixture@1.0", harness_ref: "pi@version:1.2.3", model,
+    pass_env: ["TOKEN"], timeout_ms: 1000, setup_timeout_ms: 1000, environment_binding: binding.binding_id,
+    artifact_pins: [{ platform: artifact.platform, artifact_id: artifact.artifact_id,
+      artifact_integrity: artifact.artifact_integrity, entrypoint_integrity: artifact.entrypoint_integrity }] });
+  const evalDirectory = path.join(root, "eval");
+  const result = await runHarborBackend({ root, evalId: "eval_" + "f".repeat(32), evalDirectory, request,
+    resolvedRevision: harness.manifest.resolved_revision, runtimeDirectory: path.join(root, "removed-source-runtime"),
+    preparedArtifact: artifact, harborExecutable: harbor, env: supplied });
+  const stderr = await readFile(path.join(evalDirectory, result.backend.stderr_path), "utf8");
+  assert.equal(result.backend.process_exit_code, 0, stderr);
+  assert.equal((await readFile(path.join(evalDirectory, result.backend.stdout_path), "utf8")).trim(),
+    path.join(shared, "payload/dist/src/backends/harbor/bound-credential-helper.js"));
+  assert.equal(await readFile(counter, "utf8"), "1", "execution must not refresh the upstream helper");
+  const serialized = await readFile(path.join(evalDirectory, result.backend.config_path), "utf8");
+  assert.ok(!serialized.includes("frozen-test-token"));
+  assert.equal(JSON.parse(serialized).agents[0].kwargs.hitch_runtime_dir, shared);
+});
+
 test("actual Harbor launch refuses changed environment before invoking its executable", async t => {
   const root = await fixture(t), binding = await prepare(root), dataset = path.join(root, "dataset"), marker = path.join(root, "started");
   await mkdir(dataset);
   const harbor = path.join(root, "harbor");
   await writeFile(harbor, `#!${process.execPath}\nrequire('node:fs').writeFileSync(${JSON.stringify(marker)},'started');`, { mode: 0o755 });
   const options = { root, evalId: "eval_" + "a".repeat(32), evalDirectory: path.join(root, "eval"), env: { ...env, PRIVATE_ENDPOINT: "https://changed.invalid" }, harborExecutable: harbor,
-    request: { dataset, model, pass_env: passEnv, timeout_ms: 1000, setup_timeout_ms: 1000, environment_binding: binding.binding_id },
+    preparedArtifact: {}, request: { dataset, model, pass_env: passEnv, timeout_ms: 1000, setup_timeout_ms: 1000, environment_binding: binding.binding_id },
   } as unknown as RunHarborBackendOptions;
   await assert.rejects(runHarborBackend(options), unavailable);
   await assert.rejects(readFile(marker), { code: "ENOENT" });
@@ -133,7 +176,7 @@ test("same-version Python dependency drift changes binding and fences Harbor exe
   assert.notEqual((await prepare(root, supplied)).binding_id, first.binding_id);
   await assert.rejects(boundEvaluationEnvironment(options), unavailable);
   await assert.rejects(runHarborBackend({ root, evalId: "eval_" + "d".repeat(32), evalDirectory: path.join(root, "eval"),
-    env: supplied, harborExecutable: harbor, request: { dataset: path.join(root, "dataset"), model, pass_env: passEnv,
+    preparedArtifact: {}, env: supplied, harborExecutable: harbor, request: { dataset: path.join(root, "dataset"), model, pass_env: passEnv,
       timeout_ms: 1000, setup_timeout_ms: 1000, environment_binding: first.binding_id },
   } as unknown as RunHarborBackendOptions), unavailable);
   await assert.rejects(readFile(marker), { code: "ENOENT" });
@@ -170,7 +213,7 @@ test("environment file drift invalidates a binding before Harbor and persists on
   const marker = path.join(root, "started"), harbor = path.join(root, "harbor");
   await writeFile(harbor, `#!${process.execPath}\nrequire('node:fs').writeFileSync(${JSON.stringify(marker)},'started');`, { mode: 0o755 });
   await assert.rejects(runHarborBackend({ root, evalId: "eval_" + "e".repeat(32), evalDirectory: path.join(root, "eval"),
-    env: supplied, harborExecutable: harbor, request: { dataset: path.join(root, "dataset"), model, pass_env: passEnv,
+    preparedArtifact: {}, env: supplied, harborExecutable: harbor, request: { dataset: path.join(root, "dataset"), model, pass_env: passEnv,
       timeout_ms: 1000, setup_timeout_ms: 1000, environment_binding: first.binding_id },
   } as unknown as RunHarborBackendOptions), unavailable);
   await assert.rejects(readFile(marker), { code: "ENOENT" });

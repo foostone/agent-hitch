@@ -10,7 +10,7 @@ import { harborAgentTimeoutOverride } from "./agent-budget.js";
 import { DEFAULT_HARBOR_VERSION, HARBOR_CREDENTIAL_ENV, locateHarbor } from "./tools.js";
 import { harborVerifierConfig } from "./verifier-config.js";
 import { invokeHarbor } from "./process.js";
-import { harborEnvironmentConfig } from "./environment-config.js";
+import { harborEnvironmentConfig, harborPreparationOptions } from "./environment-config.js";
 import type { HarborDockerServiceLimitsV1 } from "./environment-config.js";
 import { parseHarborModelProxyRoute } from "./model-proxy-config.js";
 import { HARBOR_NODE_VERSION_WITH_PREFIX } from "./runtime-toolchain.js";
@@ -52,6 +52,7 @@ export interface RunHarborBackendOptions {
 }
 
 export interface HarborPreparedArtifactUse {
+  sharedRuntime?: { runtime_directory: string; artifact_directory: string };
   directory: string;
   artifact_id: string;
   artifact_integrity: string;
@@ -117,7 +118,9 @@ async function executeHarborBackend({
 }: RunHarborBackendOptions): Promise<HarborBackendResult> {
   assertHarborArtifactPin(request.artifact_pins, preparedArtifact);
   if (request.environment_binding && modelProxy) throw new HitchError("environment bindings do not support a model proxy", { code: "evaluation_binding_unsupported", exitCode: 12 });
-  if (request.environment_binding) env = await boundHarborEnvironment({ root, env, runtimeDirectory, bindingId: request.environment_binding,
+  // Host imports, bound credentials and capability checks must use the same payload as the job.
+  const executionRuntimeDirectory = preparedArtifact.sharedRuntime?.runtime_directory ?? runtimeDirectory;
+  if (request.environment_binding) env = await boundHarborEnvironment({ root, env, runtimeDirectory: executionRuntimeDirectory, bindingId: request.environment_binding,
     ...(harborExecutable ? { harborExecutable } : {}),
     model: request.model, passEnv: request.pass_env, minimumValidityMs: request.timeout_ms + request.setup_timeout_ms });
   const backendDirectory = await ensureDir(requestedBackendDirectory ?? path.join(evalDirectory, "harbor"));
@@ -135,7 +138,7 @@ async function executeHarborBackend({
       exitCode: 3,
     });
   }
-  if (hostCredentialHelper !== null) await assertHostCredentialRuntimeSupport(runtimeDirectory);
+  if (hostCredentialHelper !== null) await assertHostCredentialRuntimeSupport(executionRuntimeDirectory);
   const identity = await fingerprintExecutable(executable);
   const jobName = "job";
   const configPath = path.join(backendDirectory, "job.json");
@@ -145,7 +148,7 @@ async function executeHarborBackend({
     evalId,
     request,
     resolvedRevision,
-    runtimeDirectory,
+    runtimeDirectory: executionRuntimeDirectory,
     runtimeId,
     preparedArtifact,
     backendDirectory,
@@ -178,7 +181,7 @@ async function executeHarborBackend({
   try {
     invocation = await invokeHarbor(executable, ["run", "--config", configPath, "--yes"], {
       cwd: evalDirectory,
-      env: withBridgePythonPath(withHostCredentialPlaceholders(env, hostCredentialNames), runtimeDirectory),
+      env: withBridgePythonPath(withHostCredentialPlaceholders(env, hostCredentialNames), executionRuntimeDirectory),
       stdoutPath: path.join(backendDirectory, "stdout.log"),
       stderrPath: path.join(backendDirectory, "stderr.log"),
       ...(signal ? { signal } : {}),
@@ -365,11 +368,11 @@ export async function buildHarborJobConfig({
       // The bridge consumes the shared compiled runtime cache. The local
       // absolute cache path is diagnostic machine-local state, not identity
       // (spec §4.2); `runtime_id` records the exact execution payload.
-      hitch_runtime_dir: runtimeDirectory,
+      hitch_runtime_dir: preparedArtifact.sharedRuntime?.runtime_directory ?? runtimeDirectory,
       ...(runtimeId ? { controller_runtime_id: runtimeId } : {}),
       node_version: HARBOR_NODE_VERSION_WITH_PREFIX,
       harness_artifact: {
-        directory: preparedArtifact.directory,
+        directory: preparedArtifact.sharedRuntime?.artifact_directory ?? preparedArtifact.directory,
         artifact_id: preparedArtifact.artifact_id,
         artifact_integrity: preparedArtifact.artifact_integrity,
         entrypoint_integrity: preparedArtifact.entrypoint_integrity,
@@ -406,6 +409,8 @@ export async function buildHarborJobConfig({
       prebuiltTaskImage,
       Boolean(modelProxy && process.platform === "linux"),
       hostCredentialHelper !== null,
+      preparedArtifact.sharedRuntime,
+      harborPreparationOptions(env),
     ),
     verifier: harborVerifierConfig(request),
     agents: [agent],

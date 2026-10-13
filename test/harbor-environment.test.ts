@@ -15,8 +15,9 @@ test("Harbor ownership environment labels every controlled Compose resource and 
   }));
   const source = path.resolve("integrations/harbor/hitch_harbor_environment.py");
   const script = String.raw`
-import importlib.util, json, pathlib, sys, types
+import asyncio, importlib.util, json, pathlib, sys, types
 root, source = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2])
+sys.path.insert(0, str(source.parent))
 class DockerEnvironment:
     _EGRESS_CONTROL_SERVICE_NAME = "egress"
     def __init__(self, *args, environment_dir, extra_docker_compose=None, **kwargs):
@@ -28,6 +29,13 @@ class DockerEnvironment:
     def _docker_compose_paths(self): return [pathlib.Path("base.json")]
     def _compose_env_vars(self, include_os_env=True):
         return {"HITCH_HOST_CREDENTIAL_HELPER_JSON": "host-only-helper", "SAFE_COMPOSE_VALUE": "kept"}
+    async def _run_docker_compose_command(self, command, *args, **kwargs):
+        self.commands = getattr(self, "commands", []) + [command]
+        return types.SimpleNamespace(stdout=json.dumps({"services": {"main": getattr(self, "resolved_main", {})}}))
+    async def start(self, force_build):
+        await self._run_docker_compose_command(["up", "--wait"])
+    async def stop(self, delete):
+        self.stop_requests = getattr(self, "stop_requests", []) + [delete]
 harbor = types.ModuleType("harbor")
 constants = types.ModuleType("harbor.constants"); constants.MAIN_SERVICE_NAME = "main"
 environments = types.ModuleType("harbor.environments")
@@ -89,6 +97,34 @@ gateway_env = module.HitchHarborDockerEnvironment(environment_dir=root, hitch_mo
 gateway_overlay = json.loads(gateway_env._hitch_ownership_compose_path.read_text())
 assert gateway_overlay["services"]["main"] == {"extra_hosts": ["host.docker.internal:host-gateway"]}
 assert gateway_overlay["services"]["database"] == {}
+(root / "controller/payload").mkdir(parents=True)
+(root / "artifact").mkdir()
+shared_paths = {"runtime_directory": str(root / "controller"), "artifact_directory": str(root / "artifact")}
+shared_env = module.HitchHarborDockerEnvironment(environment_dir=root, session_id="task__env", hitch_shared_runtime=shared_paths)
+assert "volumes" not in json.loads(shared_env._hitch_ownership_compose_path.read_text())["services"]["main"]
+asyncio.run(shared_env._run_docker_compose_command(["up", "--wait"]))
+shared_overlay = json.loads(shared_env._hitch_ownership_compose_path.read_text())
+assert len(shared_overlay["services"]["main"]["volumes"]) == 2
+assert all(mount["read_only"] for mount in shared_overlay["services"]["main"]["volumes"])
+assert "volumes" not in shared_overlay["services"]["database"]
+verifier_env = module.HitchHarborDockerEnvironment(environment_dir=root, session_id="task__verifier__trial", hitch_shared_runtime=shared_paths)
+assert verifier_env._hitch_shared_runtime is None
+assert verifier_env._hitch_ownership_compose_path is None
+verifier_prebuilt = module.HitchHarborDockerEnvironment(environment_dir=root, session_id="task__verifier__trial", task_env_config=TaskEnvironment(None), hitch_prebuilt_task_image=prebuilt)
+assert verifier_prebuilt.task_env_config.docker_image is None
+assert verifier_prebuilt._hitch_prebuilt_task_image is None
+for trial_name in ("short", "task-" + "a" * 80, "task__verifier__name"):
+    trial_paths = types.SimpleNamespace(trial_dir=root / trial_name)
+    candidate = module.HitchHarborDockerEnvironment(environment_dir=root, session_id=trial_name + "__env", trial_paths=trial_paths,
+        task_env_config=TaskEnvironment(None), hitch_prebuilt_task_image=prebuilt, hitch_shared_runtime=shared_paths)
+    assert candidate.task_env_config.docker_image == prebuilt
+    assert candidate._hitch_shared_runtime is not None
+    for session in (trial_name + "__verifier__env", trial_name[:53] + "__12345678"):
+        verifier = module.HitchHarborDockerEnvironment(environment_dir=root, session_id=session, trial_paths=trial_paths,
+            task_env_config=TaskEnvironment("verifier-image"), hitch_prebuilt_task_image=prebuilt, hitch_shared_runtime=shared_paths)
+        assert verifier.task_env_config.docker_image == "verifier-image"
+        assert verifier._hitch_prebuilt_task_image is None
+        assert verifier._hitch_shared_runtime is None
 gpu_env = module.HitchHarborDockerEnvironment(environment_dir=root, hitch_main_gpu_count=2)
 gpu_overlay_text = gpu_env._hitch_ownership_compose_path.read_text()
 assert '"devices": !override [{"capabilities": ["gpu"], "count": 2}]' in gpu_overlay_text
@@ -122,6 +158,28 @@ else: raise AssertionError("cross-repository image mapping accepted")
 try: module._validate_prebuilt_task_image("hitch-environment:mutable")
 except ValueError: pass
 else: raise AssertionError("mutable prebuilt task image accepted")
+original = (root / "docker-compose.yaml").read_text()
+try:
+    for raw in ({"privileged": "false"}, {"privileged": "$" + "{ENABLE_PRIVILEGED:-false}", "volumes": None},
+                {"extends": {"file": "template.yaml", "service": "template"}}):
+        (root / "docker-compose.yaml").write_text(json.dumps({"services": {"main": raw}}))
+        for resolved in ({"privileged": False, "volumes": None}, {"privileged": True},
+                         {"cap_add": ["SYS_ADMIN"]}, {"volumes": [{"type": "bind", "source": "/task", "target": "/opt/hitch"}]}):
+            candidate = module.HitchHarborDockerEnvironment(environment_dir=root, session_id="task__env", hitch_shared_runtime=shared_paths)
+            candidate.resolved_main = resolved
+            if resolved == {"privileged": False, "volumes": None}:
+                asyncio.run(candidate._run_docker_compose_command(["up", "--wait"]))
+                assert candidate.commands == [["config", "--format", "json"], ["up", "--wait"]]
+            else:
+                try: asyncio.run(candidate.start(False))
+                except ValueError: pass
+                else: raise AssertionError("unsafe resolved configuration accepted")
+                assert candidate.commands == [["config", "--format", "json"]]
+                assert candidate.stop_requests == [False]
+                assert "volumes" not in json.loads(candidate._hitch_ownership_compose_path.read_text())["services"]["main"]
+            candidate._hitch_ownership_temp_dir.cleanup()
+finally:
+    (root / "docker-compose.yaml").write_text(original)
 `;
   const result = spawnSync("python3", ["-c", script, directory, source], { encoding: "utf8" });
   assert.equal(result.status, 0, result.stderr || result.stdout);
