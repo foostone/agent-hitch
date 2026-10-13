@@ -33,6 +33,7 @@ import { planTaskSchedulingHints, schedulingHintsFromPlan } from "./duration-est
 import type { EvalSchedulerSummaryV1 } from "../domain/index.js";
 import { buildCompletedEvalResult, buildFailedEvalResult } from "./eval-result-builder.js";
 import { verifyBenchmarkExecution } from "./benchmark-verification.js";
+import { loadBenchmarkAdapterManifest } from "./benchmark-adapter-manifest.js";
 export async function runEval({ evalId = newEvalId(), request, root, env = process.env, harborExecutable, signal, onEvent, trialBundleGraceMs, precreated = false, replaceTerminal = false, normalizedRequest, maxConcurrentOverride, executionResources, executionResourceSource = "operator-default", executionStrategy = "legacy-attempt-shards", executionWorker, modelCapturePlan, workItemAdmission, remoteWorkExecutor, inferenceCoordinator, inferenceRerunId, resumeExisting = false, onControlPhase, onWorkItemState, onWorkItemQueued, evolutionBaselineDurations, dockerResourceReaper, environmentBuildMode = "backend", environmentImageResolver, environmentImageBuilder, environmentImageManifestLoader, harborArtifactBuilder }: RunEvalOptions): Promise<EvalResult> {
   if (!root) throw invalidInput("a Hitch state root is required for eval");
   if (inferenceRerunId && !/^rerun_[a-f0-9]{32}$/.test(inferenceRerunId)) throw invalidInput("invalid inference repair scope");
@@ -180,7 +181,7 @@ export async function runEval({ evalId = newEvalId(), request, root, env = proce
       writeEvalPlanningCheckpoint(evalDirectory, logicalPlan, progress),
     ]);
     const selectedArtifactBuilder = harborArtifactBuilder ?? (env.NODE_ENV === "test" && env.HITCH_TEST_HOST_ARTIFACT_BUILDER === "1" ? prepareHostHarborArtifactForTest : prepareHarborArtifact);
-    const prepared = await prepareEvalArtifactAssignments({ builder: selectedArtifactBuilder, root, resolvedRevision, requestedReference, controllerRuntime, ...(localTransport ? { localTransport } : {}), taskRuntimeContracts: localPlanning.taskRuntimeContracts, sink, env, ...(signal ? { signal } : {}) });
+    const prepared = await prepareEvalArtifactAssignments({ builder: selectedArtifactBuilder, root, resolvedRevision, requestedReference, controllerRuntime, ...(!remoteWorkExecutor ? { sharedRuntimeDirectory: path.join(evalDirectory, "shared-runtime") } : {}), ...(localTransport ? { localTransport } : {}), taskRuntimeContracts: localPlanning.taskRuntimeContracts, sink, env, ...(signal ? { signal } : {}) });
     const preparedAssignments = prepared.assignments;
     const preparedArtifact = prepared.primary;
     const preparedArtifacts = prepared.artifactsById;
@@ -472,6 +473,12 @@ export async function runEval({ evalId = newEvalId(), request, root, env = proce
     failureStage = "finalizing";
     await onControlPhase?.("finalizing");
     trialRefs = progress.trials;
+    // Sweep already-collected and unselected tasks again before finalization.
+    if (standardDataset && !signal?.aborted) {
+      const manifest = await loadBenchmarkAdapterManifest(normalized.dataset);
+      if (!manifest) throw invalidInput("benchmark adapter manifest disappeared after eval admission");
+      if (manifest.dataset_digest !== normalized.benchmark_revision) throw invalidInput("benchmark adapter manifest changed after eval admission");
+    }
     result = buildCompletedEvalResult({
       evalId, request: normalized, plannedTaskExecution, plannedTrials,
       executionWorkItems: executionPlan.work_items.length, localTaskIds, backendRuns,

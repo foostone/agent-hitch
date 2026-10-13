@@ -34,10 +34,24 @@ _GPU_OVERRIDE_PREFIX = "__HITCH_GPU_OVERRIDE_"
 _HOST_CREDENTIAL_HELPER_ENV = "HITCH_HOST_CREDENTIAL_HELPER_JSON"
 
 
+class _SharedRuntimeConfigurationError(ValueError):
+    """No candidate was started; cleanup must preserve existing images."""
+
+
+def _candidate_session(session_id: str, trial_name: str | None) -> bool:
+    # Keep role selection self-contained: historical verifier repairs replace
+    # only this provider and retain the original runtime's module membership.
+    # Verifier sessions may truncate their role marker or use a step named env.
+    if trial_name is not None:
+        return session_id == f"{trial_name}__env"
+    return session_id.endswith("__env") and "__verifier__" not in session_id
+
+
 class HitchHarborDockerEnvironment(DockerEnvironment):
     """Use Harbor's Docker semantics with a final ownership-label overlay."""
 
     _hitch_static_no_network = False
+    _hitch_preparation = None
 
     def __init__(
         self,
@@ -48,6 +62,10 @@ class HitchHarborDockerEnvironment(DockerEnvironment):
         hitch_prebuilt_task_image: str | None = None,
         hitch_model_proxy_host_gateway: bool = False,
         hitch_main_gpu_count: int = 0,
+        hitch_shared_runtime: Mapping[str, str] | None = None,
+        hitch_image_cache_dir: str | None = None,
+        hitch_image_build_slots: int = 2,
+        hitch_managed_keepalive: bool = False,
         **kwargs: Any,
     ) -> None:
         self._hitch_ownership_labels = _validate_labels(hitch_ownership_labels)
@@ -58,12 +76,32 @@ class HitchHarborDockerEnvironment(DockerEnvironment):
         self._hitch_prebuilt_task_image = _validate_prebuilt_task_image(
             hitch_prebuilt_task_image
         )
+        # Harbor passes environment kwargs to separate verifiers too. A planned
+        # candidate image must never replace a verifier's independent context.
+        session_id = kwargs.get("session_id", args[2] if len(args) > 2 else "")
+        trial_paths = kwargs.get("trial_paths", args[3] if len(args) > 3 else None)
+        trial_name = trial_paths.trial_dir.name if trial_paths is not None else None
+        candidate = _candidate_session(session_id, trial_name)
+        if session_id and not candidate:
+            self._hitch_prebuilt_task_image = None
+        if hitch_image_cache_dir is not None and (not isinstance(hitch_image_cache_dir, str) or not Path(hitch_image_cache_dir).is_absolute()):
+            raise ValueError("Hitch image cache directory must be absolute")
+        if not isinstance(hitch_managed_keepalive, bool):
+            raise ValueError("Hitch managed keepalive flag is invalid")
+        self._hitch_preparation = None
+        if hitch_image_cache_dir or hitch_managed_keepalive:
+            from hitch_compose_preparation import ComposePreparation
+            self._hitch_preparation = ComposePreparation(self, hitch_image_cache_dir, hitch_image_build_slots, hitch_managed_keepalive)
         if not isinstance(hitch_model_proxy_host_gateway, bool):
             raise ValueError("Hitch model proxy host gateway flag is invalid")
         self._hitch_model_proxy_host_gateway = hitch_model_proxy_host_gateway
         if isinstance(hitch_main_gpu_count, bool) or not isinstance(hitch_main_gpu_count, int) or hitch_main_gpu_count < 0:
             raise ValueError("Hitch main GPU count is invalid")
         self._hitch_main_gpu_count = hitch_main_gpu_count
+        self._hitch_shared_runtime = None
+        if hitch_shared_runtime is not None:
+            import hitch_shared_runtime as shared_runtime
+            self._hitch_shared_runtime = shared_runtime.configure(hitch_shared_runtime, candidate)
         self._hitch_ownership_temp_dir: tempfile.TemporaryDirectory[str] | None = None
         self._hitch_ownership_compose_path: Path | None = None
         self._hitch_phase_compose_path: Path | None = None
@@ -103,6 +141,7 @@ class HitchHarborDockerEnvironment(DockerEnvironment):
             or self._hitch_main_gpu_count > 0
             or self._hitch_benchmark_platform
             or self._hitch_static_no_network
+            or self._hitch_shared_runtime
         ):
             self._hitch_ownership_compose_path = self._write_ownership_overlay()
 
@@ -113,9 +152,51 @@ class HitchHarborDockerEnvironment(DockerEnvironment):
         paths = list(super()._docker_compose_paths)
         if self._hitch_ownership_compose_path is not None:
             paths.append(self._hitch_ownership_compose_path)
+        if self._hitch_preparation and self._hitch_preparation.path is not None:
+            paths.append(self._hitch_preparation.path)
         if self._hitch_phase_compose_path is not None:
             paths.append(self._hitch_phase_compose_path)
         return paths
+
+    @property
+    def _main_image_name(self):
+        preparation = getattr(self, "_hitch_preparation", None)
+        return preparation.images.get(MAIN_SERVICE_NAME, super()._main_image_name) if preparation else super()._main_image_name
+
+    async def _run_docker_compose_command(self, command, *args, **kwargs):
+        run = super()._run_docker_compose_command
+        if command[:1] == ["up"] and self._hitch_shared_runtime:
+            import hitch_shared_runtime as shared_runtime
+            from hitch_compose_preparation import compose_services
+            # Resolve the task's merged/interpolated configuration before our
+            # bind mounts can hide a conflicting task mount. Revalidate on every
+            # start, and never expose host snapshots to a privileged candidate.
+            try:
+                self._hitch_ownership_compose_path = self._write_ownership_overlay()
+                resolved = await run(["config", "--format", "json"])
+                shared_runtime.reject_conflicts(compose_services(resolved.stdout))
+                self._hitch_ownership_compose_path = self._write_ownership_overlay(include_shared_runtime=True)
+            except Exception as error:
+                raise _SharedRuntimeConfigurationError(str(error)) from error
+        preparation = self._hitch_preparation
+        if preparation:
+            if command == ["build"]:
+                cached = await preparation.build(run)
+                if cached is not None:
+                    return cached
+            elif command[:1] == ["up"]:
+                # If Harbor selected a prebuilt image and skipped build, retain
+                # Compose's original image/pull-policy choices, including any
+                # sidecars. An implicit up is not an explicit build request.
+                await preparation.runtime(run)
+            elif command[:1] == ["down"] and preparation.images and "--rmi" in command:
+                index = command.index("--rmi")
+                if command[index + 1:index + 2] == ["local"]:
+                    # Compose treats an immutable image ID as an untagged local
+                    # image even though our persistent cache also owns a tag.
+                    # Keep prepared images; retain all container/volume cleanup.
+                    command = command[:index] + command[index + 2:]
+        return await run(command, *args, **kwargs)
 
     def _requires_egress_control(self, *, startup_network_policy, phase_network_policies):
         if self._hitch_static_no_network:
@@ -147,6 +228,12 @@ class HitchHarborDockerEnvironment(DockerEnvironment):
             timeout_sec=timeout_sec,
             user=user,
         )
+
+    async def hitch_verify_shared_runtime(self, controller_payload, artifact_directory):
+        if self._hitch_shared_runtime is None:
+            return False
+        import hitch_shared_runtime as shared_runtime
+        return await shared_runtime.verify_environment(self, controller_payload, artifact_directory)
 
     async def _apply_network_policy(self, network_policy):
         if self._hitch_static_no_network:
@@ -188,15 +275,17 @@ class HitchHarborDockerEnvironment(DockerEnvironment):
 
     async def start(self, force_build: bool):
         try:
+            if self._hitch_preparation:
+                self._hitch_preparation.reset(force_build)
             await super().start(force_build)
             if self._hitch_static_no_network:
                 await self._verify_static_network()
             if self._hitch_benchmark:
                 await self._hitch_benchmark.prepare()
-        except BaseException:
+        except BaseException as error:
             # Harbor may abort setup before entering its normal teardown path.
             try:
-                await self.stop(delete=True)
+                await self.stop(delete=not isinstance(error, _SharedRuntimeConfigurationError))
             except BaseException:
                 pass
             raise
@@ -222,7 +311,9 @@ class HitchHarborDockerEnvironment(DockerEnvironment):
         finally:
             await super().stop(delete)
 
-    def _write_ownership_overlay(self) -> Path:
+    def _write_ownership_overlay(self, *, include_shared_runtime=False) -> Path:
+        if include_shared_runtime and self._hitch_shared_runtime:
+            import hitch_shared_runtime as shared_runtime
         services = {MAIN_SERVICE_NAME}
         if self._enable_egress_control:
             services.add(self._EGRESS_CONTROL_SERVICE_NAME)
@@ -265,6 +356,8 @@ class HitchHarborDockerEnvironment(DockerEnvironment):
         service_overlays: dict[str, dict[str, Any]] = {}
         for name in sorted(services):
             config: dict[str, Any] = {}
+            if name == MAIN_SERVICE_NAME and include_shared_runtime and self._hitch_shared_runtime:
+                config["volumes"] = shared_runtime.compose_mounts(self._hitch_shared_runtime)
             # The benchmark default must not replace explicit per-service
             # architecture, e.g. an ARM QEMU sidecar beside an AMD64 candidate.
             if getattr(self, "_hitch_benchmark_platform", None) and name not in declared_platforms:

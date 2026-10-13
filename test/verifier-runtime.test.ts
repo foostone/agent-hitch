@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
+import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { ensureControllerRuntime, useControllerRuntimeById } from "../src/controller-runtime/index.js";
 import { statePaths } from "../src/foundation/index.js";
@@ -49,4 +50,23 @@ test("explicit verifier runtime selection survives persisted submission and reje
   for (const value of [{ ...input, rerun_type: "candidate-restart" }, { ...input, verifier_runtime_id: "latest" }]) {
     assert.throws(() => parseEvalRerunSubmissionInput(value), /verifier runtime/);
   }
+});
+
+test("default provider repair remains usable with the original runtime file membership", async t => {
+  const root = await mkdtemp(path.join(tmpdir(), "hitch-verifier-provider-"));
+  t.after(() => forceRemove(root));
+  const payload = path.join(root, "payload");
+  const files = { "dist/bin/hitch.js": "// frozen CLI\n", [VERIFIER_ENVIRONMENT_PROVIDER]: "# original provider\n" };
+  for (const [file, text] of Object.entries(files)) {
+    await mkdir(path.dirname(path.join(payload, file)), { recursive: true });
+    await writeFile(path.join(payload, file), text);
+  }
+  const source = await ensureControllerRuntime({ root, payloadRoot: payload, rules: Object.keys(files).map(file => ({ path: file })) });
+  const repaired = await prepareVerifierEnvironmentRuntime({ root, sourceRuntimeId: source.runtime_id });
+  assert.deepEqual(repaired.manifest.files.map(file => file.path), source.manifest.files.map(file => file.path));
+  assert.equal(verifierRuntimeRepair(source, repaired)!.path, VERIFIER_ENVIRONMENT_PROVIDER);
+  const loaded = spawnSync("python3", ["-I", "-B", "test-support/verifier_provider_smoke.py",
+    path.join(repaired.directory, "payload", VERIFIER_ENVIRONMENT_PROVIDER), root], { encoding: "utf8" });
+  assert.equal(loaded.status, 0, loaded.stderr || loaded.stdout);
+  assert.deepEqual(JSON.parse(loaded.stdout), { provider_only_repair: "passed" });
 });
