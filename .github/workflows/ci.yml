@@ -45,7 +45,22 @@ jobs:
           npm run docs:check
       - name: Test
         if: matrix.os != 'ubuntu-latest' || matrix.node != 24
-        run: npm test
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            # The binding venv shares the host stdlib. Other Python tests can
+            # create bytecode caches while its runtime inventory is being read.
+            node --test --test-timeout=120000 dist/test/evaluation-binding.test.js
+            tests=()
+            for file in dist/test/*.test.js; do
+              if [ "$file" != "dist/test/evaluation-binding.test.js" ]; then
+                tests+=("$file")
+              fi
+            done
+            node --test --test-timeout=120000 "${tests[@]}"
+          else
+            npm test
+          fi
       - name: Test with coverage
         if: matrix.os == 'ubuntu-latest' && matrix.node == 24
         run: npm run coverage
