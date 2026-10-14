@@ -33,6 +33,7 @@ class Handler(BaseHTTPRequestHandler):
         data = json.dumps(value).encode(); self.send_response(200)
         self.send_header("Content-Type", "application/json"); self.send_header("Content-Length", str(len(data))); self.end_headers(); self.wfile.write(data)
     def do_GET(self):
+        print(json.dumps({"fixture": "get", "path": self.path}), flush=True)
         if self.path == "/flush_cache":
             if self.headers.get("Authorization") != "Bearer " + a.admin_api_key: self.send_error(401); return
             with (root / "flush.jsonl").open("a") as out: out.write(json.dumps({"devices": devices}) + "\n")
@@ -69,4 +70,7 @@ class Handler(BaseHTTPRequestHandler):
             try: self.reply(value)
             except (BrokenPipeError, ConnectionResetError): pass
 
-ThreadingHTTPServer((a.host, int(a.port)), Handler).serve_forever()
+server = ThreadingHTTPServer((a.host, int(a.port)), Handler)
+print(json.dumps({"fixture": "listening", "pid": os.getpid(), "devices": devices,
+                  "configuration": info}), flush=True)
+server.serve_forever()

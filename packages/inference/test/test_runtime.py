@@ -107,7 +107,7 @@ class RuntimeTest(unittest.TestCase):
         try:
             return wait_until(observed)
         except AssertionError as error:
-            self.fail(str(error) + "\n" + startup_diagnostics(self.root / "node"))
+            self.fail(str(error) + "\n" + startup_diagnostics(self.root))
 
     def request(self, access, text="hello", *, stream=False, tools=False):
         connection = http.client.HTTPConnection("127.0.0.1", access["port"], timeout=10)

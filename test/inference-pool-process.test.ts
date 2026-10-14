@@ -59,7 +59,7 @@ test("real standalone Python TP pool startup/attachment feeds Hitch's replica ev
   try {
     service = await launcher.start(input);
   } catch (error) {
-    const diagnostic = await promisify(execFile)(python, [path.join(packageRoot, "test/diagnostics.py"), path.join(directory, "node")], { env, timeout: 10_000 });
+    const diagnostic = await promisify(execFile)(python, [path.join(packageRoot, "test/diagnostics.py"), directory], { env, timeout: 10_000 });
     t.diagnostic(diagnostic.stdout);
     throw error;
   }

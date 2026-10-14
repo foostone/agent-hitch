@@ -27,6 +27,15 @@ def startup_diagnostics(root):
         lines = [line for line in lines if not re.search(r"api.?key|admin.?token|engine.?token|authorization", line, re.I)]
         records.append({"service": path.parent.name, "log": path.name,
                         "tail": re.sub(r"[a-f0-9]{64}", "[digest/token]", "\n".join(lines))[-3000:]})
+    for path in sorted(Path(root).rglob("device-leases.json")):
+        try:
+            ledger = json.loads(path.read_text())
+            records.append({"owners": [{key: owner[key] for key in ("owner", "devices", "processes", "closing") if key in owner}
+                                       for owner in ledger.get("owners", {}).values()]})
+        except (OSError, ValueError):
+            pass
+    for path in sorted(Path(root).rglob("gpu-observations.jsonl")):
+        records.append({"gpu_observations": path.read_text().splitlines()[-4:]})
     return json.dumps(records, indent=2)[:20000]
 
 
