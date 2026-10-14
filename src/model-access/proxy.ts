@@ -1,3 +1,4 @@
+import { endpointRequest } from "./endpoint-contract.js";
 import { randomBytes } from "node:crypto";
 import http from "node:http";
 import https from "node:https";
@@ -6,7 +7,7 @@ import type { IncomingHttpHeaders, IncomingMessage, Server, ServerResponse } fro
 import { cp, rm } from "node:fs/promises";
 import path from "node:path";
 import type { InteractionCaptureRefV1, ModelProxyRouteV1, Sha256 } from "../domain/index.js";
-import { ensureDir } from "../foundation/index.js";
+import { ensureDir, HitchError } from "../foundation/index.js";
 import { ModelInteractionCapture } from "./capture.js";
 import { loadInteractionCapture } from "./records.js";
 import { bindTrainingRun, trainingProxyIdentity } from "./training.js";
@@ -36,7 +37,7 @@ export interface HostModelProxyOptions {
   capabilityToken?: string;
   resumeExisting?: boolean;
   topology?: "host-side" | "in-sandbox";
-  managedInferenceIdentity?: { inference_id: Sha256; model_id: Sha256; model_node?: import("../domain/index.js").ModelNodeBindingV2 };
+  externalEndpointBinding?: import("../domain/index.js").ExternalEndpointBindingV1;
   trainingEndpoint?: RegisteredTrainingEndpoint;
   trainingBinding?: import("../domain/index.js").TrainingExternalBindingV1;
   /** A worker relay claims its canonical run at the controller before any model call. */
@@ -71,6 +72,9 @@ export class HostModelProxy {
   private readonly port: number;
   private readonly resumeExisting: boolean;
   private closed = false;
+  private readonly forwards = new Set<Promise<void>>();
+  private readonly requests = new Set<import("node:http").ClientRequest>();
+  private readonly externalEndpointBinding: HostModelProxyOptions["externalEndpointBinding"];
   private readonly trainingEndpoint: RegisteredTrainingEndpoint | undefined;
   private readonly trainingBinding: import("../domain/index.js").TrainingExternalBindingV1 | undefined;
   private readonly onRun: HostModelProxyOptions["onRun"];
@@ -78,6 +82,7 @@ export class HostModelProxy {
 
   private constructor(input: HostModelProxyOptions, server: Server, token: string, port: number) {
     this.server = server;
+    this.externalEndpointBinding = input.externalEndpointBinding;
     this.token = token;
     this.port = port;
     this.captureRoot = input.captureRoot;
@@ -111,7 +116,7 @@ export class HostModelProxy {
       topology: input.topology ?? "host-side",
       base_url_template: `${base}/{provider}`,
       health_url_template: `${base}/health`,
-      ...(input.managedInferenceIdentity ? { managed_inference: { ...input.managedInferenceIdentity } } : {}),
+      ...(input.externalEndpointBinding ? { external_endpoint: input.externalEndpointBinding } : {}),
       ...(this.trainingBinding ? { training_external: trainingProxyIdentity(this.trainingBinding) } : {}),
     };
   }
@@ -134,7 +139,10 @@ export class HostModelProxy {
     const token = input.capabilityToken ?? randomBytes(24).toString("hex");
     let proxy: HostModelProxy | undefined;
     const server = http.createServer((request, response) => {
-      proxy?.handle(request, response).catch((error) => respondError(response, 502, "model_proxy_failed", error));
+      if (!proxy) return;
+      const forwarding = proxy.handle(request, response).catch((error) => respondError(response, 502, "model_proxy_failed", error));
+      proxy.forwards.add(forwarding);
+      void forwarding.finally(() => proxy?.forwards.delete(forwarding));
     });
     const port = await listen(server, bindHost, input.listenPort ?? 0);
     try { proxy = new HostModelProxy(input, server, token, port); }
@@ -146,10 +154,13 @@ export class HostModelProxy {
     const entry = await this.captureFor(runId);
     entry.finalized ??= entry.capture.close();
     const ref = await entry.finalized;
-    await loadInteractionCapture(entry.directory);
+    const loaded = await loadInteractionCapture(entry.directory);
     const destination = path.join(destinationRunDirectory, "interactions");
     await rm(destination, { recursive: true, force: true });
     await cp(path.join(entry.directory, "interactions"), destination, { recursive: true, errorOnExist: true, force: false });
+    if (this.externalEndpointBinding && loaded.interactions.some(row => row.effective_model && row.effective_model !== this.externalEndpointBinding!.wire_model)) {
+      throw new HitchError("upstream reported a model different from the frozen endpoint", { code: "endpoint_model_mismatch", exitCode: 12 });
+    }
     return ref;
   }
 
@@ -160,7 +171,10 @@ export class HostModelProxy {
   async close(): Promise<void> {
     if (this.closed) return;
     this.closed = true;
+    for (const request of this.requests) request.destroy(new Error("task model access closed"));
+    this.server.closeAllConnections();
     await closeServer(this.server);
+    await Promise.allSettled([...this.forwards]);
     const entries = await Promise.all(this.captures.values());
     await Promise.all(entries.map(async (entry) => { entry.finalized ??= entry.capture.close(); await entry.finalized; }));
   }
@@ -168,9 +182,9 @@ export class HostModelProxy {
   private async handle(request: IncomingMessage, response: ServerResponse): Promise<void> {
     const route = parseRoute(request.url, this.token);
     if (!route) return respondJSON(response, 404, { error: { code: "model_proxy_route_not_found" } });
-    if (this.route.managed_inference && route.kind === "provider"
-      && (route.provider !== "openai" || request.method !== "POST" || !/^\/(?:v1\/)?(?:responses|chat\/completions)$/.test(route.tail))) {
-      return respondJSON(response, 404, { error: { code: "managed_generation_only" } });
+    if (this.externalEndpointBinding && route.kind === "provider" && (route.provider !== "openai" || request.method !== "POST"
+      || route.tail.replace(/^\/v1\//, "/") !== (this.externalEndpointBinding.api === "responses" ? "/responses" : "/chat/completions"))) {
+      return respondJSON(response, 404, { error: { code: "endpoint_protocol_unsupported" } });
     }
     if (this.trainingBinding) {
       if (this.trainingRunId && this.trainingRunId !== route.runId) return respondJSON(response, 409, { error: { code: "training_run_fenced" } });
@@ -194,25 +208,30 @@ export class HostModelProxy {
     upstream.search = request.url?.includes("?") ? `?${request.url.split("?").slice(1).join("?")}` : "";
     const startedAt = new Date().toISOString();
     const wireModel = this.upstreamWireModels[provider];
-    const rewritten = wireModel ? rewriteModelRequest(await readBoundedRequest(request), request.headers["content-type"], wireModel) : undefined;
+    const rewritten = wireModel ? rewriteModelRequest(await readBoundedRequest(request), request.headers["content-type"], wireModel, this.externalEndpointBinding) : undefined;
     const requestCapture = rewritten
       ? Promise.resolve({ body: rewritten.original, truncated: false })
       : captureStream(request);
     const transport = upstream.protocol === "https:" ? https : http;
     const headers = forwardedHeaders(request.headers, upstream);
     const authorization = this.upstreamAuthorizations[provider];
-    if (authorization) headers.authorization = authorization;
+    if (authorization !== undefined) { delete headers.authorization; if (authorization) headers.authorization = authorization; }
     if (rewritten) headers["content-length"] = String(rewritten.forwarded.length);
     const upstreamRequest = transport.request(upstream, {
       method: request.method,
       headers,
     });
+    this.requests.add(upstreamRequest);
+    const cancelUpstream = () => { if (!response.writableEnded) upstreamRequest.destroy(new Error("model client disconnected")); };
+    response.once("close", cancelUpstream);
+    upstreamRequest.once("close", () => { this.requests.delete(upstreamRequest); response.off("close", cancelUpstream); });
     if (rewritten) upstreamRequest.end(rewritten.forwarded);
     else request.pipe(upstreamRequest);
     await new Promise<void>((resolve, reject) => {
       upstreamRequest.once("response", (upstreamResponse) => {
         response.writeHead(upstreamResponse.statusCode ?? 502, responseHeaders(upstreamResponse.headers));
         const responseCapture = captureStream(upstreamResponse);
+        void responseCapture.catch(() => undefined);
         upstreamResponse.pipe(response);
         upstreamResponse.once("end", () => {
           Promise.all([requestCapture, responseCapture]).then(async ([requestBody, responseBody]) => {
@@ -239,7 +258,7 @@ export class HostModelProxy {
         upstreamResponse.once("error", reject);
       });
       upstreamRequest.once("error", reject);
-      request.once("aborted", () => reject(new Error("model proxy client request aborted")));
+      request.once("aborted", () => upstreamRequest.destroy(new Error("model proxy client request aborted")));
     }).catch(async (error) => {
       await entry.capture.record({
         requestedModel: "unknown",
@@ -295,6 +314,7 @@ function rewriteModelRequest(
   original: Buffer,
   contentType: string | string[] | undefined,
   wireModel: string,
+  binding?: import("../domain/index.js").ExternalEndpointBindingV1,
 ): { original: Buffer; forwarded: Buffer } {
   const type = Array.isArray(contentType) ? contentType[0] : contentType;
   if (!type?.toLowerCase().includes("json")) throw new Error("managed model request must use JSON");
@@ -302,7 +322,7 @@ function rewriteModelRequest(
   try { value = JSON.parse(original.toString("utf8")); }
   catch { throw new Error("managed model request must contain valid JSON"); }
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("managed model request must be a JSON object");
-  const forwarded = Buffer.from(JSON.stringify({ ...(value as Record<string, unknown>), model: wireModel }));
+  const forwarded = Buffer.from(JSON.stringify(binding ? endpointRequest(binding, value as Record<string, unknown>) : { ...(value as Record<string, unknown>), model: wireModel }));
   return { original, forwarded };
 }
 
@@ -384,6 +404,8 @@ function capturedPayload(value: { body: Buffer; truncated: boolean }, contentTyp
 
 function modelFromPayload(value: unknown): string | null {
   if (value && typeof value === "object" && !Array.isArray(value)) {
+    const nested = (value as Record<string, unknown>).response;
+    if (nested && typeof nested === "object") return modelFromPayload(nested);
     const model = (value as Record<string, unknown>).model;
     if (typeof model === "string" && model) return model;
     const body = (value as Record<string, unknown>).body;
@@ -400,7 +422,15 @@ function modelFromPayload(value: unknown): string | null {
 
 function usageFromPayload(value: unknown): Record<string, number> | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
-  const usage = (value as Record<string, unknown>).usage;
+  const record = value as Record<string, unknown>;
+  if (record.response && typeof record.response === "object") return usageFromPayload(record.response);
+  if (typeof record.body === "string") {
+    for (const line of record.body.split(/\r?\n/).reverse()) {
+      if (!line.startsWith("data:")) continue;
+      try { const usage = usageFromPayload(JSON.parse(line.slice(5).trim())); if (usage) return usage; } catch { /* SSE sentinel. */ }
+    }
+  }
+  const usage = record.usage;
   if (!usage || typeof usage !== "object" || Array.isArray(usage)) return null;
   const numbers = Object.entries(usage).filter((entry): entry is [string, number] => typeof entry[1] === "number" && Number.isFinite(entry[1]) && entry[1] >= 0);
   return numbers.length > 0 ? Object.fromEntries(numbers) : null;

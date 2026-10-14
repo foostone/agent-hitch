@@ -26,7 +26,7 @@ compare models, or fix the model to compare harnesses.
 
 - [x] **Build and cache.** Pin harness versions and reuse verified artifacts and environment images.
 - [x] **Adapt the harness.** Run Codex, Claude Code, and other supported harnesses through one interface.
-- [x] **Connect the model.** Use hosted APIs or managed local and remote SGLang inference.
+- [x] **Connect the model.** Connect hosted APIs or already deployed local/remote SGLang endpoints.
 - [x] **Place the work.** Execute task sandboxes on local Docker or registered remote workers.
 - [x] **Run and recover.** Share resource budgets, run trials in parallel, and preserve completed work through supported recovery paths.
 - [x] **Collect the evidence.** Keep scores, trajectories, verifier evidence, and provenance in one result bundle.
@@ -136,28 +136,7 @@ and resource admission; it is not a speed or cost comparison against native Harb
 
 ## Local and remote model inference
 
-Import a complete Hugging Face safetensors checkpoint once, then use the same
-run and eval commands with a `local/<name>` model. Hitch chooses a pinned
-CPU or CUDA preview runtime, starts the daemon and SGLang service when needed, and
-records the immutable model/runtime/inference identities automatically.
-
-```bash
-hitch models add /models/coder-checkpoint --name coder
-
-hitch run \
-  --harness codex@version:0.145.0 \
-  --model local/coder \
-  --prompt "Inspect this repository"
-```
-
-The local preview targets Linux/amd64 Docker with an Intel Xeon AMX CPU or a
-compatible single NVIDIA CUDA GPU. Managed Codex requires the exact version above
-and a supported model tool parser. Unsupported hardware never falls back to a cloud model.
-
-For remote inference, use your Harness’s model API configuration or register a
-managed model node. Node-bound models also use `local/<name>`; the binding selects
-the remote GPU host. See the [model inference guide](https://rsigear.xyz/docs/hitch/model-inference)
-for setup, Docker access, parallel capacity, and service recovery.
+Connect already deployed APIs with `hitch models connect --name coder --file ENDPOINT.json`, verify with `hitch models inspect endpoint/coder --verify --json`, then use `--model endpoint/coder` for run/eval. Submissions freeze revisions and generation parameters. Tasks share services and cancel only their own requests. See the [model inference guide](docs/guide/en/model-inference.md) and [pinned upstream deployment examples](examples/external-inference/README.md).
 
 ## Parallel execution and recovery
 
@@ -226,7 +205,7 @@ selection, artifact preparation, and workspace modes.
 | Guide | What you will learn |
 | --- | --- |
 | [Quick Start](docs/guide/en/quickstart.md) | Install, authenticate, run a task, and submit parallel work |
-| [Local and remote model inference](docs/guide/en/model-inference.md) | Use remote APIs, managed local SGLang, and remote model nodes |
+| [Local and remote model inference](docs/guide/en/model-inference.md) | Connect immutable model endpoints and share upstream services |
 | [Versions and workspaces](docs/guide/en/versions-and-workspaces.md) | Pin the executable and choose worktree, copy, or shared mode |
 | [Runs and evidence](docs/guide/en/runs-and-evidence.md) | Query results, trajectories, verifier evidence, and feedback |
 | [First evaluation](docs/guide/en/evaluations.md) | Run a small Docker task and interpret valid and invalid results |
@@ -277,11 +256,9 @@ and discuss model and agent evaluation infrastructure.
 
 Hitch draws inspiration from [Multica](https://github.com/multica-ai/multica),
 adopts [Harbor](https://github.com/harbor-framework/harbor)'s task definition format,
-and integrates [SGLang](https://github.com/sgl-project/sglang) for managed local
-and remote model inference.
+and connects to deployed model services through standard APIs. The
+[external inference examples](examples/external-inference/README.md) use official SGLang and Gateway images.
 
 ## License
 
 [Apache License 2.0](LICENSE).
-
-Standalone ordinary inference is independently installable from [packages/inference](packages/inference/README.md). It supports explicit tensor parallelism, disjoint replicas and concurrent requests; Hitch retains task/evaluation orchestration.

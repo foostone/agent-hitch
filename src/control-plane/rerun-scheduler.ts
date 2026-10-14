@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { mkdir, readdir, rm } from "node:fs/promises";
 import path from "node:path";
-import type { EvalExecutionPolicyV1, EvalId, EvalRequest, ManagedInferenceCoordinator, ModelCapturePlanV1, ResourceVectorV1 } from "../domain/index.js";
+import type { EvalExecutionPolicyV1, EvalId, EvalRequest, ModelCapturePlanV1, ResourceVectorV1 } from "../domain/index.js";
 import {
   assertEvalRerunTypeSupported,
   acknowledgeRemoteRerunCompletion,
@@ -47,7 +47,6 @@ export interface EvalRerunSchedulerOptions {
   onEvent?: (event: Record<string, unknown>) => void;
   credentialEnv?: NodeJS.ProcessEnv;
   provider?: string;
-  inferenceCoordinator?: ManagedInferenceCoordinator;
   remoteWork?: RemoteWorkCoordinator;
 }
 
@@ -89,7 +88,6 @@ export class EvalRerunScheduler {
   private readonly executor: EvalRerunExecutor;
   private readonly onEvent: (event: Record<string, unknown>) => void;
   private readonly credentialEnv: NodeJS.ProcessEnv;
-  private readonly inferenceCoordinator: ManagedInferenceCoordinator | undefined;
   private readonly remoteWork: RemoteWorkCoordinator | undefined;
   private readonly unsubscribeResources: () => void;
   private readonly unsubscribeCollisions: () => void;
@@ -100,7 +98,7 @@ export class EvalRerunScheduler {
   private accepting = true;
   private draining = false;
 
-  constructor({ root, resources, trialResources, collisions = new CollisionLockManager(), collisionDomainId = "local-docker", provider = "local-docker", executor = rerunEval, onEvent = () => {}, credentialEnv = process.env, inferenceCoordinator, remoteWork }: EvalRerunSchedulerOptions) {
+  constructor({ root, resources, trialResources, collisions = new CollisionLockManager(), collisionDomainId = "local-docker", provider = "local-docker", executor = rerunEval, onEvent = () => {}, credentialEnv = process.env, remoteWork }: EvalRerunSchedulerOptions) {
     this.root = root;
     this.rerunsRoot = statePaths(root).evals;
     this.resources = resources;
@@ -112,7 +110,6 @@ export class EvalRerunScheduler {
     this.executor = executor;
     this.onEvent = onEvent;
     this.credentialEnv = credentialEnv;
-    this.inferenceCoordinator = inferenceCoordinator;
     this.remoteWork = remoteWork;
     this.unsubscribeResources = resources.subscribe(() => this.scheduleDrain());
     this.unsubscribeCollisions = collisions.subscribe(() => this.scheduleDrain());
@@ -354,7 +351,6 @@ export class EvalRerunScheduler {
       env: this.credentialEnv,
       signal: controller.signal,
       ...(entry.resumeRemoteRerun ? { resumeRemoteRerun: true } : {}),
-      ...(this.inferenceCoordinator ? { inferenceCoordinator: this.inferenceCoordinator } : {}),
       ...(entry.execution.provider !== this.provider && this.remoteWork ? {
         remoteWorkExecutor: this.remoteWork.execute,
         executionWorker: { workerId: "worker_remote_pool", provider: entry.execution.provider, collisionDomainId: `remote-pool:${entry.execution.provider}` },

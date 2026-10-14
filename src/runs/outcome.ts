@@ -1,7 +1,6 @@
-import type { ManagedInferenceLeaseV1, ModelIdentityV1, RunId, TrajectoryFidelity } from "../domain/index.js";
+import type { ModelIdentityV1, RunId, TrajectoryFidelity } from "../domain/index.js";
 import { SCHEMA_VERSION } from "../foundation/index.js";
 import { parseHarnessReference } from "../revisions/index.js";
-import type { ManagedModelProxyIdentity } from "./local-inference-run.js";
 
 export function failureResult(
   runId: RunId,
@@ -49,21 +48,12 @@ export function applyEffectiveModelIdentity(input: {
   manifest: Record<string, unknown>;
   requested: ModelIdentityV1;
   result: Record<string, unknown>;
-  inferenceLease?: ManagedInferenceLeaseV1;
-  managedModelProxy?: ManagedModelProxyIdentity;
   observed?: string;
 }): Record<string, unknown> {
   const current = (input.manifest.model || input.requested) as ModelIdentityV1;
-  // Both paths have been validated by the executor. A provider's wire alias
-  // cannot replace the immutable identity supplied by that managed route.
-  const managed = input.inferenceLease?.lock ?? input.managedModelProxy;
-  if (managed) {
-    input.result.effective_model = managed.model_id;
-    return { ...input.manifest, model: {
-      ...current, provider: "local", effective_id: managed.model_id, identity_resolved: true,
-      inference_id: managed.inference_id,
-      ...(managed.model_node ? { model_node: managed.model_node } : {}),
-    } };
+  if (current.endpoint_binding) {
+    input.result.effective_model = input.observed ?? current.effective_id;
+    return { ...input.manifest, model: { ...current, effective_id: input.observed ?? current.effective_id, identity_resolved: false } };
   }
   if (!input.observed) return input.manifest;
   input.result.effective_model = input.observed;

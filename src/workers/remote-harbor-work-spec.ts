@@ -73,7 +73,7 @@ export function parseRemoteHarborWorkSpec(value: unknown, offer: RemoteWorkOffer
     if (!offer.inputs || offer.inputs.length !== kinds.length || kinds.some(kind => offer.inputs!.filter(ref => ref.kind === kind).length !== 1)
       || offer.inputs.some(ref => ref.format !== (ref.kind === "work-spec" ? "json" : "hitch-tree-v1"))) throw specError("remote verifier inputs are incomplete or ambiguous");
   } else if (binding) validateModelGraph(binding, request, plan, credentialNames);
-  else if (plan.training_binding || request.model.startsWith("local/") || request.model.startsWith("training/")) throw specError("bound models require remote work spec v2");
+  else if (plan.training_binding || request.model.startsWith("endpoint/") || request.model.startsWith("training/")) throw specError("bound models require remote work spec v2");
   return {
     ...(v2 ? { ...(v3 ? { schema_version: "3" as const, resource_delivery: spec.resource_delivery as `sha256:${string}` } : { schema_version: "2" as const }), ...(binding ? { model_binding: binding } : {}), ...(physical ? { physical_execution: physical } : {}), ...(capture ? { verifier_source: "2" as const } : {}), ...(verifier ? { verifier_only: verifier } : {}) } : { schema_version: "1" as const }),
     request, plan, work, resolution, harness_artifact: harnessArtifact,
@@ -88,8 +88,8 @@ function parseRequest(value: unknown, v2: boolean): EvalRequest {
     "schema_version", "backend", "dataset", "harness_ref", "model", "attempts", "max_concurrent",
     "infrastructure_retries", "infrastructure_retry_backoff_ms", "timeout_ms", "setup_timeout_ms",
     "agent_args", "pass_env", "benchmark_id", "benchmark_revision",
-    ...(v2 ? ["training_binding", "local_inference"] : []),
-  ], "remote eval request", v2 ? ["training_binding", "local_inference"] : []);
+    ...(v2 ? ["training_binding", "endpoint_binding"] : []),
+  ], "remote eval request", v2 ? ["training_binding", "endpoint_binding"] : []);
   if (typeof request.schema_version !== "string" || request.backend !== "harbor" || request.dataset !== "task-input"
     || !text(request.harness_ref) || typeof request.model !== "string"
     || !positive(request.attempts) || !positive(request.max_concurrent)
@@ -104,7 +104,7 @@ function validateModelGraph(binding: RemoteModelBindingV2, request: EvalRequest,
   if (!plan.model_capture?.required || plan.model_capture.effective_mode !== "proxy" || plan.model_capture.topology !== "in-sandbox"
     || credentialNames.length || request.pass_env.length) throw specError("remote model binding requires mandatory lease capture and no credential overrides");
   if (binding.kind === "training-external") {
-    if (request.local_inference || !request.training_binding || !plan.training_binding
+    if (request.endpoint_binding || !request.training_binding || !plan.training_binding
       || sha256JSON(request.training_binding) !== sha256JSON(binding.training) || sha256JSON(plan.training_binding) !== sha256JSON(binding.training)
       || request.model !== `training/${binding.training.bindingId}` || !request.harness_ref.startsWith("training-tool@")
       || request.attempts !== 1 || request.infrastructure_retries !== 0 || request.agent_args.length
@@ -112,12 +112,9 @@ function validateModelGraph(binding: RemoteModelBindingV2, request: EvalRequest,
       throw specError("remote training binding differs from its single-attempt work graph");
     }
   } else {
-    const selection = exact(request.local_inference, ["model", "device", "profile", "offline", "inference_id", "model_node"], "remote managed model selection");
-    if (request.training_binding || plan.training_binding || !request.model.startsWith("local/") || selection.model !== request.model
-      || selection.device !== "auto" || selection.profile !== "baseline" || typeof selection.offline !== "boolean"
-      || selection.inference_id !== binding.inference_id || sha256JSON(selection.model_node) !== sha256JSON(binding.model_node)) {
-      throw specError("remote managed model binding differs from its request");
-    }
+    if (request.training_binding || plan.training_binding || !request.model.startsWith("endpoint/")
+      || sha256JSON(request.endpoint_binding) !== sha256JSON(binding.endpoint)
+      || sha256JSON(plan.endpoint_binding) !== sha256JSON(binding.endpoint)) throw specError("external endpoint differs from its frozen request/plan");
   }
 }
 

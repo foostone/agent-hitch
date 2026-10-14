@@ -1,0 +1,41 @@
+{
+  "record_kind": "operator-declared-example-not-a-trusted-deployment-receipt",
+  "deployment_ref": "REPLACE_WITH_DEPLOYMENT_PIPELINE_RUN_OR_CHANGE_REF",
+  "subject": {
+    "artifact_digest": "COPY_FROM_EXISTING_CAS_MODEL_MANIFEST",
+    "hf_repository": "Qwen/Qwen2.5-7B-Instruct",
+    "hf_revision": "a09a35458c702b33eeacc393d103063234e8bc28"
+  },
+  "engine": {
+    "image": "lmsysorg/sglang:v0.5.21",
+    "resolved_image_digest": null,
+    "source_commit": "e00930c5489053f26d86b179cee0d087f846acbb",
+    "configured_sglang_version": "0.5.21",
+    "configured_gateway_version": "0.3.2",
+    "observed_package_versions": null
+  },
+  "configuration": {
+    "compose_files": ["compose.single.yaml"],
+    "wire_model": "qwen25-7b-a09a35458c70",
+    "tensor_parallel_size": 1,
+    "replicas": 1,
+    "dtype": "bfloat16",
+    "quantization": "none",
+    "context_length": 8192,
+    "tool_parser": "qwen25",
+    "tokenizer_and_template": "from-the-same-read-only-HF-snapshot",
+    "radix_cache": "upstream-default-enabled",
+    "max_running_requests_per_worker": 4,
+    "max_queued_requests_per_worker": 8,
+    "gateway": null,
+    "request_sampling": {"temperature": 0, "output_budget": 1024}
+  },
+  "isolation": {
+    "policy": "static-exclusive-device-allocation-by-deployment-owner",
+    "inference_gpu_uuids": [],
+    "training_gpu_uuids": [],
+    "allocation_record_ref": null
+  },
+  "hardware_validation": {"status": "NOT RUN", "evidence_ref": null},
+  "receipt_source": null
+}

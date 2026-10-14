@@ -73,6 +73,7 @@ export interface ModelIdentityV1 {
   identity_resolved?: boolean;
   inference_id?: Sha256;
   model_node?: import("./inference.js").ModelNodeBindingV2;
+  endpoint_binding?: import("./endpoints.js").ExternalEndpointBindingV1;
 }
 
 export interface ProtocolIdentityV1 {
@@ -148,6 +149,7 @@ export interface RunRequest {
   model_identity?: ModelIdentityV1;
   protocol_identity?: Pick<ProtocolIdentityV1, "environment_identity" | "tool_policy_sha256">;
   local_inference?: LocalInferenceSelectionV1;
+  endpoint_binding?: import("./endpoints.js").ExternalEndpointBindingV1;
 }
 
 export interface RunResult {

@@ -1,0 +1,13 @@
+{
+  "schema_version": "1",
+  "base_url": "http://127.0.0.1:30000/v1",
+  "wire_model": "qwen25-7b-a09a35458c70",
+  "api": "responses",
+  "auth": {"kind": "env", "name": "INFERENCE_API_KEY"},
+  "capabilities": {
+    "streaming": true,
+    "tool_calls": true,
+    "parallel_tool_calls": false,
+    "input_modalities": ["text"]
+  }
+}

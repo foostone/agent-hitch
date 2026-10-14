@@ -9,11 +9,13 @@ if (args.length !== 2 || args[0] !== '--model' || !args[1]) throw new Error('Usa
 if (process.env.HITCH_HARBOR_INTERNAL !== '1') throw new Error('training-tool requires a Harbor task container');
 const binding = JSON.parse(process.env.HITCH_TRAINING_BINDING || 'null');
 const training = process.env.HITCH_TRAINING_EXTERNAL === '1';
-if (!training && process.env.HITCH_MANAGED_LOCAL_INFERENCE !== '1') throw new Error('explicit Hitch model binding required');
-const runId = training ? process.env.HITCH_TRAINING_RUN_ID : process.env.HITCH_MANAGED_RUN_ID;
+const external = JSON.parse(process.env.HITCH_EXTERNAL_ENDPOINT_BINDING || 'null');
+if (!training && !external) throw new Error('explicit Hitch model binding required');
+const runId = training ? process.env.HITCH_TRAINING_RUN_ID : process.env.HITCH_EXTERNAL_RUN_ID;
 const base = new URL(process.env.OPENAI_BASE_URL || '');
 if (!/^run_[a-f0-9]{32}$/.test(runId || '') || base.protocol !== 'http:' || base.username || base.password || base.search || base.hash
   || !new RegExp(`^/[a-f0-9]{48}/${runId}/openai/?$`).test(base.pathname)) throw new Error('invalid run-scoped endpoint');
+if (!training && (external.api !== 'chat-completions' || args[1] !== external.endpoint_ref)) throw new Error('wrong ordinary endpoint binding');
 if (training && args[1] !== `training/${binding?.binding_id}`) throw new Error('wrong training binding');
 if (!base.pathname.endsWith('/')) base.pathname += '/';
 const maxTokens = training ? binding.max_output_tokens : Number(process.env.HITCH_LOCAL_MAX_OUTPUT_TOKENS || 2048);
@@ -39,7 +41,7 @@ for (let step = 0; step < maxSteps; step++) {
     method: 'POST', redirect: 'error', headers: { Authorization: `Bearer ${process.env.OPENAI_API_KEY}`, 'Content-Type': 'application/json', 'Idempotency-Key': `${runId}-${step}` },
     body: JSON.stringify({ model: args[1], messages, tools, stream: false, max_tokens: maxTokens }), signal: abort.signal,
   });
-  if (!response.ok) throw new Error(`training gateway returned HTTP ${response.status}`);
+  if (!response.ok) throw new Error(`model endpoint returned HTTP ${response.status}`);
   const body = await response.json(); abort.signal.throwIfAborted(); const choice = body.choices?.[0];
   if (!choice?.message || body.choices.length !== 1) throw new Error('invalid completion');
   emit({ type: 'provider.response', response: body, receipt_id: response.headers.get('x-gear-receipt-id') });

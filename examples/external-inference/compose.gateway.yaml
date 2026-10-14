@@ -1,0 +1,116 @@
+name: hitch-external-inference
+
+x-worker: &worker
+  image: ${SGLANG_IMAGE:-lmsysorg/sglang:v0.5.21}
+  init: true
+  restart: unless-stopped
+  shm_size: 8gb
+  entrypoint: ["/bin/sh", "-ec"]
+  command:
+    - |
+      key="$$(cat /run/secrets/api_key)"
+      test -n "$$key"
+      exec python3 -m sglang.launch_server \
+        --model-path /model --tokenizer-path /model \
+        --served-model-name "$$WIRE_MODEL" \
+        --host 0.0.0.0 --port 30000 --api-key "$$key" \
+        --tp-size 1 --dtype bfloat16 \
+        --context-length "$$CONTEXT_LENGTH" \
+        --mem-fraction-static "$$MEM_FRACTION_STATIC" \
+        --max-running-requests "$$ENGINE_MAX_RUNNING" \
+        --max-queued-requests "$$ENGINE_MAX_QUEUED" \
+        --tool-call-parser qwen25 --enable-metrics
+  environment:
+    WIRE_MODEL: ${WIRE_MODEL:?Set a versioned wire model name}
+    CONTEXT_LENGTH: ${CONTEXT_LENGTH:-8192}
+    MEM_FRACTION_STATIC: ${MEM_FRACTION_STATIC:-0.80}
+    ENGINE_MAX_RUNNING: ${ENGINE_MAX_RUNNING:-4}
+    ENGINE_MAX_QUEUED: ${ENGINE_MAX_QUEUED:-8}
+    HF_HUB_OFFLINE: "1"
+    TRANSFORMERS_OFFLINE: "1"
+  secrets: [api_key]
+  volumes:
+    - type: bind
+      source: ${HF_SNAPSHOT_DIR:?Set a self-contained immutable HF snapshot directory}
+      target: /model
+      read_only: true
+      bind:
+        create_host_path: false
+  healthcheck:
+    test: ["CMD-SHELL", 'curl -fsS -H "Authorization: Bearer $$(cat /run/secrets/api_key)" http://127.0.0.1:30000/health >/dev/null']
+    interval: 10s
+    timeout: 5s
+    start_period: 10m
+    retries: 60
+  networks: [model]
+
+services:
+  worker-1:
+    <<: *worker
+    ports: ["127.0.0.1:30001:30000"]
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["${INFERENCE_GPU_0:?Set the first GPU UUID reserved for inference}"]
+              capabilities: [gpu]
+
+  worker-2:
+    <<: *worker
+    ports: ["127.0.0.1:30002:30000"]
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["${INFERENCE_GPU_1:?Set a different GPU UUID reserved for inference}"]
+              capabilities: [gpu]
+
+  gateway:
+    # The fixed SGLang image also contains its official Rust Model Gateway.
+    image: ${SGLANG_IMAGE:-lmsysorg/sglang:v0.5.21}
+    init: true
+    restart: unless-stopped
+    entrypoint: ["/bin/sh", "-ec"]
+    command:
+      - |
+        key="$$(cat /run/secrets/api_key)"
+        test -n "$$key"
+        exec python3 -m sglang_router.launch_router \
+          --host 0.0.0.0 --port 30000 \
+          --worker-urls http://worker-1:30000 http://worker-2:30000 \
+          --api-key "$$key" --policy round_robin --disable-retries \
+          --max-concurrent-requests "$$GATEWAY_MAX_CONCURRENT" \
+          --queue-size "$$GATEWAY_QUEUE_SIZE" --queue-timeout-secs 30 \
+          --request-timeout-secs 180 --worker-startup-timeout-secs 1800 \
+          --history-backend none --prometheus-host 0.0.0.0 --prometheus-port 10001
+    environment:
+      NVIDIA_VISIBLE_DEVICES: "void"
+      CUDA_VISIBLE_DEVICES: ""
+      GATEWAY_MAX_CONCURRENT: ${GATEWAY_MAX_CONCURRENT:-8}
+      GATEWAY_QUEUE_SIZE: ${GATEWAY_QUEUE_SIZE:-16}
+    secrets: [api_key]
+    ports:
+      - "127.0.0.1:${INFERENCE_PORT:-30000}:30000"
+      - "127.0.0.1:10001:10001"
+    depends_on:
+      worker-1:
+        condition: service_healthy
+      worker-2:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:30000/readiness"]
+      interval: 10s
+      timeout: 5s
+      start_period: 1m
+      retries: 60
+    networks: [model]
+
+secrets:
+  api_key:
+    file: ${INFERENCE_API_KEY_FILE:?Set an absolute path to a private API key file}
+
+networks:
+  model:
+    internal: true

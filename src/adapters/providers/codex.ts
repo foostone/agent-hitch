@@ -47,6 +47,9 @@ export const codexAdapter: AdapterDefinition = {
       if (endpoint && (!runtime.model_endpoint_credential || !runtime.runtime_home)) {
         throw new Error("managed local model binding is incomplete");
       }
+      if (endpoint && request.agent_args.some(arg => /^(?:-m|--model|--oss|--local-provider|-p|--profile|-c|--config)(?:=|$)/.test(arg))) {
+        throw invalidInput("endpoint-bound Codex runs do not accept model/provider/profile/config overrides");
+      }
       const model = endpoint?.wire_model ?? request.model;
       if (model) args.push("--model", model);
       args.push(...request.agent_args, "-");
@@ -113,7 +116,7 @@ async function localCodexProcess(
 ): Promise<import("../contract.js").ProcessSpecification> {
   const endpoint = runtime.model_endpoint;
   if (!endpoint) throw new Error("managed local model binding is missing");
-  if (endpoint.api !== "responses") throw invalidInput("Codex local inference requires a Responses endpoint");
+  if (endpoint.api !== "responses") throw invalidInput("Codex external endpoint requires a Responses endpoint");
   const codexHome = await mkdtemp(path.join(tmpdir(), "hitch-codex-local-"));
   try {
     await chmod(codexHome, 0o700);
@@ -143,7 +146,7 @@ function localCodexConfig(endpoint: import("../../domain/index.js").ModelEndpoin
     "check_for_update_on_startup = false",
     "",
     "[model_providers.hitch_local]",
-    'name = "Hitch Local SGLang"',
+    'name = "Hitch External Endpoint"',
     `base_url = ${quote(endpoint.base_url.replace(/\/+$/, ""))}`,
     `env_key = ${quote(endpoint.credential_env_name)}`,
     'wire_api = "responses"',

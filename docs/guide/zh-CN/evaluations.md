@@ -29,7 +29,7 @@ Setup 在 `~/.hitch/tools/` 下的独立环境安装 Hitch 固定的 Harbor，�
 
 如果已经在 [Quick Start](quickstart.md) 中启动 daemon，请把下面示例的命令改为 `hitch eval run --daemon`。Daemon 占用同一 root 时，直接评测会被拒绝。Daemon 自身环境必须包含 `CODEX_API_KEY`；如果配置密钥前它就已启动，先完成或取消活动任务，再停止 daemon，从已配置认证的 Shell 使用原资源参数重新启动。详见[启动统一的协调者](daemon.md#启动统一的协调者)。
 
-使用托管模型时，见[本机 SGLang 评测](model-inference.md#在本机运行托管-sglang)与[远程模型节点](model-inference.md#使用托管远程模型节点)。使用外部服务时，参见[容器访问配置](model-inference.md#从-docker-评测访问模型)。
+注册端点与 Harbor 容器的代理、凭据配置见[模型推理](model-inference.md)。
 
 ## 运行一个示例任务
 

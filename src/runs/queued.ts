@@ -1,3 +1,4 @@
+import { freezeEndpointRequest } from "../model-access/index.js";
 import path from "node:path";
 import type { RunId } from "../domain/index.js";
 import { HitchError, SCHEMA_VERSION, atomicWriteJSON, ensureDir } from "../foundation/index.js";
@@ -13,7 +14,7 @@ import { buildManifest, newRunId, safeAgentArgsForPersistence } from "./manifest
 import type { RunManifest } from "./manifest.js";
 
 export function assertQueuedRunIdentity(existing: Record<string, unknown>, requested: RunManifest): void {
-  const fields = ["context", "parent", "harness", "model", "protocol"] as const;
+  const fields = ["context", "parent", "harness", "model", "protocol", "endpoint_binding"] as const;
   for (const field of fields) {
     const left = existing[field];
     const right = requested[field];
@@ -45,7 +46,7 @@ export async function createQueuedRun({
   runsRoot,
   root = path.dirname(runsRoot),
 }: { runId?: RunId; request: RunRequestInput; runsRoot: string; root?: string }): Promise<QueuedRun> {
-  const normalized = await validateRunRequest(request);
+  const normalized = await validateRunRequest(await freezeEndpointRequest(root, request));
   const resolvedRevision = await resolveHarness(normalized.harness_ref, { root });
   const workspacePlan = await planWorkspace({ runId, sourceCwd: normalized.cwd, mode: normalized.workspace_mode, root });
   const directory = await ensureDir(path.join(runsRoot, runId));

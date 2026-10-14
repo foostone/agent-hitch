@@ -1,1 +1,0 @@
-The original process supervision, CAS, safetensors validation and physical-device ledger mechanisms were extracted from rsi-gear/gear, licensed under the MIT License (LICENSE.gear). New standalone API, pool management and packaging are Apache-2.0.

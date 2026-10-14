@@ -1,6 +1,6 @@
 # Gear / Slime 训练绑定
 
-本文说明 Hitch 与 Gear / Slime 的训练绑定、独立评估及恢复合同。已验收的拓扑是本地 Harbor 配合远程单卡训练 / SGLang 进程节点。远程 Harbor / Docker、双卡以及真实主机重启恢复仍待实机验收；完整 remote capability 和 Gear 完整远程准入保持关闭。
+本文说明 Hitch 与 Gear / Slime 的训练绑定、独立评估及恢复合同。历史验收的拓扑是本地 Harbor 配合远程单卡训练 / SGLang 进程节点。远程 Harbor / Docker、双卡以及真实主机重启恢复仍待实机验收；完整 remote capability 和 Gear 完整远程准入保持关闭。
 
 ## 注册与提交
 
@@ -32,7 +32,7 @@ shell 退出后，runner 最多等待一秒排空工具输出；后台服务仍�
 
 ## 独立评估与有序暂停
 
-评估导入模型使用既有 immutable `local/sha256:…` 管线。`hitch local plan MODEL --harness REF --gpu GPU-UUID --offline --json` 在不启动候选任务的情况下准备 runtime/lock；`hitch local inspect INFERENCE_DIGEST --json` 读取精确锁。training-tool 使用明确的 Chat Completions lock，并检查流式/非流式终态；Codex 保留 Responses 路径。
+普通独立评估接收已部署的冻结 `endpoint/NAME` 与 `--model-binding-file READY.json`，training-tool 使用 Chat Completions 函数工具循环。Gear 在 evaluator 外准备并校验候选 HF snapshot 部署回执，不调用 local plan/prepare 或模型节点 RPC。
 
 Gear v2 独立评估通过 `ordered_eval_control="2"` 能力使用持久 start/pause 指令。指令只包含 `schema_version="2"`、`key`、冻结请求的 `subject_digest`、非负整数 `sequence` 和 `action`，Gear 自动保存不可变指令文件。公开调试入口：
 
@@ -44,17 +44,17 @@ hitch eval rerun EVAL_ID --invalid --daemon --rerun-id RERUN_ID --control-file S
 
 `eval control` 首次调用即保留原 key 和 eval ID，暂停可以先于提交到达且不启动任务。后到的较小序号被拒绝，相同序号不能更换 action；恢复使用更高 start 序号和原 eval ID。提交/修复附带同一指令文件，并与暂停在 daemon 中串行。暂停持久登记已取消的 rerun ID；新修复轮次必须使用新 ID，仍保留原有效观察。进入该协议的评估拒绝旧无序 cancel/rerun/submit 修改接口，普通 v1 评估不受影响。完整 HTTP 命令形状见 [ordered-eval-control schema](schemas/ordered-eval-control.schema.json)。
 
-回复中的 `submitted` 区分保留身份与实际提交，`pending_reruns` 仅表示修复任务状态；它们不能代替模型节点的物理释放证明。Gear 通过 `local status` 和 `local inspect-service` 读取原服务累计 GPU 用量，按评估 key 的累计增量入账，超预算使用上述有序暂停收尾。
+回复中的 `submitted` 区分保留身份与实际提交，`pending_reruns` 仅表示修复任务状态；它们不能代替部署所有者对模型 GPU 的物理释放证明。普通评测取消只确认自身任务和请求结束，共享推理 GPU 用量未知时不填 0。
 
 ## 远程 worker 合同
 
 ### 能力与执行身份
 
-远程 worker 路径使用 work spec v2，复用现有输入制品、generation/lease/epoch、事件与结果协议。训练 worker 必须显式声明 `features.training_external_binding="2"`，受管理模型需 `features.managed_model_node="2"`，两者都要求 Docker 与 model proxy。旧 worker 拒绝这些绑定。控制端私有模型路由位于 `worker-protocol/model-routes`（实际状态根由 Hitch 配置解析），模型地址和凭据不会进入 work spec 或 task 环境。worker 本机 relay 经认证的 worker HTTP 转发生成；在首次生成前声明一个 canonical run，控制端保存确认，回包丢失可按同一身份重试。
+远程 worker 路径使用 work spec v2，复用现有输入制品、generation/lease/epoch、事件与结果协议。训练 worker 必须显式声明 `features.training_external_binding="2"`，普通端点需 `features.external_endpoint_binding="1"`，两者都要求 Docker 与 model proxy。旧 worker 拒绝这些绑定。控制端私有模型路由位于 `worker-protocol/model-routes`（实际状态根由 Hitch 配置解析），模型地址和凭据不会进入 work spec 或 task 环境。worker 本机 relay 经认证的 worker HTTP 转发生成；在首次生成前声明一个 canonical run，控制端保存确认，回包丢失可按同一身份重试。
 
 远程 `candidate-restart` 复用 worker 调度器。支持的 worker 额外声明 `features.physical_work="2"`，work spec v2 携带 `physical_execution`：保留原始 v1 plan 和摘要，按 rerun ID 或基础设施重试记录推导新的 work ID，worker 核对冻结的 logical slot、任务、制品和资源。普通 API 重跑可使用不含 model binding 的 v2 spec。旧 lease 必须确认释放，`lost`/`expired` 状态不能授权新的重跑；已发出的不明执行不会自动补发。训练 slot 仍由 Gear batch coordinator 修复，不开放 Hitch candidate 重跑。
 
-managed-node 重跑使用独立的 `evalId:rerunId` 模型服务作用域。远程重跑的 lease 事件和执行 journal 写入 `evals/<evalId>/reruns/<rerunId>/remote-work`；完成结果可幂等重放。普通远程 eval 的 daemon 恢复导入也会核对模型绑定确认，基础设施重试使用 `replace-invalid` 发布语义。
+普通端点重跑沿用原冻结绑定，不拥有模型服务作用域。远程重跑的 lease 事件和执行 journal 写入 `evals/<evalId>/reruns/<rerunId>/remote-work`；完成结果可幂等重放。普通远程 eval 的 daemon 恢复导入也会核对模型绑定确认，基础设施重试使用 `replace-invalid` 发布语义。
 
 远程 `verifier-only` 使用独立评分派发、assessment 导入、原候选冻结选择与完成交接；worker 必须显式声明 `verifier_only="2"`、`physical_work="2"` 与 Docker。
 
@@ -102,21 +102,13 @@ runner 在 HTTP 接受前写入本地 `worker-execution.json`，绑定原 offer/
 
 启动身份变化时，只有原 ownership schema 3 允许跨 generation 恢复：原记录和当前观察必须具有相同 platform/host_id，boot_id 必须不同，root/引擎仍须匹配。此时旧进程随前一启动周期结束，不检查或信号通知旧 PID/进程组，避免碰到重启后复用 PID 的新进程。清理前后重新观察主机/启动/引擎，原 lease 的容器、网络、卷必须全部清理并复查为空。该分支提交 schema 3 receipt，观察中使用 `worker_status="previous-boot"` 和当前 `host_identity`，不包含 `process_group_empty`；同启动周期继续提交原 schema 2 receipt。原授权 supervisor 身份仍必须与 journal 一致，不能用重启解释另一条已授权执行记录。
 
-清理后重新列举确认原 lease 的 Docker 容器、网络和卷全部消失，再通过 `POST /v2/workers/:worker/offers/:offer/cleanup` 提交 `{schema_version: "2", offer_id, generation, receipt}`。独立回执遵循 [generation cleanup 合同](schemas/remote-worker-generation-cleanup.schema.json)，仅保存当前身份对原执行的物理观察；入口与最终发布都核对新 generation。原 v1 offer、nonce、terminal、完成/释放摘要和原 admission 不改写。控制端在原 lease 上写入 schema 3 的 `release_confirmation`，保留隔离 epoch 和真正执行过的 `resource_epochs`，据此核销旧预占，不能恢复旧执行权限。该确认只覆盖 Harbor 执行资源；模型节点的 GPU 释放仍需模型节点的独立证据。
+清理后重新列举确认原 lease 的 Docker 容器、网络和卷全部消失，再通过 `POST /v2/workers/:worker/offers/:offer/cleanup` 提交 `{schema_version: "2", offer_id, generation, receipt}`。独立回执遵循 [generation cleanup 合同](schemas/remote-worker-generation-cleanup.schema.json)，仅保存当前身份对原执行的物理观察；入口与最终发布都核对新 generation。原 v1 offer、nonce、terminal、完成/释放摘要和原 admission 不改写。控制端在原 lease 上写入 schema 3 的 `release_confirmation`，保留隔离 epoch 和真正执行过的 `resource_epochs`，据此核销旧预占，不能恢复旧执行权限。该确认只覆盖 Harbor 执行资源；模型服务的 GPU 释放仍需部署所有者的独立证据。
 
 成功清理后响应丢失会重放同一观察，不重复执行候选；回执落盘后、lease 更新前崩溃可由重新请求或 offer listing 修复。已确认的物理事实在再次轮换凭据后仍可读取；尚未发布的旧 generation 回执会被拒绝。后台清理不阻塞心跳，某条不可恢复记录不会阻止其他记录获得清理机会。缺失原认证 admission、本地 journal 不匹配、同启动周期原 worker 仍存活、旧记录缺少跨启动身份、迁移到另一主机、引擎变化或资源观察失败时继续保留预占。
 
-### 模型服务恢复
+### 外部模型服务
 
-模型节点发生 OS 重启后，先注册当前 generation 的连接，再用 `hitch model-node recover-service SERVICE_ID --file CURRENT_BINDING.json --json` 明确回收旧服务。节点必须提供原 owner/lock/handle、不同启动周期的归档证据及设备释放确认；不会按旧 PID 杀进程，也不会给旧任务重新加载权重。Hitch 保存独立 generation release 回执，原 v1 service、model node 和 inference lock 身份不变。确认回执可跨 daemon 重启、旧节点不可达和控制端落盘丢失重放；缺失或损坏的证据保持未释放。该命令不要求 daemon 正常启动。
-
-同一 generation 的进程接管通过 `inference.attach` 完成：核对原启动请求摘要、监督进程与引擎的 PID 创建时间、当前设备账本和实时 Python/runtime/engine 观察；不启动进程、不生成探针 token、不清缓存，失败不释放旧占用。新建 managed-node 服务在发布 ready 前封存 `attachment.json`，绑定原 service/epoch/handle、完整模型锁和已通过的协议观察；接管保留原探针时间。
-
-daemon 在调度器恢复活动任务前核对 accepted 远程 work、未过期 execution lease、当前 worker generation、原模型执行证据和私有网关摘要回执，再调用监督器 `recover(claims)`。同 generation 的进程及其原网关端口/run 凭据一起恢复；原 service/epoch、模型锁、canonical run 绑定和已封存输入不改写。网关摘要回执在首次发布给调用者前写入服务私有目录，避免恢复时采纳已损坏的地址或凭据。没有这些证据的旧活动记录不会被自动采纳。
-
-启动期间，managed 模型请求等待网关恢复，worker 心跳和终态回执继续处理。暂时离线但 lease 未到期的 worker 保留模型 owner；生成仍要求当前 worker/lease 有效。恢复后的 owner 持续核对取消、终态、到期、撤销及 generation；失效后撤销网关注册并释放原 lease，正常续跑则由原 eval/rerun 接手这一 lease。无人持有的服务沿用 idle TTL 回收。
-
-重复取得同一 managed 服务时，Hitch 在文件锁内核对原 `execution.json` 执行证据、模型锁与 manifest；同一 service/epoch 全部一致时保留原文件和准备时间，内容被替换时拒绝覆盖。
+普通推理服务的恢复、停止与 GPU 释放属于部署所有者。Hitch daemon 重启恢复原冻结端点和任务授权，不重新部署或清空共享缓存。训练 rollout 的 policy lease、fencing、精确 token/logprob 采集和训练资源管理保留各自原语义。
 
 ## 验证范围
 
@@ -128,7 +120,7 @@ daemon 在调度器恢复活动任务前核对 accepted 远程 work、未过期 
 | --- | --- | --- |
 | `remote-harbor-recovery.test.js` | SIGKILL 公开 worker CLI，再启动同 generation worker；原子进程结束、lease 释放、候选仅启动一次 | Harbor 与 Docker 为 fixture |
 | `remote-worker-host-reboot.test.js`、`remote-harbor-ownership.test.js` | 本机身份读取、真实存活进程、HTTP 回执与预占核销 | 前一 boot 身份、Docker 资源与命令为 fixture，未重启测试主机 |
-| `managed-candidate-recovery.test.js` | 默认模型管理器、节点 RPC/HTTP、公开 worker；首次模型调用后 SIGKILL daemon，同端口重启并完成原 canonical run | Harbor、Docker、模型与 GPU 观察为 fixture |
+| `managed-candidate-recovery.test.js` | 外部标准模型 API、公开 worker；首次模型调用后 SIGKILL daemon，同端口重启并完成原 canonical run | Harbor、Docker、模型与 GPU 观察为 fixture |
 
 ```sh
 node --test dist/test/remote-harbor-recovery.test.js
@@ -136,7 +128,7 @@ node --test dist/test/remote-worker-host-reboot.test.js dist/test/remote-harbor-
 node --test dist/test/managed-candidate-recovery.test.js
 ```
 
-其他本地 HTTP/CPU 回归覆盖输入到 canonical 回传、两次 shell 工具调用、幂等键与 receipt 响应头、API/managed-node 重跑、绑定替换拒绝及 lease 过期中断。上传后、发布前的恢复 fixture 验证缺少绑定确认时拒收，确认后只收回原结果。实际重启 daemon 的 candidate 测试核对冻结任务、canonical run、lease 数量与模型调用次数；managed-node 不新增服务。
+其他本地 HTTP/CPU 回归覆盖输入到 canonical 回传、两次 shell 工具调用、幂等键与 receipt 响应头、API/外部端点重跑、绑定替换拒绝及 lease 过期中断。上传后、发布前的恢复 fixture 验证缺少绑定确认时拒收，确认后只收回原结果。实际重启 daemon 的 candidate 测试核对冻结任务、canonical run、lease 数量与模型调用次数；外部端点不创建服务。
 
 分进程 daemon 中断测试保留原 worker/candidate 进程继续调用，不改写故障后的 service、eval、offer 或 lease 状态；恢复后原 service/epoch、网关证据与任务释放确认保持一致。真实跨主机 Harbor/Docker/GPU 中断、worker 断网与 generation 切换后的资源协调仍需实机验收。
 

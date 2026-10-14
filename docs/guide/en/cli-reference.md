@@ -14,7 +14,7 @@ Durations accept `ms`, `s`, `m`, or `h` (for example `500ms` or `5m`); a bare nu
 - [Evaluations](#evaluations): `eval`
 - [Benchmark packages](#benchmark-packages): `benchmark`
 - [Benchmark resources](#benchmark-resources): `resources`
-- [Models and inference](#models-and-inference): `models, local, model-node`
+- [Models and inference](#models-and-inference): `models`
 - [Daemon and capacity](#daemon-and-capacity): `daemon`
 - [Remote workers](#remote-workers): `worker`
 - [Results and comparisons](#results-and-comparisons): `runs, compare`
@@ -52,7 +52,7 @@ References include `codex@installed`, `codex@version:VERSION`, `codex@commit:COM
 hitch run --harness HARNESS_REF [--prompt TEXT | --prompt-file PATH] [RUN_OPTIONS] [--daemon] [--output json|jsonl]
 ```
 
-Run a harness and wait for its result. Prompt input can also come from non-interactive stdin. Direct runs default to JSONL; `--daemon` submits to the daemon and follows the run. A managed `local/…` model starts the local inference daemon when necessary. [Run tutorial](quickstart.md).
+Run a harness and wait for its result. Prompt input can also come from non-interactive stdin. Direct runs default to JSONL; `--daemon` submits to the daemon and follows the run. An endpoint model resolves and freezes an already deployed service at submission. [Run tutorial](quickstart.md).
 
 ### Shared run options
 
@@ -69,8 +69,6 @@ These options are also accepted by `hitch daemon submit`.
 | `--agent-arg VALUE` | Repeat to pass individual arguments to the harness. |
 | `--context-file JSON`, `--parent-file JSON` | Attach typed task context or a parent relationship. |
 | `--model-identity-file JSON`, `--protocol-identity-file JSON` | Attach structured model or protocol identities for integration workflows. |
-| `--device auto\|cpu\|cuda`, `--local-profile baseline\|throughput`, `--offline` | Managed inference selection. Defaults are `auto` and `baseline`; offline requires the needed files locally. |
-| `--inference SHA256`, `--model-node-file JSON` | Use an exact inference lock and optional remote-node binding. Use the lock as the configuration authority; omit device/profile overrides. |
 | `--agent NAME` | Legacy alternative to `--harness`; selects an installed harness by name. These two options are mutually exclusive. |
 
 ## Evaluations
@@ -105,8 +103,6 @@ Shared by `eval run` and `eval submit` unless a row limits the scope. Start with
 | `--agent-arg VALUE`, `--pass-env NAME` | Repeat for harness arguments and credential/environment variable names forwarded to the container. |
 | `--environment-binding ID` | Require the binding returned by `eval bind` at admission and before each Harbor execution; supports local Docker, external models, and capture `off`/`native`. |
 | `--artifact-pin JSON` | Repeat once per used platform to pin `platform`, `artifact_id`, `artifact_integrity`, and `entrypoint_integrity` before task execution. See the [artifact pin protocol](../../evaluation-artifact-pins.zh-CN.md). |
-| `--device auto\|cpu\|cuda`, `--local-profile baseline\|throughput`, `--offline` | Managed model inference; hardware and harness requirements are in [model inference](model-inference.md). |
-| `--inference SHA256`, `--model-node-file JSON` | Run with an exact inference lock and remote-node binding; omit device/profile overrides. |
 | `--training-binding-file JSON` | Bind a supported training episode to an external training gateway. See [training integration](../../slime-training-binding.zh-CN.md). |
 | `--daemon` | `eval run` only: submit to and follow the daemon. Managed dataset models automatically select this path. |
 | `--output json\|jsonl` | `eval run` only; default `json`. `eval submit` always returns acceptance JSON. |
@@ -164,40 +160,16 @@ Release uses the original owner and generation. End an execution workspace only 
 
 ## Models and inference
 
-These commands manage checkpoint identities, SGLang runtimes, and remote model nodes. A model node serves inference; a [worker](#remote-workers) executes benchmark tasks. Setup, supported hardware, exact Codex versions, and connection/binding file formats are in [model inference](model-inference.md).
+External model APIs use frozen endpoint bindings. Local model storage remains an artifact/CAS operation.
 
-### Model store
-
-| Command / options | Purpose and notes |
+| Command / options | Purpose |
 | --- | --- |
-| `hitch models add DIRECTORY --name NAME [--force] [--json]` | Import a complete safetensors checkpoint as `local/NAME`; force permits rebinding the name. |
-| `hitch models add-node SNAPSHOT.json --model-node-file BINDING.json --name NAME [--force] [--json]` | Register a snapshot on a model node; always outputs JSON. |
-| `hitch models inspect MODEL [--verify] [--model-node-file BINDING.json] [--json]` | Inspect `local/NAME` or `local/sha256:DIGEST`; verify local bytes or, with a binding, the node copy. |
-| `hitch models gc [--dry-run \| --apply] [--json]` | Preview unreferenced-model cleanup by default. `--apply` deletes eligible files; the two mode flags are mutually exclusive. |
+| `hitch models connect --name NAME --file ENDPOINT.json [--json]` | Save an immutable connection revision and update its alias; no deployment. |
+| `hitch models inspect MODEL [--verify] [--json]` | Inspect endpoint/name or local/name; endpoint verification probes text, SSE and declared tool capabilities. |
+| `hitch models add DIRECTORY --name NAME [--force] [--json]` | Import a complete safetensors model artifact. |
+| `hitch models gc [--dry-run] [--apply] [--json]` | Inspect or apply local artifact garbage collection. |
 
-### Inference preparation and services
-
-| Command / options | Purpose and notes |
-| --- | --- |
-| `hitch local plan MODEL --harness REF --gpu GPU-UUID [--model-node-file BINDING.json] [--offline] [--json]` | Prepare an exact CUDA/baseline runtime and inference lock without launching a candidate; may prepare runtime files. |
-| `hitch local prepare MODEL [--device auto\|cpu\|cuda] [--profile baseline\|throughput] [--inference SHA256] [--model-node-file BINDING.json] [--offline] [--json]` | Prepare and validate managed inference through the daemon; starts the daemon if needed. |
-| `hitch local inspect SHA256 [--json]` | Read an exact inference lock; always outputs JSON. |
-| `hitch local inspect-service SERVICE_ID [--json]` | Read a managed model-node service record, including usage evidence; always outputs JSON. |
-| `hitch local doctor [--device auto\|cpu\|cuda] [--json]` | Check static hardware/runtime eligibility; prepare performs the actual loading/protocol validation. |
-| `hitch local status [--json]` | List services through the daemon or persisted records when it is offline. |
-| `hitch local stop [SERVICE_ID] [--force] [--json]` | Stop one service, or all nonterminal services if no ID is supplied. Force requests stopping even with active use. |
-
-`local prepare` uses `--profile`; run/eval use `--local-profile`. `metal` is recognized by the device parser but has no supported runtime in the current preview. An explicit inference lock should be used without device/profile overrides. Service IDs use `inference_…`; lock IDs use `sha256:…`.
-
-### Remote model nodes
-
-| Command / options | Purpose and notes |
-| --- | --- |
-| `hitch model-node register --file CONNECTION.json [--json]` | Store the connection and inspect the node registration. |
-| `hitch model-node inspect --file BINDING.json [--json]` | Observe a registered node through its binding. |
-| `hitch model-node recover-service SERVICE_ID --file CURRENT_BINDING.json [--json]` | Reconcile an existing service against the current node identity. |
-
-All model-node commands emit JSON. The connection file contains connection details; the binding records the selected node identity. Use the appropriate file type for each command.
+Run/eval accept `--model-binding-file READY.json`, `--max-output-tokens N`, `--temperature N`, `--top-p N`, and `--seed N`. A binding file adds private connection data to the public binding and is frozen before task submission. Credentials are environment references; values never enter public evidence. See [model inference](model-inference.md).
 
 ## Daemon and capacity
 
@@ -338,7 +310,3 @@ These commands connect evaluation episodes to a training system. Use `--training
 ## Compatibility and internal options
 
 This reference covers user-facing command paths and options. `--internal-*` options are reserved for Hitch’s Harbor bridge and are rejected outside that context. JSON integration files must match the [versioned schemas](../../schemas); they are not arbitrary configuration bags. For release differences, compare `hitch --version` and `hitch capabilities --json` with the source checkout.
-
-## Standalone inference pools
-
-`hitch local plan MODEL --harness REF --gpu GPU-UUID --model-node-file NODE.json --pool-file POOL.json --profile baseline|throughput --offline --json` freezes an explicit v3 TP/replica pool. `--pool-file` contains `replicas` (ordered physical UUID groups), `routing: "least-active"`, `max_running_requests` and `max_queued_requests`; `--gpu` must equal the first rank of the first replica. Per-engine SGLang DP/PP remain 1. New registrations use the independently installed `hitch_inference.node` runtime; historical connections retain the explicit `gear-legacy-v2` adapter. See [independent service installation and hardware smoke](../../../packages/inference/README.md).

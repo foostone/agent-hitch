@@ -10,15 +10,7 @@ export type { RemoteModelTargetV2 } from "../model-access/index.js";
 
 /** Private controller state, never part of an input artifact or worker credential envelope. */
 export class RemoteModelRoutes {
-  private managedReady: { promise: Promise<void>; resolve(): void } | undefined;
-  constructor(private readonly root: string) {}
-  deferManagedRecovery(): void {
-    if (this.managedReady) throw new TypeError("managed model recovery is already pending");
-    let resolve!: () => void;
-    const promise = new Promise<void>(done => { resolve = done; });
-    this.managedReady = { promise, resolve };
-  }
-  finishManagedRecovery(): void { this.managedReady?.resolve(); this.managedReady = undefined; }
+  constructor(private readonly root: string, private readonly credentialEnv: NodeJS.ProcessEnv = process.env) {}
   async authorize(offer: RemoteWorkOfferV1): Promise<RemoteWorkOfferV1> {
     const lease = parseExecutionLease(await readJSON(path.join(statePaths(this.root).evals, offer.lease.eval_id, "leases", `${offer.lease.lease_id}.json`)));
     if (offer.state !== "accepted" || !["offered", "accepted", "running"].includes(lease.state)
@@ -66,10 +58,6 @@ export class RemoteModelRoutes {
   async call(offer: RemoteWorkOfferV1, runId: string, operation: "bind" | "generate", body: unknown, signal: AbortSignal): Promise<Response> {
     if (!/^run_[a-f0-9]{32}$/.test(runId)) throw fenced("invalid remote canonical run ID");
     const route = await this.route(offer);
-    if (route.target.kind === "managed-inference" && this.managedReady) {
-      await waitForRecovery(this.managedReady.promise, signal);
-      await this.authorize(offer);
-    }
     await withFileLock(path.join(this.directory(offer), "locks"), "binding", async () => {
       const file = path.join(this.directory(offer), "run.json"), next = { run_id: runId, model_binding_digest: sha256JSON(route.model_binding) };
       const old = await readJSON<unknown | null>(file, null);
@@ -77,21 +65,12 @@ export class RemoteModelRoutes {
       if (!old) await atomicWriteJSON(file, next);
     });
     if (operation === "generate") await this.boundRun(offer);
-    const result = await callRemoteModel(route.target, runId, operation, body, signal);
+    const result = await callRemoteModel(route.target, runId, operation, body, signal, this.credentialEnv);
     if (operation === "bind") {
       signal.throwIfAborted();
       await atomicWriteJSON(path.join(this.directory(offer), "bound.json"), { run_id: runId, model_binding_digest: sha256JSON(route.model_binding) });
     }
     return result;
   }
-}
-async function waitForRecovery(ready: Promise<void>, signal: AbortSignal): Promise<void> {
-  signal.throwIfAborted();
-  await new Promise<void>((resolve, reject) => {
-    const abort = () => reject(signal.reason);
-    signal.addEventListener("abort", abort, { once: true });
-    ready.then(resolve, reject).finally(() => signal.removeEventListener("abort", abort)).catch(() => {});
-  });
-  signal.throwIfAborted();
 }
 function fenced(message: string) { return new HitchError(message, { code: "remote_model_fenced", exitCode: 12 }); }

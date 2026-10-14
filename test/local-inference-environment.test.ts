@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { harnessChildEnvironment, managedHarborModelRuntime } from "../src/runs/local-inference-environment.js";
+import { harnessChildEnvironment } from "../src/runs/local-inference-environment.js";
 import { scrubLocalInferenceEnvironment } from "../src/model-access/index.js";
 import type { RunId } from "../src/domain/index.js";
 
@@ -26,37 +26,9 @@ test("managed local inference removes cloud and model-runtime environment variab
   assert.deepEqual(scrubbed, { PATH: "/bin", HITCH_CODEX_PATH: "/opt/codex" });
 });
 
-test("managed Harbor inference becomes a typed endpoint without restoring OpenAI variables", () => {
-  const parent = {
-    HITCH_HARBOR_INTERNAL: "1",
-    HITCH_MANAGED_LOCAL_INFERENCE: "1",
-    HITCH_MANAGED_RUN_ID: runId,
-    HITCH_MANAGED_INFERENCE_ID: identity.inference_id,
-    HITCH_MANAGED_MODEL_ID: identity.model_id,
-    OPENAI_API_KEY: "hitch-managed-local",
-    OPENAI_BASE_URL: `http://host.docker.internal:4321/${"b".repeat(48)}/${runId}/openai`,
-    ANTHROPIC_API_KEY: "must-not-pass",
-  };
-  const runtime = managedHarborModelRuntime(parent, runId, identity);
-  assert.equal(runtime.model_endpoint.base_url, parent.OPENAI_BASE_URL);
-  assert.equal(runtime.model_endpoint.inference_id, identity.inference_id);
-  assert.equal(runtime.model_endpoint_credential, "hitch-managed-local");
-  const child = harnessChildEnvironment({
-    parent,
-    adapter: {
-      HITCH_LOCAL_MODEL_BASE_URL: runtime.model_endpoint.base_url,
-      HITCH_LOCAL_MODEL_TOKEN: runtime.model_endpoint_credential,
-    },
-    cwd: "/workspace",
-    managedLocal: true,
-  });
-  assert.equal(child.OPENAI_API_KEY, undefined);
-  assert.equal(child.OPENAI_BASE_URL, undefined);
-  assert.equal(child.ANTHROPIC_API_KEY, undefined);
-  assert.equal(child.HITCH_LOCAL_MODEL_TOKEN, "hitch-managed-local");
-  assert.throws(() => managedHarborModelRuntime({
-    ...parent,
-    OPENAI_API_KEY: "real-cloud-key",
-    OPENAI_BASE_URL: "https://api.openai.com/v1",
-  }, runId, identity), /proxy environment is invalid/);
+test("external Harness receives only task proxy credentials and strips the private upstream key", () => {
+  const child = harnessChildEnvironment({ parent: { PATH: "/bin", CODER_KEY: "private-upstream", OPENAI_API_KEY: "cloud", OPENAI_BASE_URL: "https://cloud.invalid" },
+    adapter: { HITCH_LOCAL_MODEL_TOKEN: "task-proxy" }, privateCredentials: ["private-upstream"], cwd: "/workspace", managedLocal: true });
+  assert.equal(child.CODER_KEY, undefined); assert.equal(child.OPENAI_API_KEY, undefined); assert.equal(child.OPENAI_BASE_URL, undefined);
+  assert.equal(child.HITCH_LOCAL_MODEL_TOKEN, "task-proxy");
 });

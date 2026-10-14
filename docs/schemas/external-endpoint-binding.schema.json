@@ -1,0 +1,153 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agent-hitch.local/schemas/external-endpoint-binding.schema.json",
+  "title": "Frozen public external model endpoint binding",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "kind",
+    "endpoint_ref",
+    "endpoint_revision",
+    "api",
+    "wire_model",
+    "capabilities",
+    "generation"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "1"
+    },
+    "kind": {
+      "const": "external-endpoint"
+    },
+    "endpoint_ref": {
+      "type": "string",
+      "pattern": "^endpoint/[a-z0-9][a-z0-9._-]{0,63}(@sha256:[a-f0-9]{64})?$"
+    },
+    "endpoint_revision": {
+      "type": "string",
+      "pattern": "^sha256:[a-f0-9]{64}$"
+    },
+    "api": {
+      "enum": [
+        "responses",
+        "chat-completions"
+      ]
+    },
+    "wire_model": {
+      "type": "string",
+      "minLength": 1
+    },
+    "capabilities": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "streaming",
+        "tool_calls",
+        "parallel_tool_calls",
+        "input_modalities"
+      ],
+      "properties": {
+        "streaming": {
+          "type": "boolean"
+        },
+        "tool_calls": {
+          "type": "boolean"
+        },
+        "parallel_tool_calls": {
+          "const": false
+        },
+        "input_modalities": {
+          "const": [
+            "text"
+          ]
+        }
+      }
+    },
+    "generation": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "max_output_tokens": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "temperature": {
+          "type": "number"
+        },
+        "top_p": {
+          "type": "number"
+        },
+        "top_k": {
+          "type": "number"
+        },
+        "min_p": {
+          "type": "number"
+        },
+        "repetition_penalty": {
+          "type": "number"
+        },
+        "seed": {
+          "type": "number"
+        }
+      }
+    },
+    "deployment_receipt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "model_digest",
+        "wire_model",
+        "deployment_ref",
+        "source",
+        "service_config"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": "1"
+        },
+        "model_digest": {
+          "type": "string",
+          "pattern": "^sha256:[a-f0-9]{64}$"
+        },
+        "wire_model": {
+          "type": "string",
+          "minLength": 1
+        },
+        "deployment_ref": {
+          "type": "string",
+          "minLength": 1
+        },
+        "source": {
+          "type": "string",
+          "minLength": 1
+        },
+        "service_config": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "engine"
+          ],
+          "properties": {
+            "engine": {
+              "type": "string",
+              "minLength": 1
+            },
+            "engine_version": {},
+            "engine_digest": {},
+            "quantization": {},
+            "tool_parser": {},
+            "reasoning_parser": {},
+            "tokenizer_digest": {},
+            "chat_template_digest": {},
+            "cache_policy": {},
+            "isolation": {},
+            "parsing": {}
+          }
+        }
+      }
+    }
+  }
+}

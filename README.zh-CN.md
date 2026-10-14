@@ -131,27 +131,7 @@ Hitch 采用 **Harbor 的任务定义格式**，接入已有 Benchmark 和自定
 
 ## 本地与远程模型推理
 
-完整的 Hugging Face safetensors checkpoint 只需导入一次，此后继续使用原有
-run/eval 命令，并把模型写成 `local/<name>`。Hitch 会自动选择固定摘要的 CPU 或
-CUDA preview runtime、按需启动 daemon 和 SGLang 服务，并记录不可变的模型、runtime
-和 inference 身份。
-
-```bash
-hitch models add /models/coder-checkpoint --name coder
-
-hitch run \
-  --harness codex@version:0.145.0 \
-  --model local/coder \
-  --prompt "Inspect this repository"
-```
-
-本机预览面向 Linux/amd64 Docker，以及 Intel Xeon AMX CPU 或兼容的单张
-NVIDIA CUDA GPU。托管 Codex 要求上述确定版本及受支持的模型工具解析器；
-不支持的硬件不会回退到云模型。
-
-远程推理可以通过 Harness 的模型 API 配置接入，也可以注册托管模型节点。
-节点模型仍使用 `local/<name>`，由绑定选择远程 GPU 主机。配置、Docker 访问、
-并行容量与服务恢复见[模型推理指南](https://rsigear.xyz/docs/hitch/zh/model-inference)。
+使用 `hitch models connect --name coder --file ENDPOINT.json` 连接已部署 API，执行 `hitch models inspect endpoint/coder --verify --json` 验证，再在 run/eval 中使用 `--model endpoint/coder`。提交时冻结 revision 与生成参数；任务共享服务，取消只撤销自己的请求。参见[模型推理指南](docs/guide/zh-CN/model-inference.md)与[固定版本上游部署示例](examples/external-inference/README.md)。
 
 ## 并行执行与恢复
 
@@ -216,7 +196,7 @@ hitch eval doctor
 | 指南 | 你会学到什么 |
 | --- | --- |
 | [Quick Start](docs/guide/zh-CN/quickstart.md) | 安装、认证、运行任务并提交并行工作 |
-| [本地与远程模型推理](docs/guide/zh-CN/model-inference.md) | 接入远程 API、托管本机 SGLang 和远程模型节点 |
+| [本地与远程模型推理](docs/guide/zh-CN/model-inference.md) | 接入冻结模型端点并共享上游服务 |
 | [固定版本与隔离工作区](docs/guide/zh-CN/versions-and-workspaces.md) | 固定可执行版本，选择 worktree、copy 或 shared 模式 |
 | [查看运行与证据](docs/guide/zh-CN/runs-and-evidence.md) | 查询结果、轨迹、Verifier 证据和消息反馈 |
 | [第一次评测](docs/guide/zh-CN/evaluations.md) | 运行小型 Docker 任务，理解有效与无效结果 |
@@ -263,11 +243,9 @@ Hitch 是 pre-alpha 阶段的模型与 Harness 评测执行层。远端制品同
 智能体评测基础设施。
 
 Hitch 的设计受到 [Multica](https://github.com/multica-ai/multica) 启发，采用
-[Harbor](https://github.com/harbor-framework/harbor) 的任务定义格式，并集成
-[SGLang](https://github.com/sgl-project/sglang)，提供托管的本地与远程模型推理支持。
+[Harbor](https://github.com/harbor-framework/harbor) 的任务定义格式，通过标准 API 连接
+已部署的模型服务。[外部推理示例](examples/external-inference/README.md) 使用官方 SGLang 与 Gateway 镜像。
 
 ## 许可证
 
 [Apache License 2.0](LICENSE)。
-
-普通推理服务可从 [packages/inference](packages/inference/README.md) 独立安装运行，支持显式张量并行、互不重叠的副本与并发请求；任务与评测编排仍由 Hitch 管理。

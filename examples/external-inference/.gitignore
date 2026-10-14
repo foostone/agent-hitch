@@ -1,0 +1,5 @@
+.env
+secrets/
+artifacts/
+endpoint.json
+deployment.json

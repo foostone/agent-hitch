@@ -200,9 +200,9 @@ export interface InferenceServiceRecordV1 {
 }
 
 export interface ModelEndpointBindingV1 {
-  kind: "managed-local" | "managed-node";
+  kind: "external-endpoint" | "managed-local" | "managed-node";
   model_node?: ModelNodeBindingV2;
-  inference_id: Sha256;
+  inference_id?: Sha256;
   api: "responses" | "chat-completions";
   base_url: string;
   wire_model: string;
@@ -213,30 +213,6 @@ export interface ModelEndpointBindingV1 {
     parallel_tool_calls: boolean;
     input_modalities: ["text"];
   };
-}
-
-export interface AcquireManagedInferenceInputV1 {
-  run_id: string;
-  harness_ref: string;
-  selection: LocalInferenceSelectionV1;
-  cache_scope_owner: string;
-  /** Eval callers use one private gateway registration while Harbor assigns the individual trial run IDs. */
-  evidence_owner?: { kind: "eval"; eval_id: string; rerun_id?: string };
-  signal?: AbortSignal;
-  on_event?: (event: Record<string, unknown>) => void;
-}
-
-export interface ManagedInferenceLeaseV1 {
-  binding: ModelEndpointBindingV1;
-  credential: string;
-  lock: InferenceLockV1;
-  service_id: string;
-  service_epoch: number;
-  release(): Promise<void>;
-}
-
-export interface ManagedInferenceCoordinator {
-  acquire(input: AcquireManagedInferenceInputV1): Promise<ManagedInferenceLeaseV1>;
 }
 
 /** Whitelisted engine-reported values, verified before admitting any candidate. */

@@ -91,25 +91,24 @@ export async function importRemoteResultEnvelope(input: {
   await rm(backendDirectory, { recursive: true, force: true });
   try {
     await materializeEnvelope(envelope, bundleDirectory);
-    if (input.request.training_binding || input.request.local_inference || input.modelProof) {
+    if (input.request.training_binding || input.request.endpoint_binding || input.modelProof) {
       if (!input.modelProof) throw transportError("remote bound result has no controller model/run proof");
       const binding = parseRemoteModelBinding(input.modelProof.binding);
       const manifest = await readJSON<Record<string, unknown>>(path.join(bundleDirectory, "manifest.json"));
       if (manifest.run_id !== input.modelProof.runId) throw transportError("remote result canonical run differs from its model lease");
       if (binding.kind === "training-external") {
-        if (!input.request.training_binding || input.request.local_inference
+        if (!input.request.training_binding || input.request.endpoint_binding
           || sha256JSON(binding.training) !== sha256JSON(input.request.training_binding)
           || sha256JSON(manifest.training_external ?? null) !== sha256JSON(trainingProxyIdentity(binding.training))) {
           throw transportError("remote result training identity differs from its model lease");
         }
       } else {
         const model = manifest.model as Record<string, unknown> | undefined;
-        if (!input.request.local_inference || input.request.training_binding || manifest.training_external
-          || input.request.local_inference.inference_id !== binding.inference_id
-          || sha256JSON(input.request.local_inference.model_node ?? null) !== sha256JSON(binding.model_node)
-          || model?.inference_id !== binding.inference_id || model?.effective_id !== binding.model_id
-          || model?.identity_resolved !== true || sha256JSON(model?.model_node ?? null) !== sha256JSON(binding.model_node)) {
-          throw transportError("remote result managed model identity differs from its model lease");
+        if (!input.request.endpoint_binding || input.request.training_binding || manifest.training_external
+          || sha256JSON(input.request.endpoint_binding) !== sha256JSON(binding.endpoint)
+          || sha256JSON(model?.endpoint_binding) !== sha256JSON(binding.endpoint)
+          || model?.effective_id !== binding.endpoint.wire_model || model?.identity_resolved !== false) {
+          throw transportError("remote result external endpoint identity differs from its model lease");
         }
       }
     }

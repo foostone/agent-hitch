@@ -15,12 +15,12 @@ export const modelCallAdapter: AdapterDefinition = {
     if (runtime.entrypoint_integrity !== approved) throw invalidInput("model-call runner differs from the trusted implementation in this Hitch runtime");
     const endpoint = runtime.model_endpoint;
     if (endpoint && !runtime.model_endpoint_credential) throw invalidInput("managed local model binding is incomplete");
-    if (endpoint && endpoint.api !== "responses") throw invalidInput("model-call local inference requires a Responses endpoint");
     return {
       executable,
       args: ["--model", endpoint?.wire_model ?? request.model],
       input: request.prompt,
       ...(endpoint ? { env: {
+        HITCH_MODEL_API: endpoint.api,
         HITCH_LOCAL_MODEL_BASE_URL: endpoint.base_url,
         HITCH_LOCAL_MODEL_TOKEN: runtime.model_endpoint_credential as string,
         ...(Number.isSafeInteger(runtime.model_endpoint_max_output_tokens)

@@ -14,7 +14,7 @@
 - [评测](#评测): `eval`
 - [Benchmark 包](#benchmark-包): `benchmark`
 - [Benchmark 资源](#benchmark-资源): `resources`
-- [模型与推理](#模型与推理): `models, local, model-node`
+- [模型与推理](#模型与推理): `models`
 - [Daemon 与容量](#daemon-与容量): `daemon`
 - [远程 Worker](#远程-worker): `worker`
 - [结果与对比](#结果与对比): `runs, compare`
@@ -69,8 +69,6 @@ hitch run --harness HARNESS_REF [--prompt TEXT | --prompt-file PATH] [RUN_OPTION
 | `--agent-arg VALUE` | 可重复，每次向 Harness 传递一个参数。 |
 | `--context-file JSON`, `--parent-file JSON` | 附加符合 Schema 的任务上下文或父级关系。 |
 | `--model-identity-file JSON`, `--protocol-identity-file JSON` | 在集成流程中附加结构化模型身份或协议身份。 |
-| `--device auto\|cpu\|cuda`, `--local-profile baseline\|throughput`, `--offline` | 托管推理选择，默认 `auto` 和 `baseline`；离线运行要求必要文件已在本地。 |
-| `--inference SHA256`, `--model-node-file JSON` | 使用精确的推理锁和可选远程节点绑定。以锁内配置为准，省略 device/profile 覆盖参数。 |
 | `--agent NAME` | `--harness` 的兼容旧参数，只接受名称并选择已安装程序；两者互斥。 |
 
 ## 评测
@@ -105,8 +103,6 @@ hitch run --harness HARNESS_REF [--prompt TEXT | --prompt-file PATH] [RUN_OPTION
 | `--agent-arg VALUE`, `--pass-env NAME` | 可重复，分别传递 Harness 参数和转发到容器的认证/环境变量名称。 |
 | `--environment-binding ID` | 准入和每次 Harbor 执行前检查 `eval bind` 返回的绑定；支持本地 Docker、外部模型及 capture `off`/`native`。 |
 | `--artifact-pin JSON` | 每个使用的平台传一条，固定 `platform`、`artifact_id`、`artifact_integrity` 和 `entrypoint_integrity`，任务执行前核对。详见[产物约束协议](../../evaluation-artifact-pins.zh-CN.md)。 |
-| `--device auto\|cpu\|cuda`, `--local-profile baseline\|throughput`, `--offline` | 托管模型推理，硬件与 Harness 要求见[模型推理](model-inference.md)。 |
-| `--inference SHA256`, `--model-node-file JSON` | 使用精确推理锁及远程节点绑定，省略 device/profile 覆盖参数。 |
 | `--training-binding-file JSON` | 将受支持的训练 episode 绑定到外部训练网关，见[训练集成](../../slime-training-binding.zh-CN.md)。 |
 | `--daemon` | 仅 `eval run`：提交给 daemon 并等待。托管模型的数据集评测自动使用此路径。 |
 | `--output json\|jsonl` | 仅 `eval run`，默认 `json`。`eval submit` 始终返回受理 JSON。 |
@@ -164,40 +160,16 @@ hitch run --harness HARNESS_REF [--prompt TEXT | --prompt-file PATH] [RUN_OPTION
 
 ## 模型与推理
 
-这些命令管理 checkpoint 身份、SGLang 运行时和远程模型节点。模型节点提供推理；[Worker](#远程-worker) 执行评测任务。安装、硬件、精确 Codex 版本及连接/绑定文件格式见[模型推理](model-inference.md)。
+普通模型 API 使用冻结端点绑定，本地模型存储保留制品/CAS 职责。
 
-### 模型存储
-
-| 命令 / 参数 | 用途与说明 |
+| Command / options | Purpose |
 | --- | --- |
-| `hitch models add DIRECTORY --name NAME [--force] [--json]` | 导入完整 safetensors checkpoint 为 `local/NAME`；force 允许重新绑定名称。 |
-| `hitch models add-node SNAPSHOT.json --model-node-file BINDING.json --name NAME [--force] [--json]` | 注册模型节点上的快照，始终输出 JSON。 |
-| `hitch models inspect MODEL [--verify] [--model-node-file BINDING.json] [--json]` | 查看名称或摘要引用；verify 校验本地文件，提供绑定时校验节点副本。 |
-| `hitch models gc [--dry-run \| --apply] [--json]` | 默认预览无引用模型清理。`--apply` 删除符合条件的文件；两个模式参数互斥。 |
+| `hitch models connect --name NAME --file ENDPOINT.json [--json]` | Save an immutable connection revision and update its alias; no deployment. |
+| `hitch models inspect MODEL [--verify] [--json]` | Inspect endpoint/name or local/name; endpoint verification probes text, SSE and declared tool capabilities. |
+| `hitch models add DIRECTORY --name NAME [--force] [--json]` | Import a complete safetensors model artifact. |
+| `hitch models gc [--dry-run] [--apply] [--json]` | Inspect or apply local artifact garbage collection. |
 
-### 推理准备与服务
-
-| 命令 / 参数 | 用途与说明 |
-| --- | --- |
-| `hitch local plan MODEL --harness REF --gpu GPU-UUID [--model-node-file BINDING.json] [--offline] [--json]` | 准备精确的 CUDA/baseline 运行时和推理锁，不启动候选任务；可能准备运行时文件。 |
-| `hitch local prepare MODEL [--device auto\|cpu\|cuda] [--profile baseline\|throughput] [--inference SHA256] [--model-node-file BINDING.json] [--offline] [--json]` | 通过 daemon 准备并验证托管推理，按需启动 daemon。 |
-| `hitch local inspect SHA256 [--json]` | 读取精确推理锁，始终输出 JSON。 |
-| `hitch local inspect-service SERVICE_ID [--json]` | 读取托管模型节点服务记录及用量证据，始终输出 JSON。 |
-| `hitch local doctor [--device auto\|cpu\|cuda] [--json]` | 检查静态硬件/运行时条件，实际加载和协议验证由 prepare 完成。 |
-| `hitch local status [--json]` | 通过 daemon 查询服务；daemon 离线时读取持久化记录。 |
-| `hitch local stop [SERVICE_ID] [--force] [--json]` | 停止一个服务；省略 ID 时停止所有未终止服务。Force 请求在有活动使用时也停止。 |
-
-`local prepare` 使用 `--profile`，run/eval 使用 `--local-profile`。设备解析器识别 `metal`，但当前预览没有可用运行时。使用精确推理锁时省略 device/profile 覆盖。服务 ID 形如 `inference_…`，锁 ID 形如 `sha256:…`。
-
-### 远程模型节点
-
-| 命令 / 参数 | 用途与说明 |
-| --- | --- |
-| `hitch model-node register --file CONNECTION.json [--json]` | 保存连接并检查节点注册信息。 |
-| `hitch model-node inspect --file BINDING.json [--json]` | 通过绑定查询已注册节点。 |
-| `hitch model-node recover-service SERVICE_ID --file CURRENT_BINDING.json [--json]` | 使用当前节点身份核对并恢复已有服务状态。 |
-
-所有 model-node 命令均输出 JSON。Connection 文件包含连接信息，binding 记录选定节点身份；各命令按要求使用对应文件。
+Run/eval accept `--model-binding-file READY.json`, `--max-output-tokens N`, `--temperature N`, `--top-p N`, and `--seed N`. A binding file adds private connection data to the public binding and is frozen before task submission. Credentials are environment references; values never enter public evidence. See [model inference](model-inference.md).
 
 ## Daemon 与容量
 
@@ -340,5 +312,3 @@ hitch feedback delete RUN_ID --message MESSAGE_ID [--if-version VERSION] [--json
 本页覆盖用户命令路径与参数。`--internal-*` 保留给 Hitch 的 Harbor 桥接，在该上下文之外会被拒绝。JSON 集成文件需符合[带版本的 Schema](../../schemas)，不能任意添加字段。确认版本差异时，结合 `hitch --version`、`hitch capabilities --json` 与源码版本检查。
 
 ## 独立推理副本池
-
-`hitch local plan MODEL --harness REF --gpu GPU-UUID --model-node-file NODE.json --pool-file POOL.json --profile baseline|throughput --offline --json` 冻结显式的 v3 TP/副本池。`--pool-file` 包含 `replicas`（按 TP rank 排序的物理 GPU UUID 分组）、`routing: "least-active"`、`max_running_requests` 和 `max_queued_requests`；`--gpu` 必须对应首个副本的首个 rank。每个引擎的 SGLang DP/PP 仍为 1。新注册使用独立安装的 `hitch_inference.node`；历史连接保留显式 `gear-legacy-v2` 适配器。安装和硬件验收见[独立推理包](../../../packages/inference/README.md)。

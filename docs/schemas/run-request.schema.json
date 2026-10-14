@@ -4,19 +4,60 @@
   "title": "Hitch run request",
   "type": "object",
   "additionalProperties": false,
-  "required": ["prompt"],
-  "allOf": [{
-    "if": { "properties": { "context": { "properties": { "kind": { "const": "benchmark_phase" } }, "required": ["kind"] } }, "required": ["context"] },
-    "then": { "required": ["parent"], "properties": { "defer_benchmark_observation": { "const": false } } }
-  }],
+  "required": [
+    "prompt"
+  ],
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "context": {
+            "properties": {
+              "kind": {
+                "const": "benchmark_phase"
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          }
+        },
+        "required": [
+          "context"
+        ]
+      },
+      "then": {
+        "required": [
+          "parent"
+        ],
+        "properties": {
+          "defer_benchmark_observation": {
+            "const": false
+          }
+        }
+      }
+    }
+  ],
   "oneOf": [
     {
-      "required": ["harness_ref"],
-      "not": { "required": ["agent"] }
+      "required": [
+        "harness_ref"
+      ],
+      "not": {
+        "required": [
+          "agent"
+        ]
+      }
     },
     {
-      "required": ["agent"],
-      "not": { "required": ["harness_ref"] }
+      "required": [
+        "agent"
+      ],
+      "not": {
+        "required": [
+          "harness_ref"
+        ]
+      }
     }
   ],
   "properties": {
@@ -39,7 +80,11 @@
       "minLength": 1
     },
     "workspace_mode": {
-      "enum": ["shared", "worktree", "copy"],
+      "enum": [
+        "shared",
+        "worktree",
+        "copy"
+      ],
       "default": "shared"
     },
     "prompt": {
@@ -56,21 +101,78 @@
         "type": "string"
       }
     },
-    "context": { "$ref": "run-context.schema.json" },
+    "context": {
+      "$ref": "run-context.schema.json"
+    },
     "parent": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["kind", "eval_id", "trial_id", "attempt"],
+      "required": [
+        "kind",
+        "eval_id",
+        "trial_id",
+        "attempt"
+      ],
       "properties": {
-        "kind": { "const": "eval" },
-        "eval_id": { "type": "string", "pattern": "^eval_[a-f0-9]{32}$" },
-        "trial_id": { "type": "string", "minLength": 1 },
-        "attempt": { "type": "integer", "minimum": 1 }
+        "kind": {
+          "const": "eval"
+        },
+        "eval_id": {
+          "type": "string",
+          "pattern": "^eval_[a-f0-9]{32}$"
+        },
+        "trial_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "attempt": {
+          "type": "integer",
+          "minimum": 1
+        }
       }
     },
-    "model_identity": { "type": "object" },
-    "protocol_identity": { "type": "object" },
-    "defer_benchmark_observation": { "type": "boolean" },
-    "local_inference": { "$ref": "local-inference-selection.schema.json" }
+    "model_identity": {
+      "type": "object"
+    },
+    "protocol_identity": {
+      "type": "object"
+    },
+    "defer_benchmark_observation": {
+      "type": "boolean"
+    },
+    "endpoint_binding": {
+      "$ref": "external-endpoint-binding.schema.json"
+    },
+    "model_binding": {
+      "$ref": "ready-endpoint-binding.schema.json"
+    },
+    "generation": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "max_output_tokens": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "temperature": {
+          "type": "number"
+        },
+        "top_p": {
+          "type": "number"
+        },
+        "top_k": {
+          "type": "number"
+        },
+        "min_p": {
+          "type": "number"
+        },
+        "repetition_penalty": {
+          "type": "number"
+        },
+        "seed": {
+          "type": "number"
+        }
+      }
+    }
   }
 }

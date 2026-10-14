@@ -26,6 +26,7 @@ export interface EvalRequest {
   benchmark_id: string;
   benchmark_revision: string;
   local_inference?: LocalInferenceSelectionV1;
+  endpoint_binding?: import("./endpoints.js").ExternalEndpointBindingV1;
   training_binding?: TrainingExternalBindingV1;
   /** Private resident environment and resolved host credentials, prepared by the daemon. */
   environment_binding?: string;

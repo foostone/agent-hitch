@@ -22,7 +22,7 @@ const ALLOWED = new Map<string, Set<string>>([
   ["feedback", new Set(["domain", "foundation", "trajectories"])],
   ["workspaces", new Set(["domain", "foundation"])],
   ["runs", new Set(["domain", "foundation", "adapters", "revisions", "artifacts", "workspaces", "trajectories", "model-access"])],
-  ["backends", new Set(["domain", "foundation", "resources"])],
+  ["backends", new Set(["domain", "foundation", "resources", "model-access"])],
   ["evals", new Set(["domain", "foundation", "resources", "benchmarks", "backends", "runs", "artifacts", "revisions", "controller-runtime", "workspaces", "trajectories", "model-access"])],
   ["control-plane", new Set(["domain", "foundation", "resources", "adapters", "model-access", "evals", "images", "inference"])],
   ["workers", new Set(["domain", "foundation", "resources", "artifacts", "backends", "controller-runtime", "evals", "control-plane", "model-access"])],

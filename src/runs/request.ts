@@ -1,3 +1,4 @@
+import { parseEndpointBinding, parseGeneration } from "../model-access/index.js";
 import { parseModelNodeBinding } from "../domain/index.js";
 import { stat } from "node:fs/promises";
 import { getAdapter, normalizeRequest } from "../adapters/index.js";
@@ -29,6 +30,9 @@ export interface RunRequestInput {
   /** Internal eval handoff: the host verifier will seal the observation. */
   defer_benchmark_observation?: unknown;
   local_inference?: unknown;
+  endpoint_binding?: unknown;
+  model_binding?: unknown;
+  generation?: unknown;
 }
 
 export interface ValidatedRunRequest extends AdapterRequest {
@@ -39,6 +43,7 @@ export interface ValidatedRunRequest extends AdapterRequest {
   defer_benchmark_observation: boolean;
   credential_names: string[];
   local_inference?: LocalInferenceSelectionV1;
+  endpoint_binding?: import("../domain/index.js").ExternalEndpointBindingV1;
 }
 
 export async function validateRunRequest(input: RunRequestInput): Promise<ValidatedRunRequest> {
@@ -47,7 +52,7 @@ export async function validateRunRequest(input: RunRequestInput): Promise<Valida
   }
   const allowedFields = new Set([
     "schema_version", "harness_ref", "agent", "model", "cwd", "workspace_mode", "prompt", "timeout_ms", "agent_args", "credential_names",
-    "context", "parent", "model_identity", "protocol_identity", "defer_benchmark_observation", "local_inference",
+    "context", "parent", "model_identity", "protocol_identity", "defer_benchmark_observation", "local_inference", "endpoint_binding", "model_binding", "generation",
   ]);
   const unexpectedField = Object.keys(input).find((field) => !allowedFields.has(field));
   if (unexpectedField) throw invalidInput(`unknown run request field: ${unexpectedField}`);
@@ -129,10 +134,11 @@ export async function validateRunRequest(input: RunRequestInput): Promise<Valida
   }
   return {
     ...request,
+    ...(input.endpoint_binding ? { endpoint_binding: parseEndpointBinding(input.endpoint_binding) } : {}),
     credential_names: [...new Set((input.credential_names ?? []) as string[])].sort(),
     context,
     ...(parent ? { parent } : {}),
-    model_identity: modelIdentity,
+    model_identity: input.endpoint_binding ? { provider: "external-endpoint", requested_id: request.model, effective_id: parseEndpointBinding(input.endpoint_binding).wire_model, identity_resolved: false, endpoint_binding: parseEndpointBinding(input.endpoint_binding) } : modelIdentity,
     protocol_identity: protocolIdentity,
     defer_benchmark_observation: deferObservation,
     ...(localInference ? { local_inference: localInference } : {}),
@@ -140,35 +146,8 @@ export async function validateRunRequest(input: RunRequestInput): Promise<Valida
 }
 
 function validateLocalInferenceSelection(value: unknown, model: string): LocalInferenceSelectionV1 | undefined {
-  const localModel = model.startsWith("local/");
-  if (!localModel) {
-    if (value !== undefined) throw new TypeError("--device, --local-profile, --inference and --offline require a local/<name> model");
-    return undefined;
-  }
-  const record = value === undefined ? {} : asRecord(value, "local_inference");
-  const allowed = new Set(["model", "device", "profile", "inference_id", "offline", "model_node"]);
-  const unexpected = Object.keys(record).find((field) => !allowed.has(field));
-  if (unexpected) throw new TypeError(`local_inference has unknown field: ${unexpected}`);
-  if (record.model !== undefined && record.model !== model) throw new TypeError("local_inference.model must match model");
-  const modelNode = record.model_node === undefined ? undefined : parseModelNodeBinding(record.model_node);
-  if (modelNode && record.inference_id === undefined) throw new TypeError("model-node selection requires a planned inference lock");
-  const normalizedNodeSelection = modelNode && (record.device === undefined || record.device === "auto") && (record.profile === undefined || record.profile === "baseline");
-  if (record.inference_id !== undefined && !normalizedNodeSelection && (record.device !== undefined || record.profile !== undefined)) {
-    throw new TypeError("--inference cannot be combined with --device or --local-profile");
-  }
-  const device = record.device === undefined ? "auto" : asString(record.device, "local_inference.device");
-  if (!new Set(["auto", "cpu", "cuda", "metal"]).has(device)) throw new TypeError("local_inference.device must be auto, cpu, cuda, or metal");
-  const profile = record.profile === undefined ? "baseline" : asString(record.profile, "local_inference.profile");
-  if (profile !== "baseline" && profile !== "throughput") throw new TypeError("local_inference.profile must be baseline or throughput");
-  const offline = record.offline === undefined ? false : asBoolean(record.offline, "local_inference.offline");
-  return {
-    model,
-    device: device as LocalInferenceSelectionV1["device"],
-    profile,
-    offline,
-    ...(modelNode ? { model_node: modelNode } : {}),
-    ...(record.inference_id === undefined ? {} : { inference_id: asSha256(record.inference_id, "local_inference.inference_id") }),
-  };
+  if (value !== undefined || model.startsWith("local/")) throw invalidInput("managed local inference has been removed; connect an external model endpoint and create a new task");
+  return undefined;
 }
 
 function validateModelIdentity(value: unknown, requestedId: string, harnessId: string, agentArgs: string[]): ModelIdentityV1 {
@@ -177,7 +156,7 @@ function validateModelIdentity(value: unknown, requestedId: string, harnessId: s
     ...(derivedParameters ? { parametersSha256: derivedParameters } : {}),
   });
   const record = asRecord(value, "model_identity");
-  const allowed = new Set(["provider", "requested_id", "effective_id", "parameters_sha256", "identity_resolved", "inference_id", "model_node"]);
+  const allowed = new Set(["provider", "requested_id", "effective_id", "parameters_sha256", "identity_resolved", "inference_id", "model_node", "endpoint_binding"]);
   const unexpected = Object.keys(record).find((field) => !allowed.has(field));
   if (unexpected) throw new TypeError(`model_identity has unknown field: ${unexpected}`);
   const declaredRequested = asString(record.requested_id ?? requestedId, "model_identity.requested_id");
@@ -199,6 +178,7 @@ function validateModelIdentity(value: unknown, requestedId: string, harnessId: s
     if (!result.inference_id) throw new TypeError("model node identity requires an inference lock");
     result.model_node = parseModelNodeBinding(record.model_node);
   }
+  if (record.endpoint_binding !== undefined) result.endpoint_binding = parseEndpointBinding(record.endpoint_binding);
   return result;
 }
 

@@ -13,7 +13,7 @@ import { runEval as runEvalProduction, rerunEval, verifyImportedRemoteVerifierSo
 import type { RunEvalOptions } from "../src/evals/index.js";
 import type { EvalTrialRefV1 } from "../src/domain/index.js";
 import { sha256JSON, statePaths, runCommand } from "../src/foundation/index.js";
-import { parseTrainingBinding, trainingProxyIdentity, registerTrainingEndpoint } from "../src/model-access/index.js";
+import { parseTrainingBinding, trainingProxyIdentity, registerTrainingEndpoint, parseReadyEndpointBinding, publicEndpointBinding } from "../src/model-access/index.js";
 import { releaseRemoteHarborOffer, remoteHarborWorker } from "../src/workers/index.js";
 import { parseRemoteHarborWorkSpec } from "../src/workers/remote-harbor-work-spec.js";
 import { forceRemove, prepareHostHarborArtifactForTest, writeFakeNpm } from "./helpers.js";
@@ -82,13 +82,22 @@ export async function verifyRemoteModelCapture(t: TestContext, mode: ModelCaptur
           message: generations < 3 ? { role: "assistant", content: null, tool_calls: [{ id: `call-${generations}`, type: "function",
             function: { name: "bash", arguments: JSON.stringify({ command: `printf remote-tool-${generations}` }) } }] } : { role: "assistant", content: "done" } }] })); return;
       }
+      const payload = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+      if (managed && typeof payload.input !== "string") {
+        const output = payload.tool_choice && typeof payload.tool_choice === "object"
+          ? [{ type: "function_call", call_id: "call_verify", name: "hitch_verify", arguments: "{}" }]
+          : [{ type: "message", content: [{ type: "output_text", text: "ready" }] }];
+        const completion = { id: "resp_verify", status: "completed", model: "hitch-wire-model", output, usage: { input_tokens: 12, output_tokens: 7 } };
+        response.setHeader("content-type", payload.stream ? "text/event-stream" : "application/json");
+        response.end(payload.stream ? `data: ${JSON.stringify(payload.tool_choice && typeof payload.tool_choice === "object" ? { type: "response.function_call_arguments.delta", delta: "{}" } : { type: "response.output_text.delta", delta: "ready" })}\n\ndata: ${JSON.stringify({ type: "response.completed", response: completion })}\n\n` : JSON.stringify(completion)); return;
+      }
       generations++;
       if (managed) {
         assert.equal(request.headers.authorization, `Bearer ${secret}`);
         assert.equal(JSON.parse(Buffer.concat(chunks).toString("utf8")).model, "hitch-wire-model");
       }
       response.writeHead(200, { "content-type": "application/json" });
-      response.end(JSON.stringify({ model: "remote-effective", output: Buffer.concat(chunks).toString("utf8"), ...(!managed ? { api_key: secret } : {}) }));
+      response.end(JSON.stringify({ model: managed ? "hitch-wire-model" : "remote-effective", output: Buffer.concat(chunks).toString("utf8"), ...(!managed ? { api_key: secret } : {}) }));
     });
   });
   closeServers.push(() => close(upstream));
@@ -99,30 +108,22 @@ export async function verifyRemoteModelCapture(t: TestContext, mode: ModelCaptur
     // that topology explicitly so Linux does not select the real Docker bridge
     // gateway that production in-sandbox capture requires.
     HITCH_MODEL_PROXY_BIND_HOST: "127.0.0.1", HITCH_MODEL_PROXY_ADVERTISED_HOST: "127.0.0.1",
+    HITCH_TEST_ENDPOINT_SECRET: secret,
     OPENAI_BASE_URL: managed || training ? "http://127.0.0.1:1/v1" : `${upstreamUrl}/v1`, OPENAI_API_KEY: managed || training ? "foreign-worker-key" : secret,
   };
-  const scopes: string[] = [];
-  const inferenceCoordinator: import("../src/domain/index.js").ManagedInferenceCoordinator = {
-    acquire: async input => {
-        acquisitions++; scopes.push(input.cache_scope_owner); assert.deepEqual(input.selection.model_node, modelNode);
-        assert.equal(input.selection.inference_id, inferenceId);
-        return {
-          binding: { kind: "managed-node" as const, model_node: modelNode, inference_id: inferenceId, api: "responses" as const,
-            base_url: `${upstreamUrl}/v1`, wire_model: "hitch-wire-model", credential_env_name: "HITCH_LOCAL_MODEL_TOKEN",
-            capabilities: { streaming: true, tool_calls: true, parallel_tool_calls: false, input_modalities: ["text" as const] } },
-          credential: secret, lock: { inference_id: inferenceId, model_id: modelId, model_node: modelNode, generation: { max_output_tokens: 16 } } as never,
-          service_id: `inference_${"a".repeat(32)}`, service_epoch: 1, release: async () => { releases++; },
-        };
-      }
-  };
+  const externalConfig = { schema_version: "1" as const, base_url: `${upstreamUrl}/v1`, api: "responses" as const, wire_model: "hitch-wire-model",
+    auth: { kind: "env" as const, name: "HITCH_TEST_ENDPOINT_SECRET" },
+    capabilities: { streaming: true, tool_calls: true, parallel_tool_calls: false, input_modalities: ["text"] as ["text"] } };
+  const externalReady = parseReadyEndpointBinding({ schema_version: "1", kind: "external-endpoint", endpoint_ref: "endpoint/test", endpoint_revision: sha256JSON(externalConfig),
+    api: externalConfig.api, wire_model: externalConfig.wire_model, capabilities: externalConfig.capabilities, generation: { max_output_tokens: 1024 },
+    connection: { base_url: externalConfig.base_url, auth: externalConfig.auth } });
+  const externalBinding = publicEndpointBinding(externalReady);
   const serverOptions: ConstructorParameters<typeof DaemonServer>[0] = {
-    root: controllerRoot, port: 0, maxConcurrent: 1, logger: () => {},
+    root: controllerRoot, port: 0, maxConcurrent: 1, logger: () => {}, credentialEnv: workerEnv,
     resourceCapacity: repair ? { cpu_millis: 100, memory_bytes: 64 * 1024 ** 2, container_slots: 0, build_slots: 1 } : { ...TRIAL, build_slots: 1 }, evalTrialResources: TRIAL,
     evalExecutor: (options) => runEval({ ...options, harborExecutable: harbor, env: workerEnv,
-      ...(managed ? { inferenceCoordinator } : {}),
     }),
     evalRerunExecutor: (options) => rerunEval({ ...options, harborExecutable: harbor, env: workerEnv,
-      ...(managed ? { inferenceCoordinator } : {}),
     }),
   };
   const server = new DaemonServer(serverOptions);
@@ -139,7 +140,7 @@ export async function verifyRemoteModelCapture(t: TestContext, mode: ModelCaptur
     features: { docker: true, buildkit: true, model_proxy: true, isolated_same_task_attempts: false,
       ...(repair ? { physical_work: "2" as const } : {}),
       ...(captureSource ? { verifier_source: "2" as const } : {}),
-      ...(managed ? { managed_model_node: "2" as const } : {}),
+      ...(managed ? { external_endpoint_binding: "1" as const } : {}),
       ...(training ? { training_external_binding: "2" as const } : {}) },
     task_membership: ["known" as const], capacity: { total: TRIAL, reserved_for_system: ZERO, allocatable: TRIAL },
   };
@@ -150,8 +151,8 @@ export async function verifyRemoteModelCapture(t: TestContext, mode: ModelCaptur
     method: "POST",
     body: JSON.stringify({
       request: {
-        dataset, harness_ref: harnessRef, model: managed ? "local/test" : training ? `training/${trainingBinding.bindingId}` : "openai/remote", max_concurrent: 1,
-        ...(managed ? { local_inference: { inference_id: inferenceId, model_node: modelNode } } : {}),
+        dataset, harness_ref: harnessRef, model: managed ? "endpoint/test" : training ? `training/${trainingBinding.bindingId}` : "openai/remote", max_concurrent: 1,
+        ...(managed ? { model_binding: externalReady } : {}),
         ...(training ? { training_binding: trainingBinding } : {}),
         infrastructure_retries: 0,
       },
@@ -170,7 +171,7 @@ export async function verifyRemoteModelCapture(t: TestContext, mode: ModelCaptur
   await writeExportedBundle({
     bundle: path.join(controllerRoot, "capture-bundles", evalId), runId, evalId, trialId,
     taskId: "one", benchmarkId: normalized.benchmark_id, benchmarkRevision: normalized.benchmark_revision,
-    ...(managed ? { managed: { inference_id: inferenceId, model_id: modelId, model_node: modelNode } } : {}),
+    ...(managed ? { external: externalBinding } : {}),
     ...(training ? { training: trainingProxyIdentity(trainingBinding), harnessRef } : {}),
   });
   const execution = { root: workerRoot, env: workerEnv, harborExecutable: harbor, dockerExecutable: docker, trialBundleGraceMs: 0 };
@@ -187,7 +188,7 @@ export async function verifyRemoteModelCapture(t: TestContext, mode: ModelCaptur
       }
       if (managed) {
         assert.throws(() => parseRemoteHarborWorkSpec({ ...spec, model_binding: { ...spec.model_binding, credential: "private" } }, input.offer), /binding fields/);
-        assert.throws(() => parseRemoteHarborWorkSpec({ ...spec, model_binding: { ...spec.model_binding, model_node: { ...modelNode, generation: "changed" } } }, input.offer), /differs from its request/);
+        assert.throws(() => parseRemoteHarborWorkSpec({ ...spec, model_binding: { ...spec.model_binding, endpoint: { ...externalBinding, wire_model: "changed" } } }, input.offer), /frozen request/);
       }
       return remoteHarborWorker(execution)(input);
     }, once: true,
@@ -247,10 +248,9 @@ export async function verifyRemoteModelCapture(t: TestContext, mode: ModelCaptur
     assert.deepEqual(manifest.training_external, trainingProxyIdentity(trainingBinding));
   }
   if (managed) {
-    assert.equal(acquisitions, 1); assert.equal(releases, 1);
     const manifest = JSON.parse(await readFile(path.join(runDirectory, "manifest.json"), "utf8"));
-    assert.equal(manifest.model.inference_id, inferenceId); assert.deepEqual(manifest.model.model_node, modelNode);
-    assert.equal(manifest.model.effective_id, modelId);
+    assert.deepEqual(manifest.model.endpoint_binding, externalBinding);
+    assert.equal(manifest.model.effective_id, externalBinding.wire_model); assert.equal(manifest.model.identity_resolved, false);
   }
   if (mode.endsWith("recovery")) {
     await verifyRemoteModelRecovery(controllerRoot, evalId, runId);
@@ -273,7 +273,7 @@ export async function verifyRemoteModelCapture(t: TestContext, mode: ModelCaptur
     await forceRemove(bundle);
     await writeExportedBundle({ bundle, runId: repairedRunId, evalId, trialId: repairedTrialId, taskId: "one",
       benchmarkId: normalized.benchmark_id, benchmarkRevision: normalized.benchmark_revision,
-      ...(managed ? { managed: { inference_id: inferenceId, model_id: modelId, model_node: modelNode } } : {}),
+      ...(managed ? { external: externalBinding } : {}),
     });
     await admin.request(`/v1/evals/${evalId}/reruns`, { method: "POST", body: JSON.stringify({ rerun_id: rerunId, selector: { mode: "invalid" } }) });
     const repairAbort = new AbortController(); t.after(() => repairAbort.abort());
@@ -296,11 +296,9 @@ export async function verifyRemoteModelCapture(t: TestContext, mode: ModelCaptur
     assert.equal(executionEvidence.provider, "remote-docker"); assert.equal(executionEvidence.worker_id, registration.worker_id);
     const initialExecution = JSON.parse(await readFile(path.join(runDirectory, "execution.json"), "utf8"));
     assert.notEqual(executionEvidence.work_id, initialExecution.work_id); assert.notEqual(executionEvidence.lease_id, initialExecution.lease_id);
-    if (managed) { assert.deepEqual(scopes, [evalId, `${evalId}:${rerunId}`]); assert.equal(acquisitions, 2); assert.equal(releases, 2); }
     if (managed) await verifyRemoteModelRecovery(controllerRoot, evalId, repairedRunId, { rerunId, prior: (status.result as { trials: EvalTrialRefV1[] }).trials[0]!, priorResult: status.result as Record<string, unknown> });
     await verifyRemoteRerunDaemonRecovery({ server, options: serverOptions, root: controllerRoot, evalId, rerunId,
       prior: (status.result as { trials: EvalTrialRefV1[] }).trials[0]!, priorResult: status.result as Record<string, unknown> });
-    if (managed) { assert.equal(acquisitions, 2, "completion recovery must not restart the model service"); assert.equal(releases, 2); }
     assert.equal(generations, 2);
   }
   await server.close();

@@ -1,152 +1,9 @@
-import { availableParallelism } from "node:os";
 import path from "node:path";
-import type {
-  InferenceLockV1,
-  InferencePoolTopologyV3,
-  InferenceRuntimeManifestV1,
-  LocalInferenceBackend,
-  LocalInferenceProfile,
-  LocalModelManifestV1,
-  ModelNodeBindingV2,
-  Sha256,
-} from "../domain/index.js";
-import { HitchError, atomicWriteJSON, readJSON, sha256JSON, statePaths } from "../foundation/index.js";
+import type { InferenceLockV1, InferencePoolTopologyV3, LocalInferenceBackend, Sha256 } from "../domain/index.js";
+import { HitchError, readJSON, sha256JSON, statePaths } from "../foundation/index.js";
 import { inferenceLockIdentity, parseModelNodeBinding } from "./manifest.js";
 
-export interface BuildInferenceLockOptions {
-  backend: Exclude<LocalInferenceBackend, "metal">;
-  profile: LocalInferenceProfile;
-  deviceConstraint?: string;
-  cpuThreads?: number;
-  api?: "responses" | "chat-completions";
-  modelNode?: ModelNodeBindingV2;
-  pool?: InferencePoolTopologyV3;
-  tensorParallelSize?: number;
-}
-
-export function buildInferenceLock(
-  model: LocalModelManifestV1,
-  runtime: InferenceRuntimeManifestV1,
-  options: BuildInferenceLockOptions,
-): InferenceLockV1 {
-  if (runtime.backend !== options.backend || (runtime.package.kind !== "oci" && runtime.schema_version !== "2")) {
-    throw new TypeError("runtime backend does not match the lock request");
-  }
-  if (options.modelNode && (options.backend !== "cuda" || !options.deviceConstraint || runtime.schema_version !== "2"
-    || runtime.package.kind !== "python-env" || runtime.package.environment_digest !== options.modelNode.runtime_digest)) {
-    throw new TypeError("model node lock requires its observed Python CUDA runtime and explicit GPU");
-  }
-  if (model.dtype === "unknown") {
-    throw new HitchError("model config must declare torch_dtype", { code: "inference_model_unsupported", exitCode: 2 });
-  }
-  if (options.pool && !options.modelNode) throw new TypeError("replica pools require an explicit standalone model node");
-  const tensorParallel = options.tensorParallelSize ?? 1;
-  const throughput = options.profile === "throughput";
-  const context = Math.min(8_192, model.context_tokens ?? 8_192);
-  const maxRunning = throughput ? options.backend === "cuda" ? 8 : 2 : 1;
-  const weights = model.files.filter((file) => file.path.endsWith(".safetensors")).reduce((total, file) => total + file.size, 0);
-  const memoryBytes = Math.max(2 * 1024 ** 3, Math.ceil(weights * 1.25 + 1024 ** 3));
-  const parser = toolParserFor(model.model_type);
-  const cpuThreads = Math.max(1, Math.min(options.cpuThreads ?? availableParallelism(), 8));
-  const platform = options.backend === "cpu"
-    ? {
-      backend: "cpu" as const,
-      cpu_threads: cpuThreads,
-      numa_policy: "single-node" as const,
-      cpu_feature_requirement: "amx" as const,
-      overlap_schedule: false as const,
-    }
-    : {
-      backend: "cuda" as const,
-      ...(options.deviceConstraint ? { device_constraint: options.deviceConstraint } : {}),
-      ...(options.pool ? { device_constraints: options.pool.replicas[0]!.devices } : {}),
-      mem_fraction_static: 0.8,
-      overlap_schedule: throughput,
-      cuda_graph: throughput ? "enabled" as const : "disabled" as const,
-    };
-  const withoutIdentity: Omit<InferenceLockV1, "inference_id"> = {
-    schema_version: options.pool ? "3" : options.modelNode ? "2" : "1",
-    ...(options.pool ? { topology: structuredClone(options.pool) } : {}),
-    ...(options.modelNode ? { model_node: parseModelNodeBinding(options.modelNode) } : {}),
-    engine: "sglang",
-    model_id: model.model_id,
-    runtime_id: runtime.runtime_id,
-    profile: options.profile,
-    execution: {
-      platform,
-      load_format: "safetensors",
-      dtype: model.dtype,
-      quantization: model.quantization,
-      tensor_parallel_size: tensorParallel,
-      data_parallel_size: 1,
-      pipeline_parallel_size: 1,
-      context_tokens_per_request: context,
-      max_running_requests: maxRunning,
-      max_queued_requests: maxRunning,
-      max_total_tokens: context * (maxRunning + 1),
-      chunked_prefill_size: throughput ? Math.min(4_096, context) : -1,
-      max_prefill_tokens: context,
-      kv_cache_dtype: model.dtype === "bfloat16" || model.dtype === "bf16" ? "bfloat16" : "auto",
-      attention_backend: options.backend === "cpu" ? "intel_amx" : "flashinfer",
-      sampling_backend: options.backend === "cpu" ? "pytorch" : "flashinfer",
-      deterministic_inference: false,
-      prefix_cache: {
-        mode: throughput ? "radix" : "disabled",
-        scope: "eval",
-        initial_state: "empty",
-      },
-      hicache: false,
-      speculative_decoding: false,
-      cpu_offload_gb: 0,
-      startup_timeout_ms: 600_000,
-      queue_timeout_ms: 60_000,
-      request_timeout_ms: 600_000,
-      idle_ttl_ms: 60_000,
-    },
-    generation: {
-      temperature: 0,
-      top_p: 1,
-      top_k: 0,
-      min_p: 0,
-      repetition_penalty: 1,
-      seed: 0,
-      max_output_tokens: Math.min(2_048, Math.max(1, Math.floor(context / 4))),
-      override_policy: "reject-conflicts",
-    },
-    protocol: {
-      api: options.api ?? "responses",
-      streaming: true,
-      tool_calls: parser !== null,
-      parallel_tool_calls: false,
-      input_modalities: ["text"],
-      tool_call_parser: parser,
-      reasoning_parser: null,
-      compatibility_profile_id: sha256JSON({
-        engine: "sglang",
-        runtime_id: runtime.runtime_id,
-        model_type: model.model_type,
-        template_digest: model.template_digest,
-        api: options.api ?? "responses",
-        tool_call_parser: parser,
-      }),
-    },
-    resources: {
-      cpu_millis: options.backend === "cpu" ? cpuThreads * 1_000 : 2_000 * (options.pool?.replicas.length ?? 1),
-      memory_bytes: memoryBytes * (options.pool?.replicas.length ?? 1),
-      container_slots: options.modelNode ? 0 : 1,
-      build_slots: 0,
-      ...(options.backend === "cuda" ? { gpu_count: options.pool ? options.pool.replicas.length * tensorParallel : 1 } : {}),
-      ephemeral_disk_bytes: 4 * 1024 ** 3,
-    },
-  };
-  return validateInferenceLockShape({ ...withoutIdentity, inference_id: inferenceLockIdentity(withoutIdentity) });
-}
-
-export async function persistInferenceLock(root: string, lock: InferenceLockV1): Promise<void> {
-  const directory = path.join(statePaths(root).inferenceLocks, lock.inference_id.slice("sha256:".length));
-  await atomicWriteJSON(path.join(directory, "lock.json"), lock);
-}
-
+/** Read historical locks without installing their former model runtime. */
 export async function loadInferenceLock(root: string, inferenceId: Sha256): Promise<InferenceLockV1> {
   let value: unknown;
   try {
@@ -205,10 +62,6 @@ export function parseInferencePoolTopology(value: unknown, execution?: Inference
     || JSON.stringify(execution.platform.device_constraints) !== JSON.stringify(replicas[0]!.devices)
     || execution.platform.device_constraint !== replicas[0]!.devices[0] || running > replicas.length * execution.max_running_requests)) throw lockError("pool does not match per-engine execution capacity and TP placement");
   return { replicas, routing: "least-active", max_running_requests: running, max_queued_requests: queued };
-}
-
-export async function readInferencePoolTopology(file: string): Promise<InferencePoolTopologyV3> {
-  return parseInferencePoolTopology(await readJSON(file));
 }
 
 function parseExecution(value: unknown, pool: boolean): InferenceLockV1["execution"] {

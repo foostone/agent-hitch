@@ -73,7 +73,7 @@ export async function recoverPromotedEvalTrialPublications(input: {
   return { progress, recovered };
 }
 
-async function readEvalTrialPublications(root: string, evalId: string): Promise<EvalTrialPublicationV1[]> {
+export async function readEvalTrialPublications(root: string, evalId: string): Promise<EvalTrialPublicationV1[]> {
   let entries: Dirent[];
   try { entries = await readdir(statePaths(root).runs, { withFileTypes: true }); }
   catch (error) {
