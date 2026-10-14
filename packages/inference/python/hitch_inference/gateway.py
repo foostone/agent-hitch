@@ -5,8 +5,9 @@ import select
 import socket
 import threading
 import time
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler
 from urllib.parse import urlsplit
+from .http_transport import InferenceHTTPServer
 from .request_validation import validate_request
 
 
@@ -245,7 +246,7 @@ class Handler(BaseHTTPRequestHandler):
         self.reply(200, {"flushed": True})
 
 
-class GatewayServer(ThreadingHTTPServer):
+class GatewayServer(InferenceHTTPServer):
     daemon_threads = True
     block_on_close = False
     request_queue_size = 128

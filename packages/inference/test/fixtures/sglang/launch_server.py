@@ -5,7 +5,8 @@ import os
 import threading
 import time
 from pathlib import Path
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler
+from hitch_inference.http_transport import InferenceHTTPServer
 p = argparse.ArgumentParser()
 for name in ("model-path", "served-model-name", "host", "port", "api-key", "admin-api-key", "random-seed", "tp-size", "dp-size", "pp-size", "load-format", "dtype", "context-length", "max-running-requests", "max-total-tokens", "chunked-prefill-size", "max-prefill-tokens", "kv-cache-dtype", "attention-backend", "sampling-backend", "mem-fraction-static", "device", "tool-call-parser", "reasoning-parser"):
     p.add_argument("--" + name)
@@ -70,7 +71,7 @@ class Handler(BaseHTTPRequestHandler):
             try: self.reply(value)
             except (BrokenPipeError, ConnectionResetError): pass
 
-server = ThreadingHTTPServer((a.host, int(a.port)), Handler)
+server = InferenceHTTPServer((a.host, int(a.port)), Handler)
 print(json.dumps({"fixture": "listening", "pid": os.getpid(), "devices": devices,
                   "configuration": info}), flush=True)
 server.serve_forever()
