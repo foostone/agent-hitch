@@ -15,6 +15,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from diagnostics import startup_diagnostics
+
 from hitch_inference.content import ContractError, atomic_json, digest_json
 from hitch_inference.gateway import GatewayServer, Router
 from hitch_inference.node import NodeService
@@ -100,10 +102,12 @@ class RuntimeTest(unittest.TestCase):
         def observed():
             value = self.service.inspect(self.owner(payload))
             if value["state"] == "failed":
-                logs = list((self.root / "node").rglob("*.log"))
-                self.fail(json.dumps(value) + "\n" + "\n".join(p.read_text() for p in logs))
+                self.fail("inference service failed during startup")
             return value if value["state"] == "ready" else None
-        return wait_until(observed)
+        try:
+            return wait_until(observed)
+        except AssertionError as error:
+            self.fail(str(error) + "\n" + startup_diagnostics(self.root / "node"))
 
     def request(self, access, text="hello", *, stream=False, tools=False):
         connection = http.client.HTTPConnection("127.0.0.1", access["port"], timeout=10)

@@ -43,6 +43,9 @@ jobs:
           npm run check:architecture
           node dist/scripts/check-syntax.js
           npm run docs:check
+      - name: Check inference process contracts in isolation
+        if: matrix.os == 'macos-latest'
+        run: node --test --test-concurrency=1 --test-timeout=120000 dist/test/inference-pool-process.test.js dist/test/standalone-inference.test.js
       - name: Test
         if: matrix.os != 'ubuntu-latest' || matrix.node != 24
         run: npm test

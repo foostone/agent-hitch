@@ -56,7 +56,13 @@ test("real standalone Python TP pool startup/attachment feeds Hitch's replica ev
     model: input.model, runtime: input.runtime, lock: input.lock }); };
   const input: SGLangLaunchInput = { root: path.join(directory, "hitch"), ...planned };
   const launcher = new ProcessSGLangLauncher(client);
-  service = await launcher.start(input);
+  try {
+    service = await launcher.start(input);
+  } catch (error) {
+    const diagnostic = await promisify(execFile)(python, [path.join(packageRoot, "test/diagnostics.py"), path.join(directory, "node")], { env, timeout: 10_000 });
+    t.diagnostic(diagnostic.stdout);
+    throw error;
+  }
   assert.equal(service.observation?.schema_version, "3");
   if (service.observation?.schema_version !== "3") throw new Error("missing v3 observation");
   assert.equal(service.observation.replica_observations.length, 2);
