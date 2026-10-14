@@ -109,6 +109,10 @@ def run_engine(service, directory, request):
             **os.environ,
             "HF_HUB_OFFLINE": "1",
             "TRANSFORMERS_OFFLINE": "1",
+            # HTTP-only: SGLang 0.5.15 still validates its unused gRPC port.
+            # Reuse the valid HTTP port; disabled gRPC never binds a second listener.
+            "SGLANG_ENABLE_GRPC": "false",
+            "SGLANG_GRPC_PORT": str(load(directory / "access.json")["port"]),
             "CUDA_VISIBLE_DEVICES": ",".join(selected_devices(request["lock"])),
         }
         if backend["backend"] == "cpu":

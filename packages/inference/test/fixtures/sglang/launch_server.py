@@ -13,10 +13,18 @@ for name in ("model-path", "served-model-name", "host", "port", "api-key", "admi
 for name in ("disable-radix-cache", "disable-overlap-schedule", "disable-cuda-graph", "enable-deterministic-inference"):
     p.add_argument("--" + name, action="store_true")
 a = p.parse_args()
+# Pinned SGLang server_args.py validates this even when gRPC is disabled;
+# equality to the HTTP port is forbidden only when the listener is enabled.
+grpc_enabled = os.environ.get("SGLANG_ENABLE_GRPC", "false").lower() in ("true", "1", "yes", "y")
+grpc_port = int(os.environ.get("SGLANG_GRPC_PORT", str(int(a.port) + 10000)))
+if not 1 <= grpc_port <= 65535:
+    raise ValueError("gRPC port is outside 1..65535")
+if grpc_enabled and grpc_port == int(a.port):
+    raise ValueError("enabled gRPC requires a different HTTP port")
 root = Path(os.environ["HITCH_INFERENCE_FAKE_GPU_STATE"])
 root.mkdir(parents=True, exist_ok=True)
 devices = os.environ.get("CUDA_VISIBLE_DEVICES", "").split(",")
-(root / (str(os.getpid()) + ".json")).write_text(json.dumps({"pid": os.getpid(), "devices": devices, "arguments": vars(a)}))
+(root / (str(os.getpid()) + ".json")).write_text(json.dumps({"pid": os.getpid(), "devices": devices, "arguments": vars(a), "grpc": {"enabled": grpc_enabled, "port": grpc_port}}))
 info = {"version": "0.5.15.post1", "device": a.device or "cuda", "dtype": a.dtype, "kv_cache_dtype": a.kv_cache_dtype,
     "attention_backend": a.attention_backend, "sampling_backend": a.sampling_backend, "context_length": int(a.context_length),
     "max_total_num_tokens": int(a.max_total_tokens), "max_running_requests": int(a.max_running_requests),
