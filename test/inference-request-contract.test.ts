@@ -12,6 +12,10 @@ test("shared TS/Python request fixtures keep user budgets until exactly one engi
   const fixture = JSON.parse(await readFile(file, "utf8")) as { lock: InferenceLockV1; cases: Array<{
     name: string; api: string; request: Record<string, unknown>; valid: boolean; canonical: Record<string, unknown>; engine: Record<string, unknown>;
   }> };
+  for (const number of ["1e309", "-1e309"]) {
+    const lock = { ...fixture.lock, protocol: { ...fixture.lock.protocol, api: "responses" } } as InferenceLockV1;
+    assert.throws(() => validateRequestBody(Buffer.from(`{"model":"fixture-model","input":"hello","max_output_tokens":${number}}`), lock, "fixture-model"));
+  }
   const serial: Array<{ api: string; body: Record<string, unknown> }> = [];
   for (const row of fixture.cases) {
     const lock = { ...fixture.lock, protocol: { ...fixture.lock.protocol, api: row.api } } as InferenceLockV1;

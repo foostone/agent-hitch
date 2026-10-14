@@ -3,7 +3,7 @@ from .content import require
 
 
 def integer(value):
-    return type(value) in (int, float) and value == int(value) and abs(value) <= 9007199254740991
+    return type(value) in (int, float) and abs(value) <= 9007199254740991 and value == int(value)
 
 RESPONSE_FIELDS = set("background include input instructions max_output_tokens max_tool_calls metadata model parallel_tool_calls previous_response_id reasoning service_tier store stream temperature tool_choice tools top_logprobs top_p truncation user request_id session_id priority extra_key cache_salt frequency_penalty presence_penalty stop top_k min_p repetition_penalty prompt_cache_key client_metadata".split())
 CHAT_FIELDS = set("model messages tools tool_choice parallel_tool_calls temperature top_p top_k min_p repetition_penalty max_tokens max_completion_tokens stream stream_options stop n seed user metadata store frequency_penalty presence_penalty logprobs top_logprobs response_format cache_salt prompt_cache_key".split())

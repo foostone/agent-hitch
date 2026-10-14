@@ -10,10 +10,12 @@ import struct
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
+from types import SimpleNamespace
 
 from diagnostics import startup_diagnostics
 
@@ -151,15 +153,58 @@ class RuntimeTest(unittest.TestCase):
     def test_bounded_queue_timeout_abort_and_shared_service_lifetime(self):
         payload = self.payload(tp=1, replicas=1, queued=1, queue_timeout=150)
         access = self.ready(payload)["access"]
-        with concurrent.futures.ThreadPoolExecutor() as executor:
-            first = executor.submit(self.request, access, "delay:0.8")
-            wait_until(lambda: self.count_requests() == 1)
-            second = executor.submit(self.request, access, "queued")
-            time.sleep(0.05)
-            third = self.request(access, "overflow")
-            self.assertEqual(third[0], 429)
-            self.assertEqual(second.result()[1]["error"]["code"], "inference_queue_timeout")
-            self.assertEqual(first.result()[0], 200)
+        # Exercise the real HTTP relay in-process so its queue state and deadline
+        # are observable. The upstream remains the independently running pool.
+        router = Router([{**access, "baseUrl": "http://127.0.0.1:" + str(access["port"])}],
+                        running=1, queued=1, queue_timeout=0.15, request_timeout=5,
+                        engine_capacity=1, frozen=payload["lock"], engine_boundary=False)
+        server = GatewayServer(("127.0.0.1", 0), router, access)
+        serving = threading.Thread(target=server.serve_forever, daemon=True)
+        serving.start()
+        front = {**access, "port": server.server_address[1]}
+        admitted, release_first = threading.Event(), threading.Event()
+        clock = [time.monotonic()]
+        acquire = router.acquire
+
+        def hold_first(sock):
+            index = acquire(sock)
+            if not admitted.is_set():
+                admitted.set()
+                if not release_first.wait(10):
+                    router.release(index)
+                    raise AssertionError("first admitted request was not released")
+            return index
+
+        def one_waiter():
+            with router.condition:
+                return router.active == [1] and router.waiting == 1
+
+        try:
+            # Replace only this module's time reference, never the global clock.
+            # Client scheduling cannot expire the waiter before the 429 probe.
+            with patch("hitch_inference.gateway.time", SimpleNamespace(monotonic=lambda: clock[0])), patch.object(router, "acquire", side_effect=hold_first):
+                with concurrent.futures.ThreadPoolExecutor() as executor:
+                    first = executor.submit(self.request, front, "active")
+                    try:
+                        self.assertTrue(admitted.wait(5), "first request must own the running permit")
+                        second = executor.submit(self.request, front, "queued")
+                        wait_until(one_waiter)
+                        third = self.request(front, "overflow")
+                        self.assertEqual((third[0], third[1]["error"]["code"]), (429, "inference_queue_full"))
+                        clock[0] += router.queue_timeout + 0.001
+                        with router.condition:
+                            router.condition.notify_all()
+                        timed_out = second.result(timeout=5)
+                        self.assertEqual((timed_out[0], timed_out[1]["error"]["code"]), (504, "inference_queue_timeout"))
+                        release_first.set()
+                        self.assertEqual(first.result(timeout=5)[0], 200)
+                    finally:
+                        release_first.set()
+                        clock[0] += router.queue_timeout + 0.001
+                        with router.condition:
+                            router.condition.notify_all()
+        finally:
+            server.shutdown(); server.server_close(); serving.join(timeout=5)
         sock = socket.create_connection(("127.0.0.1", access["port"]))
         body = json.dumps({"model": access["wireModel"], "messages": [{"role": "user", "content": "delay:3"}], "stream": True}).encode()
         sock.sendall(("POST /v1/chat/completions HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer " + access["engineToken"] + "\r\nContent-Length: " + str(len(body)) + "\r\nContent-Type: application/json\r\n\r\n").encode() + body)

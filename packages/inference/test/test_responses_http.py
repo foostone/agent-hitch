@@ -30,7 +30,7 @@ class ResponsesHTTPTest(unittest.TestCase):
             public = {k: v for k, v in payload.items() if k != "ownerId"}
             def request(route, body, token="inference-token", port=None):
                 connection = http.client.HTTPConnection("127.0.0.1", port or server.server_address[1], timeout=10)
-                connection.request("POST", route, json.dumps(body), {"Authorization": "Bearer " + token, "Content-Type": "application/json"})
+                connection.request("POST", route, body if isinstance(body, str) else json.dumps(body), {"Authorization": "Bearer " + token, "Content-Type": "application/json"})
                 response = connection.getresponse(); value = response.read(); connection.close()
                 return response.status, value
             self.assertEqual(request("/deployments", public, "management-token")[0], 202)
@@ -47,6 +47,10 @@ class ResponsesHTTPTest(unittest.TestCase):
             self.assertEqual(request("/v1/responses", {"model": "unbound-model", "input": "hello"})[0], 404)
             access = manager.inspect(payload["serviceId"])["access"]
             self.assertEqual(request("/v1/responses", {"model": "unbound-model", "input": "hello"}, access["engineToken"], access["port"])[0], 404)
+            for number in ("1e309", "-1e309"):
+                raw = '{"model":' + json.dumps(access["wireModel"]) + ',"input":"hello","max_output_tokens":' + number + '}'
+                self.assertEqual(request("/v1/responses", raw, access["engineToken"], access["port"])[0], 400)
+            self.assertEqual(len((self.gpu / "requests.jsonl").read_text().splitlines()), count)
             broken = copy.deepcopy(public); broken["serviceId"] = "inference_" + "f" * 32
             broken["lock"]["model_id"] = "sha256:" + "1" * 64
             self.assertEqual(request("/deployments", broken, "management-token")[0], 400)
