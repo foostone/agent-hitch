@@ -32,7 +32,7 @@ test("real standalone Python TP pool startup/attachment feeds Hitch's replica ev
   await chmod(nvidia, 0o755);
   const env = { ...process.env, PATH: [bin, process.env.PATH].join(path.delimiter),
     PYTHONPATH: [path.join(packageRoot, "python"), path.join(packageRoot, "test/fixtures")].join(path.delimiter),
-    HITCH_INFERENCE_FAKE_GPU_STATE: gpu };
+    HITCH_INFERENCE_FAKE_GPU_STATE: gpu, HITCH_INFERENCE_TEST_TRACEBACK: "1" };
   const listener = net.createServer();
   await new Promise<void>(resolve => listener.listen(0, "127.0.0.1", resolve));
   const port = (listener.address() as net.AddressInfo).port;

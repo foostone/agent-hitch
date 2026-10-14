@@ -51,7 +51,7 @@ class RuntimeTest(unittest.TestCase):
         nvidia.write_text("#!" + sys.executable + "\n" + (Path(__file__).parent / "fixtures/nvidia-smi.py").read_text())
         nvidia.chmod(0o755)
         self.environment = patch.dict(os.environ, {"PATH": str(self.bin) + os.pathsep + os.environ["PATH"],
-            "HITCH_INFERENCE_FAKE_GPU_STATE": str(self.gpu), "HITCH_INFERENCE_API_TOKEN": "inference-token", "HITCH_INFERENCE_MANAGEMENT_TOKEN": "management-token"})
+            "HITCH_INFERENCE_FAKE_GPU_STATE": str(self.gpu), "HITCH_INFERENCE_API_TOKEN": "inference-token", "HITCH_INFERENCE_MANAGEMENT_TOKEN": "management-token", "HITCH_INFERENCE_TEST_TRACEBACK": "1"})
         self.environment.start()
         self.config = {"schemaVersion": 2, "nodeId": "fixture-node", "nodeRoot": str(self.root / "node"), "storeRoot": str(self.root / "cas"), "port": 0}
         self.config_file = self.root / "config.json"
