@@ -79,7 +79,7 @@ hitch run --harness HARNESS_REF [--prompt TEXT | --prompt-file PATH] [RUN_OPTION
 | --- | --- |
 | `hitch eval setup harbor [--version VERSION] [--python PATH] [--force] [--json]` | 在隔离工具目录安装 Hitch 固定的 Harbor；`--force` 重建该安装。 |
 | `hitch eval doctor [--harbor PATH] [--python PATH] [--docker PATH] [--json]` | 检查依赖，不启动评测。 |
-| `hitch eval bind --model MODEL [--pass-env NAME ...] [--minimum-validity DURATION] --json` | 绑定驻留 daemon 的模型环境、冻结凭据、Harbor Python 运行时及支持的环境引用文件；最低有效期默认为 `30m`。详见[绑定协议](../../evaluation-bindings.zh-CN.md)。 |
+| `hitch eval bind --model MODEL [--pass-env NAME ...] [--minimum-validity DURATION] [--timeout DURATION] --json` | 绑定驻留 daemon 的模型环境、冻结凭据、Harbor Python 运行时及支持的环境引用文件。最低有效期与准备超时分别默认为 `30m`。daemon 的 `HITCH_HARBOR_PYTHON_RUNTIME_TIMEOUT_MS`、`HITCH_HARBOR_PYTHON_RUNTIME_MAX_FILES`、`HITCH_HARBOR_PYTHON_RUNTIME_MAX_BYTES` 控制扫描预算，默认 30 分钟、25 万个遍历条目（含派生缓存）与 2 GiB 读取量。详见[绑定协议](../../evaluation-bindings.zh-CN.md)。 能力 `evaluation_preparation: "1"` 支持长准备请求的进度流，CLI 最终 JSON 不变；准入与启动检查包含 Harbor helper 的 5 分钟凭据有效期余量。 |
 | `hitch eval run --dataset REF --harness REF [EVAL_OPTIONS]` | 执行并等待结果，默认输出 JSON。 |
 | `hitch eval submit --dataset REF --harness REF [EVAL_OPTIONS]` | 提交给已运行的 daemon，立即以 JSON 返回受理 ID。 |
 | `hitch eval watch EVAL_ID [--output json\|jsonl]` | 跟踪 daemon 评测，默认 JSONL。 |

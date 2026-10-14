@@ -5,6 +5,12 @@ import { HitchError, invalidInput } from "../../foundation/index.js";
 
 export const HOST_CREDENTIAL_HELPER_ENV = "HITCH_HOST_CREDENTIAL_HELPER_JSON";
 export const HOST_CREDENTIAL_HELPER_CAPABILITY = "host-task-credential-helper-v1";
+// Shared with the Harbor bridge in integrations/harbor/hitch_host_credentials.py.
+export const HOST_CREDENTIAL_VALIDITY_MARGIN_MS = 5 * 60 * 1000;
+
+export function evaluationCredentialValidity(request: { timeout_ms: number; setup_timeout_ms: number }): number {
+  return request.timeout_ms + request.setup_timeout_ms + HOST_CREDENTIAL_VALIDITY_MARGIN_MS;
+}
 
 const MAX_CONFIG_BYTES = 64 * 1024;
 const MAX_ARGUMENTS = 32;

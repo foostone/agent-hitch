@@ -7,3 +7,4 @@ export type { DaemonClient, DaemonHealth } from "./client.js";
 export { startDetachedDaemon } from "./launcher.js";
 export type { DetachedDaemonOptions } from "./launcher.js";
 export type { DaemonResourcePolicy } from "./launcher.js";
+export { PREPARATION_STREAM_TYPE } from "./json-stream.js";

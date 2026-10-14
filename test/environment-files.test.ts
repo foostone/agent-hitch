@@ -39,6 +39,16 @@ test("default credential/config files appearing or disappearing change identity"
   }
 });
 
+test("an empty Docker config override still binds the default config", async t => {
+  const root = await fixture(t);
+  const env = { HOME: root, DOCKER_CONFIG: "" };
+  const first = await evaluationEnvironmentFiles(env);
+  assert.deepEqual(first, await evaluationEnvironmentFiles({ HOME: root }));
+  await mkdir(path.join(root, ".docker"));
+  await writeFile(path.join(root, ".docker/config.json"), "{}");
+  assert.notDeepEqual(first, await evaluationEnvironmentFiles(env));
+});
+
 test("certificate directories bind entries and symlink targets and reject cycles", async t => {
   const root = await fixture(t), dir = path.join(root, "certs");
   await mkdir(dir);

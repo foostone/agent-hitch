@@ -3,7 +3,8 @@ import { createHmac, randomBytes } from "node:crypto";
 import { chmod, mkdir } from "node:fs/promises";
 import path from "node:path";
 import { snapshotHostCredentials } from "./credential-snapshot.js";
-import { HOST_CREDENTIAL_HELPER_ENV, withHostCredentialPlaceholders } from "./host-credential-helper.js";
+import { evaluationCredentialValidity, HOST_CREDENTIAL_HELPER_ENV, withHostCredentialPlaceholders } from "./host-credential-helper.js";
+import type { EvalRequest } from "../../domain/index.js";
 import { observeHarborPythonRuntime, type HarborPythonRuntimeV1 } from "./python-runtime.js";
 import { evaluationEnvironmentFiles } from "./environment-files.js";
 import { canonicalJSON, durableWriteJSON, HitchError, invalidInput, readJSON, withFileLock } from "../../foundation/index.js";
@@ -32,7 +33,11 @@ function selection(model: string, names: readonly string[]) {
   return { model, pass_env: [...new Set(names)].sort() };
 }
 function validity(value: number) {
-  if (!Number.isSafeInteger(value) || value < 0 || value > 24 * 60 * 60 * 1000) throw invalidInput("invalid evaluation binding validity");
+  // Credential lifetime also covers setup and the bridge's safety margin; it
+  // is not a task timeout and must not inherit the task's 24-hour ceiling.
+  if (!Number.isSafeInteger(value) || value < 0 || !Number.isSafeInteger(Date.now() + value)) {
+    throw invalidInput("invalid evaluation binding validity");
+  }
 }
 async function keyFor(root: string, create: boolean): Promise<string> {
   const file = path.join(directory(root), "key.json");
@@ -85,11 +90,13 @@ export async function prepareEvaluationBinding(input: {
 export async function boundEvaluationEnvironment(input: {
   root: string; env: NodeJS.ProcessEnv; bindingId: string; model: string; passEnv: string[]; minimumValidityMs: number;
   harborExecutable?: string;
+  signal?: AbortSignal;
 }): Promise<NodeJS.ProcessEnv> {
   const selected = selection(input.model, input.passEnv);
   validity(input.minimumValidityMs);
   if (!validId(input.bindingId)) throw unavailable();
   try {
+    input.signal?.throwIfAborted();
     const { key, record } = await verifiedRecord(input.root, input.bindingId, input.minimumValidityMs);
     if (record.model !== selected.model
       || canonicalJSON(record.pass_env) !== canonicalJSON(selected.pass_env)
@@ -99,6 +106,7 @@ export async function boundEvaluationEnvironment(input: {
     const checkFiles = async () => mac(key, "evaluation-files-v1", await evaluationEnvironmentFiles(executionEnv)) === record.environment_files;
     if (!await checkFiles()) throw unavailable();
     const pythonRuntime = await observeHarborPythonRuntime({ root: input.root, env: executionEnv,
+      ...(input.signal ? { signal: input.signal } : {}),
       ...(input.harborExecutable ? { harborExecutable: input.harborExecutable } : {}) });
     if (canonicalJSON(pythonRuntime) !== canonicalJSON(record.python_runtime)
       || !await checkFiles()
@@ -108,7 +116,10 @@ export async function boundEvaluationEnvironment(input: {
     const result = { ...input.env, ...record.overrides };
     delete result[HOST_CREDENTIAL_HELPER_ENV];
     return result;
-  } catch { throw unavailable(); }
+  } catch (error) {
+    if (input.signal?.aborted || error instanceof HitchError && error.code === "harbor_python_runtime_timeout") throw error;
+    throw unavailable();
+  }
 }
 
 async function verifiedRecord(root: string, bindingId: string, minimumValidityMs: number) {
@@ -132,6 +143,17 @@ export async function boundHarborEnvironment(input: Parameters<typeof boundEvalu
       credentialNames: names, timeoutMs: 10_000 });
   }
   return env;
+}
+
+/** Check the request at launch using the same validity budget as admission. */
+export async function harborRequestEnvironment(input: {
+  request: EvalRequest; root: string; env: NodeJS.ProcessEnv; runtimeDirectory: string;
+  harborExecutable?: string; signal?: AbortSignal;
+}): Promise<NodeJS.ProcessEnv> {
+  const { request, ...execution } = input;
+  if (!request.environment_binding) return input.env;
+  return boundHarborEnvironment({ ...execution, bindingId: request.environment_binding,
+    model: request.model, passEnv: request.pass_env, minimumValidityMs: evaluationCredentialValidity(request) });
 }
 
 /** Called only by the host-side private helper; it reads a frozen record and cannot refresh it. */

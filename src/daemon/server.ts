@@ -1,6 +1,7 @@
 import { evaluationBinding } from "./evaluation-binding.js";
 import { prepareInference } from "./inference-prepare.js";
-import { orderedEvalControl, withLegacyEvalMutation } from "../control-plane/index.js";
+import { withLegacyEvalMutation } from "../control-plane/index.js";
+import { evaluationSubmission } from "./evaluation-submission.js";
 import { executionObservation } from "./execution-observation.js";
 import { randomBytes } from "node:crypto";
 import { createServer } from "node:http";
@@ -190,7 +191,8 @@ export class DaemonServer {
   private async listen(): Promise<void> {
     this.server = createServer((request, response) => {
       this.handle(request, response).catch((error) => {
-        this.logger("request_error", { error: boundedMessage((error as Error).message), path: boundedMessage(request.url || "", 2_048) });
+        this.logger("request_error", { error: boundedMessage(error instanceof Error ? error.message : error), path: boundedMessage(request.url || "", 2_048) });
+        if (response.headersSent) return;
         json(response, errorStatus(error), { error: {
           code: (error as { code?: string }).code || "internal_error", message: boundedMessage((error as Error).message),
           exit_code: Number.isInteger((error as { exitCode?: unknown }).exitCode) ? (error as { exitCode: number }).exitCode : 12,
@@ -299,24 +301,9 @@ export class DaemonServer {
       const runId = await this.scheduler?.submit(requestBody as RunRequestInput);
       return json(response, 202, { schema_version: SCHEMA_VERSION, run_id: runId, status: "queued" });
     }
-    if (request.method === "POST" && url.pathname === "/v1/eval-controls") {
-      return json(response, 200, await orderedEvalControl(this.paths.root, await readBodyJSON(request), this.evalScheduler!, this.evalRerunScheduler!));
-    }
-    if (request.method === "POST" && url.pathname === "/v1/evals") {
-      const requestBody = await readBodyJSON(request);
-      const header = request.headers["idempotency-key"];
-      if (Array.isArray(header)) throw invalidInput("idempotency-key header must appear once");
-      const evalId = await this.evalScheduler?.submit(requestBody as EvalRequestInput, header ? { idempotencyKey: header } : {});
-      return json(response, 202, {
-        schema_version: SCHEMA_VERSION,
-        eval_id: evalId,
-        status: "queued",
-        links: {
-          self: `/v1/evals/${evalId}`,
-          events: `/v1/evals/${evalId}/events`,
-          cancel: `/v1/evals/${evalId}/cancel`,
-        },
-      });
+    if (request.method === "POST" && ["/v1/eval-controls", "/v1/evals"].includes(url.pathname)) {
+      return evaluationSubmission(request, response, { root: this.paths.root, scheduler: this.evalScheduler!,
+        rerunScheduler: this.evalRerunScheduler!, ordered: url.pathname === "/v1/eval-controls" });
     }
     if (request.method === "POST" && url.pathname === "/shutdown") {
       json(response, 202, { schema_version: SCHEMA_VERSION, status: "shutting_down" });
@@ -495,4 +482,3 @@ export class DaemonServer {
 }
 
 type RunRequestInput = import("../runs/index.js").RunRequestInput;
-type EvalRequestInput = import("../evals/index.js").EvalRequestInput;

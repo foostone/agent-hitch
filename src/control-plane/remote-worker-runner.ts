@@ -101,7 +101,9 @@ export class RemoteWorkerRunner {
   async run(): Promise<void> {
     while (!this.signal?.aborted) {
       try { await this.tick(); }
-      catch (error) { this.onError(error); }
+      catch (error) {
+        if (!this.signal?.aborted || error !== this.signal.reason) this.onError(error);
+      }
       if (this.once && this.handled > 0 && this.jobs.size === 0 && this.generationRecovery?.idle !== false) { await this.observations?.stop(); this.client.fencedSignal.throwIfAborted(); return; }
       await delay(this.pollIntervalMs, this.signal);
     }
