@@ -3,7 +3,7 @@ import { DEFAULT_HARBOR_VERSION, doctorHarbor, setupHarbor } from "../../backend
 import { readOrderedEvalIntent as readControl } from "../../control-plane/index.js";
 import type { EvalExecutionPolicyV1, ResourceVectorV1 } from "../../domain/index.js";
 import { inspectEval, isControlPlaneEval, listEvals, parseEvalRerunType, rerunEval, runEval, runBenchmarkEval, validateEvalId } from "../../evals/index.js";
-import { daemonClient, probeDaemonHealth } from "../../daemon/index.js";
+import { daemonClient, PREPARATION_STREAM_TYPE, probeDaemonHealth } from "../../daemon/index.js";
 import { HitchError, SCHEMA_VERSION, invalidInput, positiveInteger } from "../../foundation/index.js";
 import { assertNoArgs, parseEvalRequest, takeFlag, takeOption, takeRepeatedOption } from "../arguments.js";
 import { waitForDaemonEval, waitForDaemonEvalRerun } from "../output.js";
@@ -176,7 +176,7 @@ async function evalRunCommand(args: string[], root: string): Promise<void> {
     const accepted = await client.request("/v1/evals", {
       method: "POST",
       body: JSON.stringify(submission),
-      ...(idempotencyKey ? { headers: { "idempotency-key": idempotencyKey } } : {}),
+      headers: { accept: PREPARATION_STREAM_TYPE, ...(idempotencyKey ? { "idempotency-key": idempotencyKey } : {}) },
     });
     const result = await waitForDaemonEval(client, accepted.eval_id as string, output);
     process.exitCode = result.exit_code as number;
@@ -226,7 +226,7 @@ async function evalSubmitCommand(args: string[], root: string): Promise<void> {
   const accepted = await client.request(controlFile ? "/v1/eval-controls" : "/v1/evals", {
     method: "POST",
     body: JSON.stringify(controlFile ? { ...await readControl(controlFile), submission: Object.hasOwn(submission, "request") ? submission : { schema_version: "1", request: submission } } : submission),
-    ...(idempotencyKey ? { headers: { "idempotency-key": idempotencyKey } } : {}),
+    headers: { accept: PREPARATION_STREAM_TYPE, ...(idempotencyKey ? { "idempotency-key": idempotencyKey } : {}) },
   });
   process.stdout.write(`${JSON.stringify(accepted, null, 2)}\n`);
 }

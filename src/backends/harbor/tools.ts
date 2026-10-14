@@ -222,13 +222,18 @@ export interface LocateHarborOptions {
   env?: NodeJS.ProcessEnv;
 }
 
-export async function locateHarbor({ root, explicit, env = process.env }: LocateHarborOptions = {}): Promise<HarborLocation> {
+export async function locateHarbor(options: LocateHarborOptions = {}): Promise<HarborLocation> {
+  const launcher = await locateHarborLauncher(options);
+  return { ...launcher, version: launcher.executable ? await installedHarborVersion(launcher.executable) : "" };
+}
+
+/** Resolve the launcher without executing code that has yet to be inventoried. */
+export async function locateHarborLauncher({ root, explicit, env = process.env }: LocateHarborOptions = {}): Promise<Omit<HarborLocation, "version">> {
   const configured = explicit || env.HITCH_HARBOR_PATH;
   if (configured) {
     const executable = await resolveExecutable(configured, env.PATH || "", env.PATHEXT);
     return {
       executable,
-      version: executable ? await installedHarborVersion(executable) : "",
       source: explicit ? "option" : "environment",
       requested: configured,
     };
@@ -237,7 +242,6 @@ export async function locateHarbor({ root, explicit, env = process.env }: Locate
   if (managed) {
     return {
       executable: managed,
-      version: await installedHarborVersion(managed),
       source: "managed",
       requested: managed,
     };
@@ -245,7 +249,6 @@ export async function locateHarbor({ root, explicit, env = process.env }: Locate
   const executable = await resolveExecutable("harbor", env.PATH || "", env.PATHEXT);
   return {
     executable,
-    version: executable ? await installedHarborVersion(executable) : "",
     source: "path",
     requested: "harbor",
   };

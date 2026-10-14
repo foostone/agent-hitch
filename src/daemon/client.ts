@@ -1,5 +1,6 @@
 import { readFile } from "node:fs/promises";
 import { HitchError, readJSON, statePaths } from "../foundation/index.js";
+import { PREPARATION_STREAM_TYPE, readStreamingJSONResponse } from "./json-stream.js";
 
 export interface DaemonClient {
   state: { port?: number; instance_id?: string };
@@ -37,7 +38,14 @@ export async function daemonClient(root: string): Promise<DaemonClient> {
     const contentType = response.headers.get("content-type") || "";
     const mediaType = (contentType.split(";", 1)[0] || "").trim().toLowerCase();
     const isJSONDocument = mediaType === "application/json" || mediaType.endsWith("+json");
-    const payload: Record<string, unknown> | string = isJSONDocument ? await response.json() as Record<string, unknown> : await response.text();
+    let payload: Record<string, unknown> | string;
+    if (mediaType === PREPARATION_STREAM_TYPE) {
+      payload = await readStreamingJSONResponse(response);
+    } else if (isJSONDocument) {
+      payload = await response.json() as Record<string, unknown>;
+    } else {
+      payload = await response.text();
+    }
     if (!response.ok) {
       const errorPayload = typeof payload === "object" && payload !== null ? payload : {};
       const message = (errorPayload.error as { message?: string } | undefined)?.message || `daemon request failed (${response.status})`;

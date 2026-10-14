@@ -1,7 +1,8 @@
 import path from "node:path";
 import { readFile } from "node:fs/promises";
-import { HitchError, packageRoot, runCommand } from "../../foundation/index.js";
-import { locateHarbor } from "./tools.js";
+import { HitchError, invalidInput, packageRoot, runCommand } from "../../foundation/index.js";
+import { DEFAULT_EVALUATION_BINDING_TIMEOUT_MS, MAX_EVALUATION_BINDING_TIMEOUT_MS } from "../../domain/index.js";
+import { locateHarborLauncher } from "./tools.js";
 
 export interface HarborPythonRuntimeV1 {
   schema_version: "1";
@@ -10,22 +11,39 @@ export interface HarborPythonRuntimeV1 {
   file_count: number;
 }
 
+const TIMEOUT_ENV = "HITCH_HARBOR_PYTHON_RUNTIME_TIMEOUT_MS";
+
+function inventoryTimeout(env: NodeJS.ProcessEnv): number {
+  const value = env[TIMEOUT_ENV];
+  if (value === undefined) return DEFAULT_EVALUATION_BINDING_TIMEOUT_MS;
+  if (!/^[1-9]\d*$/.test(value) || Number(value) > MAX_EVALUATION_BINDING_TIMEOUT_MS) {
+    throw invalidInput(`${TIMEOUT_ENV} must be a positive integer no greater than ${MAX_EVALUATION_BINDING_TIMEOUT_MS}`);
+  }
+  return Number(value);
+}
+
 /** Inspect the actual launcher interpreter, preserving its virtualenv symlink. */
 export async function observeHarborPythonRuntime(input: {
   root: string; env: NodeJS.ProcessEnv; harborExecutable?: string; signal?: AbortSignal;
 }): Promise<HarborPythonRuntimeV1> {
+  const timeoutMs = inventoryTimeout(input.env);
+  const deadline = new AbortController();
+  const signal = input.signal ? AbortSignal.any([input.signal, deadline.signal]) : deadline.signal;
+  const timer = setTimeout(() => deadline.abort(), timeoutMs);
+  timer.unref();
   try {
+    signal.throwIfAborted();
     if (input.env.PYTHONPATH
       && input.env.PYTHONPATH.split(path.delimiter).some(value => !path.isAbsolute(value))) throw unavailable();
-    const harbor = await locateHarbor({ root: input.root, env: input.env, explicit: input.harborExecutable });
+    const harbor = await locateHarborLauncher({ root: input.root, env: input.env, explicit: input.harborExecutable });
+    signal.throwIfAborted();
     if (!harbor.executable) throw unavailable();
-    const firstLine = (await readFile(harbor.executable, "utf8")).split(/\r?\n/, 1)[0] ?? "";
+    const firstLine = (await readFile(harbor.executable, { encoding: "utf8", signal })).split(/\r?\n/, 1)[0] ?? "";
     const python = firstLine.match(/^#!(\/[^\s]+)$/)?.[1];
     if (!python || !/^python(?:[0-9.]+)?$/.test(path.basename(python))) throw unavailable();
     const probe = path.join(packageRoot(), "integrations", "harbor", "hitch_python_runtime.py");
     const result = await runCommand(python, ["-B", probe, harbor.executable], {
-      env: { ...input.env, PYTHONDONTWRITEBYTECODE: "1" }, timeoutMs: 45_000,
-      ...(input.signal ? { signal: input.signal } : {}),
+      env: { ...input.env, PYTHONDONTWRITEBYTECODE: "1" }, timeoutMs, signal,
     });
     const value: unknown = JSON.parse(result.stdout);
     if (!value || typeof value !== "object" || Array.isArray(value)) throw unavailable();
@@ -35,7 +53,19 @@ export async function observeHarborPythonRuntime(input: {
       || typeof object.python_version !== "string" || !/^3\.\d+\.\d+$/.test(object.python_version)
       || !Number.isSafeInteger(object.file_count) || (object.file_count as number) < 1) throw unavailable();
     return value as HarborPythonRuntimeV1;
-  } catch { throw unavailable(); }
+  } catch {
+    if (input.signal?.aborted) {
+      throw new HitchError("Harbor Python runtime verification cancelled", { code: "cancelled", exitCode: 9 });
+    }
+    if (deadline.signal.aborted) {
+      throw new HitchError(`Harbor Python runtime verification timed out; adjust ${TIMEOUT_ENV} on the daemon`, {
+        code: "harbor_python_runtime_timeout", exitCode: 12,
+      });
+    }
+    throw unavailable();
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 function unavailable() {
