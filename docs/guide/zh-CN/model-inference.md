@@ -24,6 +24,16 @@ Hitch → 宿主机或任务容器中的 Harness → 模型 API
 
 `local/<name>` 是 Hitch 对已导入托管模型的选择方式。加上 `--model-node-file` 后，模型在绑定的节点上运行；`local/` 前缀并不要求 GPU 位于提交命令的电脑上。
 
+## 独立推理池
+
+可独立安装的[推理包](../../../packages/inference/README.md)不依赖评测或训练状态即可提供普通推理。V3 plan 冻结互不重叠的 TP GPU 组与副本容量；v1/v2 锁保持历史身份。普通 planner 默认 Chat Completions，Hitch planner 默认 Responses；比较 plan 时需显式选择相同 API。
+
+Hitch 和推理池按用户 token 单位校验 canonical 请求，只有直连 SGLang 的最后一跳将 `top_k=0` 转成 `-1`，并补偿固定版本 Responses 内部保留的两个 token。用户预算 1、32 分别只转换一次为引擎限制 3、34。V1/v2 网关直接连接引擎，因此继续承担末端转换。请求必须携带完整历史；background、previous response ID、存储响应、自动截断和超出冻结上限的预算会被拒绝。
+
+同一部署只准备、封存一次共享 HF 模型，副本分别准入自身运行时和设备。进程锁保护的 receipt 绑定完整请求、模型、运行时、部署 owner 和节点 generation；重放检查完整路径集合以及含 ctime 的文件状态与替换身份，无需反复哈希全部权重，变化则拒绝。新部署 ID 或 generation 必须完整复验。重模型 I/O 不持节点 admission 锁或 HTTP 管理锁，其他服务仍可停止；stop 会阻止延迟的准备和启动继续执行。独立 snapshot API 只接受 HF 模型，Harbor 数据集与 trainer 状态保留在各自所属包。
+
+与 Gear 共享 GPU 时必须使用完全相同的 `nodeRoot`、`storeRoot`。共享账本未来由 `hitch_inference.device_lease` 维护；Gear 的 `gear-legacy-v2` 副本冻结为兼容代码，保留相同 schema、锁与 boot 围栏。账本变更需要显式跨包迁移。在目标主机使用独立包的 operator smoke 验证实际部署的运行时。
+
 ## 调用远程模型 API
 
 先完成 [Quick Start](quickstart.md)，包括认证和干净仓库准备。Codex 可以使用已保存的 CLI 登录，也可以通过日常密钥管理方式提供 `CODEX_API_KEY`，用于非交互执行。详见 [Codex 自动化认证](https://learn.chatgpt.com/docs/non-interactive-mode#authenticate-in-automation)。

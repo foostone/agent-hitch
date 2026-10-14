@@ -3,6 +3,10 @@
 Loss of a client connection never expires a device reservation. An owner must
 fence future launches, prove its processes dead, and query the physical devices
 before releasing. Time is charged once per unique physical device.
+
+This module owns future ledger changes. Gear's gear-legacy-v2 implementation is
+frozen compatibility code; retain the shared v2 schema, paths, atomic locks and
+boot fencing until an explicit cross-package migration is introduced.
 """
 
 import time

@@ -40,7 +40,7 @@ def snapshot_files(value):
     if (
         not isinstance(value, dict)
         or value.get("schemaVersion") != 1
-        or value.get("format") not in ("hf-safetensors", "trainer-files")
+        or value.get("format") != "hf-safetensors"
     ):
         return None
     files = value.get("files")

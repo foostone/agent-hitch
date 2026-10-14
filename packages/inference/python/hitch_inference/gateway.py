@@ -8,7 +8,7 @@ import time
 from http.server import BaseHTTPRequestHandler
 from urllib.parse import urlsplit
 from .http_transport import InferenceHTTPServer
-from .request_validation import validate_request
+from .request_validation import engine_request, validate_request
 
 
 class AdmissionError(Exception):
@@ -25,9 +25,10 @@ def disconnected(sock):
 
 
 class Router:
-    def __init__(self, targets, *, running, queued, queue_timeout, request_timeout, engine_capacity, frozen=None):
+    def __init__(self, targets, *, running, queued, queue_timeout, request_timeout, engine_capacity, frozen=None, engine_boundary=True):
         self.targets = targets
         self.frozen = frozen
+        self.engine_boundary = engine_boundary
         self.running, self.queued = running, queued
         self.queue_timeout, self.request_timeout = queue_timeout, request_timeout
         self.engine_capacity = engine_capacity
@@ -84,7 +85,12 @@ class Router:
             if route != expected_route:
                 raise AdmissionError(400, "inference_protocol_conflict")
             try:
-                body = json.dumps(validate_request(json.loads(body), self.frozen), separators=(",", ":")).encode()
+                request = json.loads(body)
+                allowed = {self.frozen["model_id"], self.frozen["inference_id"], *(target["wireModel"] for target in self.targets)}
+                if not isinstance(request, dict) or request.get("model") not in allowed:
+                    raise AdmissionError(400, "inference_model_conflict")
+                canonical = validate_request(request, self.frozen)
+                body = json.dumps(engine_request(canonical, self.frozen) if self.engine_boundary else canonical, separators=(",", ":")).encode()
             except ValueError as error:
                 raise AdmissionError(400, getattr(error, "code", "invalid_request")) from error
         index = self.acquire(handler.connection) if admission else 0

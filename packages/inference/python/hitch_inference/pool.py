@@ -56,39 +56,67 @@ class InferenceService:
             result.append(child)
         return result
 
+    def preparation_guard(self, payload):
+        directory = self.directory(payload)
+        with lock(Path(self.config["nodeRoot"]) / "inference-admission.lock"):
+            if (directory / "identity.json").exists():
+                identity = self.owner(directory, payload)
+                require(identity["inputDigest"] == digest_json(payload) and not (directory / "stop.json").exists()
+                        and not (directory / "drain.json").exists(), "inference-start-fenced", "pool preparation was stopped or changed")
+            legacy = load(self.legacy.directory(payload) / "identity.json")
+            require(not legacy or legacy.get("inputDigest") is not None, "inference-start-fenced", "pool was stopped before admission")
+
     def prepare(self, payload):
         if not self.is_pool(payload):
             return self.legacy.prepare(payload)
-        for child in self.children(payload):
-            self.legacy.prepare(child)
-        return {"inferenceId": payload["lock"]["inference_id"], "replicas": len(self.children(payload))}
+        children = self.children(payload)
+        for child in children:
+            self.legacy.admit(child)
+        self.legacy.preparation.prepare(payload, lambda: self.preparation_guard(payload))
+        return {"inferenceId": payload["lock"]["inference_id"], "replicas": len(children)}
 
     def start(self, payload):
         if not self.is_pool(payload):
             return self.legacy.start(payload)
         directory = self.directory(payload)
+        digest = digest_json(payload)
+        self.children(payload)  # Validate immutable parent identity before admission writes.
         with lock(Path(self.config["nodeRoot"]) / "inference-admission.lock"), lock(self.root / "admission.lock"), lock(directory / "launch.lock"):
             existing = load(directory / "identity.json")
             status = load(directory / "status.json", {})
-            admit = True
             if existing:
                 self.owner(directory, payload)
-                require(existing["inputDigest"] is None or existing["inputDigest"] == digest_json(payload),
+                require(existing["inputDigest"] is None or existing["inputDigest"] == digest,
                         "inference-start-conflict", "pool ID already freezes another request")
-                admit = existing["inputDigest"] is not None and not status.get("handle") and not (directory / "stop.json").exists()
+                if not status:
+                    status = {"schemaVersion": 2, "state": "admitting", "resourcesReleased": False}
+                    atomic_json(directory / "status.json", status)
+                if existing["inputDigest"] is None or status.get("handle") or (directory / "stop.json").exists() or (directory / "drain.json").exists():
+                    admit = False
+                else:
+                    admit = status.get("state") in (None, "admitting", "starting")
             else:
-                self.prepare(payload)
-                directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+                admit = True
                 atomic_json(directory / "identity.json", {"node": self.node, "ownerId": payload["ownerId"],
-                            "inferenceId": payload["lock"]["inference_id"], "inputDigest": digest_json(payload)})
+                            "inferenceId": payload["lock"]["inference_id"], "inputDigest": digest})
+                atomic_json(directory / "status.json", {"schemaVersion": 2, "state": "admitting", "resourcesReleased": False})
             if admit:
-                port = service_port({**self.config, "dynamicInferencePorts": not self.config.get("inferencePort")}, directory)
                 atomic_json(directory / "request.json", payload)
                 atomic_json(directory / "config.json", self.config)
+        if not admit:
+            return self.inspect(payload)
+        self.prepare(payload)
+        with lock(Path(self.config["nodeRoot"]) / "inference-admission.lock"), lock(self.root / "admission.lock"), lock(directory / "launch.lock"):
+            identity = self.owner(directory, payload)
+            require(identity["inputDigest"] == digest, "inference-start-conflict", "pool identity changed during preparation")
+            status = load(directory / "status.json", {})
+            admit = not status.get("handle") and status.get("state") in ("admitting", "starting") and not (directory / "stop.json").exists() and not (directory / "drain.json").exists()
+            if admit:
+                port = service_port({**self.config, "dynamicInferencePorts": not self.config.get("inferencePort")}, directory)
                 if not (directory / "access.json").exists():
                     atomic_json(directory / "access.json", {"port": port, "wireModel": "hitch-" + payload["model"]["model_id"][7:23],
                                 "engineToken": secrets.token_hex(32), "adminToken": secrets.token_hex(32)})
-                    atomic_json(directory / "allocation.json", {"port": port, "inputDigest": digest_json(payload)})
+                    atomic_json(directory / "allocation.json", {"port": port, "inputDigest": digest})
                 atomic_json(directory / "status.json", {"schemaVersion": 2, "state": "starting", "resourcesReleased": False})
                 with (directory / "supervisor.log").open("ab") as output:
                     subprocess.Popen([sys.executable, "-m", "hitch_inference.worker", "_pool", "--directory", str(directory)],
@@ -246,7 +274,7 @@ def pool_worker(directory):
             for child in children:
                 if (directory / "stop.json").exists() or (directory / "drain.json").exists():
                     return
-                runtime.start(child)
+                runtime.start(child, prepared=request)
             deadline = time.monotonic() + request["lock"]["execution"]["startup_timeout_ms"] / 1000
             while True:
                 if (directory / "stop.json").exists() or (directory / "drain.json").exists():

@@ -1,6 +1,7 @@
 """Register a local HF directory and freeze an explicit ordinary inference plan."""
 import argparse
 import json
+import math
 import uuid
 from .artifacts import hf_manifest
 from .content import digest_json, require
@@ -26,6 +27,16 @@ def plan(config, directory, replicas, profile="baseline", running=None, queued=N
             "python_version": runtime["pythonVersion"], "packages_digest": runtime["packagesDigest"]},
         "compatibility_profile": "standalone-sglang-0.5.15.post1"}
     manifest = {**runtime_body, "runtime_id": digest_json(runtime_body)}
+    binding = {"schema_version": "2", "node_id": node.identity["nodeId"], "generation": node.identity["generation"],
+        "runtime_digest": digest_json(runtime), "launcher": "process"}
+    return {"serviceId": "inference_" + uuid.uuid4().hex, "model": model, "runtime": manifest,
+            "lock": build_lock(model, manifest, binding, replicas, profile, running, queued, api)}
+
+
+def build_lock(model, manifest, binding, replicas, profile="baseline", running=None, queued=None, api="chat-completions"):
+    """Pure default projection, checked against Hitch's full-lock parity fixtures."""
+    require(api in ("responses", "chat-completions"), "invalid-protocol", "unsupported OpenAI protocol")
+    require(model["quantization"] is None and model["dtype"] != "unknown", "unsupported-model", "dense declared dtype is required")
     require(profile in ("baseline", "throughput"), "invalid-profile", "profile must be baseline or throughput")
     throughput = profile == "throughput"
     capacity = 8 if throughput else 1
@@ -34,8 +45,6 @@ def plan(config, directory, replicas, profile="baseline", running=None, queued=N
     topology = {"replicas": [{"devices": devices} for devices in replicas], "routing": "least-active",
         "max_running_requests": running if running is not None else capacity * len(replicas),
         "max_queued_requests": queued if queued is not None else capacity * len(replicas)}
-    binding = {"schema_version": "2", "node_id": node.identity["nodeId"], "generation": node.identity["generation"],
-        "runtime_digest": digest_json(runtime), "launcher": "process"}
     weights = sum(f["size"] for f in model["files"] if f["path"].endswith(".safetensors"))
     frozen = {"schema_version": "3", "engine": "sglang", "model_node": binding,
         "model_id": model["model_id"], "runtime_id": manifest["runtime_id"], "profile": profile, "topology": topology,
@@ -56,11 +65,10 @@ def plan(config, directory, replicas, profile="baseline", running=None, queued=N
             "input_modalities": ["text"], "tool_call_parser": parser, "reasoning_parser": None,
             "compatibility_profile_id": digest_json({"engine": "sglang", "runtime_id": manifest["runtime_id"],
                 "model_type": model["model_type"], "template_digest": model["template_digest"], "api": api, "tool_call_parser": parser})},
-        "resources": {"cpu_millis": 2000 * len(replicas), "memory_bytes": len(replicas) * max(2 * 1024**3, int(weights * 1.25 + 1024**3 + 0.999999)),
+        "resources": {"cpu_millis": 2000 * len(replicas), "memory_bytes": len(replicas) * max(2 * 1024**3, math.ceil(weights * 1.25 + 1024**3)),
             "container_slots": 0, "build_slots": 0, "gpu_count": sum(map(len, replicas)), "ephemeral_disk_bytes": 4 * 1024**3}}
     validate_topology(frozen)
-    return {"serviceId": "inference_" + uuid.uuid4().hex, "model": model, "runtime": manifest,
-            "lock": {**frozen, "inference_id": digest_json(frozen)}}
+    return {**frozen, "inference_id": digest_json(frozen)}
 
 
 def main():

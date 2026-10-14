@@ -25,7 +25,7 @@ export function validateRequestBody(buffer: Buffer, lock: InferenceLockV1, wireM
   if (containsUnsupportedMedia(body)) throw new HitchError("local inference P0 accepts text input only", { code: "inference_modality_unsupported", exitCode: 2 });
   if (chat) {
     if (!Array.isArray(body.messages) || !body.messages.length || body.messages.some(message => !message || typeof message !== "object"
-      || Array.isArray(message) || !["system", "developer", "user", "assistant", "tool"].includes(String(message.role)))) throw requestError("chat requires complete message history");
+      || Array.isArray(message) || (typeof message.role !== "string" || !["system", "developer", "user", "assistant", "tool"].includes(message.role)))) throw requestError("chat requires complete message history");
     if (body.n !== undefined && body.n !== 1) throw requestError("chat requires one completion per request");
     if (body.seed !== undefined && body.seed !== lock.generation.seed) throw requestError("seed conflicts with the inference lock");
     if (body.stream !== undefined && typeof body.stream !== "boolean") throw requestError("stream must be a boolean");
@@ -34,12 +34,13 @@ export function validateRequestBody(buffer: Buffer, lock: InferenceLockV1, wireM
       || typeof (body.stream_options as Record<string, unknown>).include_usage !== "boolean")) throw requestError("invalid chat stream_options");
     body.n = 1; body.seed = lock.generation.seed;
   }
+  if (body.stream !== undefined && (typeof body.stream !== "boolean" || body.stream && !lock.protocol.streaming)) throw requestError("streaming is unavailable or invalid");
   if (body.tools !== undefined && !Array.isArray(body.tools)) throw requestError("tools must be an array");
   const tools = (body.tools ?? []) as unknown[];
   if (!lock.protocol.tool_calls && tools.length > 0) throw requestError("tools are unavailable for this local inference profile");
   for (const tool of tools) {
     if (!tool || typeof tool !== "object" || Array.isArray(tool)
-      || !(chat ? (tool as Record<string, unknown>).type === "function" : LOCAL_TOOL_TYPES.has(String((tool as Record<string, unknown>).type)))) {
+      || !(chat ? (tool as Record<string, unknown>).type === "function" : typeof (tool as Record<string, unknown>).type === "string" && LOCAL_TOOL_TYPES.has((tool as Record<string, unknown>).type as string))) {
       throw requestError("local inference accepts only Harness-executed function tools");
     }
   }
@@ -50,7 +51,7 @@ export function validateRequestBody(buffer: Buffer, lock: InferenceLockV1, wireM
   if (body.store !== undefined && body.store !== false) throw requestError("local inference requires store=false");
   if (body.truncation !== undefined && body.truncation !== "disabled") throw requestError("local inference does not allow automatic truncation");
   if (body.previous_response_id !== undefined && body.previous_response_id !== null) throw requestError("local inference requires complete request history");
-  if (body.background === true) throw requestError("background responses are unavailable for local inference");
+  if (body.background !== undefined && body.background !== false) throw requestError("background responses are unavailable for local inference");
   if (body.reasoning !== undefined && body.reasoning !== null) {
     if (!body.reasoning || typeof body.reasoning !== "object" || Array.isArray(body.reasoning)) throw requestError("reasoning must be an object");
     const reasoning = body.reasoning as Record<string, unknown>;
@@ -67,17 +68,15 @@ export function validateRequestBody(buffer: Buffer, lock: InferenceLockV1, wireM
   };
   for (const [name, configured] of Object.entries(expected)) {
     if (body[name] !== undefined && body[name] !== configured) throw requestError(`${name} conflicts with the inference lock`);
-    body[name] = name === "top_k" && configured === 0 ? -1 : configured;
+    body[name] = configured;
   }
   if (chat && body.max_tokens !== undefined && body.max_completion_tokens !== undefined) throw requestError("chat token limit must be specified once");
   const maxOutput = (chat ? body.max_tokens ?? body.max_completion_tokens : body.max_output_tokens) ?? lock.generation.max_output_tokens;
   if (!Number.isSafeInteger(maxOutput) || (maxOutput as number) < 1 || (maxOutput as number) > lock.generation.max_output_tokens) {
     throw requestError("max_output_tokens exceeds the inference lock");
   }
-  // The pinned SGLang Responses implementation subtracts two reserved tokens.
-  // Keep the lock/client budget in generated tokens, including budgets of one.
   if (chat) { body.max_tokens = maxOutput; delete body.max_completion_tokens; }
-  else { body.max_output_tokens = (maxOutput as number) + 2; body.truncation = "disabled"; }
+  else { body.max_output_tokens = maxOutput; body.truncation = "disabled"; }
   body.store = false;
   if (body.prompt_cache_key !== undefined) {
     if (typeof body.prompt_cache_key !== "string" || body.prompt_cache_key.length > 256) throw requestError("prompt_cache_key is invalid");
@@ -90,6 +89,12 @@ export function validateRequestBody(buffer: Buffer, lock: InferenceLockV1, wireM
     delete body.client_metadata;
   }
   return body;
+}
+
+/** Only a trusted direct-engine caller applies SGLang wire conventions. */
+export function sglangRequestBody(body: Record<string, unknown>, lock: InferenceLockV1): Record<string, unknown> {
+  return { ...body, top_k: body.top_k === 0 ? -1 : body.top_k,
+    ...(lock.protocol.api === "responses" ? { max_output_tokens: (body.max_output_tokens as number) + 2 } : {}) };
 }
 
 function containsUnsupportedMedia(value: unknown): boolean {

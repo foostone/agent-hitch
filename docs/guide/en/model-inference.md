@@ -24,6 +24,16 @@ The location of the model is independent of where the agent's tools execute. A l
 
 `local/<name>` is Hitch's selector for an imported, managed model. With `--model-node-file`, that model runs on the bound node. The `local/` prefix does not mean the GPU must be in the submitting computer.
 
+## Independent inference pools
+
+The separately installable [inference package](../../../packages/inference/README.md) serves ordinary requests without evaluation or training state. V3 plans freeze disjoint TP GPU groups and replica capacity; v1/v2 locks keep their historical identities. The ordinary planner defaults to Chat Completions, while Hitch planning defaults to Responses; select the same explicit API when comparing plans.
+
+Hitch and the pool validate canonical requests in user token units. Only the final direct SGLang hop applies `top_k=0` → `-1` and the pinned Responses implementation's two reserved tokens. Budgets 1 and 32 become engine limits 3 and 34 once. V1/v2 gateways connect directly to the engine and retain their terminal conversion. Requests must include complete history; background responses, previous response IDs, stored response state, automatic truncation and budgets above the frozen maximum are rejected.
+
+A deployment prepares and seals shared HF model data once, before its replicas admit their own runtime and devices. A process-locked receipt binds the complete request, model, runtime, deployment owner and node generation. Replays verify the entire path set and replacement-sensitive stat witnesses, including ctime, without hashing every weight again; changed data fails closed. New deployment IDs and generations require full verification. Heavy model I/O holds neither the node admission lock nor the HTTP management lock, so unrelated stop operations remain available. Stop fences delayed preparation and startup. The standalone snapshot API accepts HF model data only; Harbor datasets and trainer state remain in their owning packages.
+
+When sharing GPUs with Gear, both runtimes must use the exact same `nodeRoot` and `storeRoot`. `hitch_inference.device_lease` owns future ledger changes; Gear's `gear-legacy-v2` copy is frozen compatibility code with the same schema, locks and boot fencing. A ledger change needs an explicit cross-package migration. Use the package's operator smoke commands to verify the deployed runtime on the target host.
+
 ## Call a remote model API
 
 Complete [Quick Start](quickstart.md), including authentication and a clean repository. With Codex, use saved CLI login or supply `CODEX_API_KEY` through your normal secret manager for non-interactive execution. See [Codex automation authentication](https://learn.chatgpt.com/docs/non-interactive-mode#authenticate-in-automation).

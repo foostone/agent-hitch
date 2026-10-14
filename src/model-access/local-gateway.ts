@@ -7,7 +7,7 @@ import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import type { InferenceLockV1, ModelEndpointBindingV1 } from "../domain/index.js";
 import { HitchError, sha256JSON } from "../foundation/index.js";
-import { validateRequestBody } from "./local-gateway-request.js";
+import { sglangRequestBody, validateRequestBody } from "./local-gateway-request.js";
 
 const RUN_ID = /^run_[a-f0-9]{32}$/;
 const MAX_BODY_BYTES = 32 * 1024 * 1024;
@@ -179,7 +179,9 @@ export class LocalModelGateway {
     try {
       release = await this.acquirePermit(controller.signal);
       if (registration.revoked || registration.authorize && !await registration.authorize()) throw new HitchError("local inference binding was revoked", { code: "inference_binding_revoked", exitCode: 12 });
-      const body = validateRequestBody(await readBody(request), this.lock, this.wireModel);
+      const canonical = validateRequestBody(await readBody(request), this.lock, this.wireModel);
+      // v3 upstream is a validating pool; v1/v2 endpoints are direct engines.
+      const body = this.lock.schema_version === "3" ? canonical : sglangRequestBody(canonical, this.lock);
       const upstream = new URL(route.endpoint === "responses" ? "/v1/responses" : "/v1/chat/completions", this.upstream);
       const upstreamResponse = await this.request(upstream, {
         method: "POST",

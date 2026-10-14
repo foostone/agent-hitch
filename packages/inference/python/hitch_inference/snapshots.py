@@ -1,4 +1,4 @@
-"""Seal HF exports and complete trainer states without a circular manifest."""
+"""Seal and materialize HF serving snapshots only."""
 
 from __future__ import annotations
 
@@ -101,19 +101,15 @@ def safetensors_layout(path):
     return tensors
 
 
-def seal_directory(store, directory, serving=False, verify_finite=False, dataset=False):
+def seal_directory(store, directory, serving=True, verify_finite=False):
     root = Path(directory).resolve()
     require(root.is_dir(), "missing-export", "export directory does not exist")
-    require(
-        not (dataset and serving),
-        "invalid-snapshot-kind",
-        "dataset and model snapshots are distinct",
-    )
-    files, directories, tensors, weights = [], [], {}, []
+    require(serving is True, "invalid-snapshot-kind", "standalone inference accepts only HF serving snapshots")
+    files, tensors, weights = [], {}, []
     for path in sorted(root.rglob("*")):
         # local_dir downloads create volatile lock/metadata files here. They
         # are not serving inputs, and must not change tokenizer/model identity.
-        if serving and path.relative_to(root).parts[:2] == (".cache", "huggingface"):
+        if path.relative_to(root).parts[:2] == (".cache", "huggingface"):
             continue
         require(
             not path.is_symlink(),
@@ -121,24 +117,16 @@ def seal_directory(store, directory, serving=False, verify_finite=False, dataset
             "sealed exports cannot contain symlinks",
         )
         if path.is_dir():
-            if dataset:
-                directories.append(
-                    {
-                        "path": path.relative_to(root).as_posix(),
-                        "mode": path.stat().st_mode & 0o7777,
-                    }
-                )
             continue
         require(path.is_file(), "export-special-file", "only regular files can be sealed")
         name = path.relative_to(root).as_posix()
-        if serving:
-            require(
-                not re.search(r"\.(bin|pt|pth|pkl|pickle|py|so|dylib|dll)$", name, re.I),
-                "unsafe-serving-export",
-                "trainer state and executable code do not belong in HF serving snapshots",
-            )
+        require(
+            not re.search(r"\.(bin|pt|pth|pkl|pickle|py|so|dylib|dll)$", name, re.I),
+            "unsafe-serving-export",
+            "trainer state and executable code do not belong in HF serving snapshots",
+        )
         before = path.stat()
-        if serving and name.endswith(".safetensors"):
+        if name.endswith(".safetensors"):
             layout = safetensors_layout(path)
             require(
                 not set(tensors).intersection(layout),
@@ -172,290 +160,131 @@ def seal_directory(store, directory, serving=False, verify_finite=False, dataset
             "sha256": ref["digest"],
             "contentRef": ref,
         }
-        if dataset:
-            entry["mode"] = before.st_mode & 0o7777
         files.append(entry)
         if name.endswith(".safetensors"):
             weights.append({"path": name, "sha256": ref["digest"]})
     require(files, "empty-export", "cannot seal an empty export")
     manifest = {
         "schemaVersion": 1,
-        "format": "hf-safetensors" if serving else "trainer-files",
+        "format": "hf-safetensors",
         "files": files,
     }
-    if dataset:
-        manifest.update(
-            schemaVersion=2,
-            format="harbor-dataset",
-            name=root.name,
-            mode=root.stat().st_mode & 0o7777,
-            directories=directories,
-        )
-    if serving:
-        names = {f["path"] for f in files}
+    names = {f["path"] for f in files}
+    require(
+        "config.json" in names
+        and "tokenizer_config.json" in names
+        and ("tokenizer.json" in names or "tokenizer.model" in names)
+        and weights,
+        "incomplete-hf-export",
+        "HF snapshot requires weights, config, tokenizer and template",
+    )
+    config = json.loads((root / "config.json").read_text())
+    token_config = json.loads((root / "tokenizer_config.json").read_text())
+    require(
+        not config.get("auto_map")
+        and not token_config.get("auto_map")
+        and not config.get("quantization_config"),
+        "model-code-or-quantization",
+        "v1 requires a dense safetensors model without dynamic code or quantization",
+    )
+    template = (
+        (root / "chat_template.jinja").read_text()
+        if (root / "chat_template.jinja").exists()
+        else token_config.get("chat_template")
+    )
+    require(
+        isinstance(template, str) and template,
+        "missing-chat-template",
+        "one explicit chat template is required",
+    )
+    architecture = (config.get("architectures") or [None])[0]
+    dtype, _ = language_metadata(config)
+    require(
+        isinstance(architecture, str) and isinstance(dtype, str),
+        "invalid-model-config",
+        "model config must declare architecture and dtype",
+    )
+    index_path = root / "model.safetensors.index.json"
+    if index_path.exists():
+        mapping = json.loads(index_path.read_text()).get("weight_map")
         require(
-            "config.json" in names
-            and "tokenizer_config.json" in names
-            and ("tokenizer.json" in names or "tokenizer.model" in names)
-            and weights,
-            "incomplete-hf-export",
-            "HF snapshot requires weights, config, tokenizer and template",
+            isinstance(mapping, dict)
+            and set(mapping) == set(tensors)
+            and all(tensors[k]["file"] == file for k, file in mapping.items()),
+            "invalid-shard-index",
+            "HF shard index must cover every tensor exactly",
         )
-        config = json.loads((root / "config.json").read_text())
-        token_config = json.loads((root / "tokenizer_config.json").read_text())
+    elif len(weights) != 1:
         require(
-            not config.get("auto_map")
-            and not token_config.get("auto_map")
-            and not config.get("quantization_config"),
-            "model-code-or-quantization",
-            "v1 requires a dense safetensors model without dynamic code or quantization",
+            False,
+            "missing-shard-index",
+            "multiple safetensors shards require an index",
         )
-        template = (
-            (root / "chat_template.jinja").read_text()
-            if (root / "chat_template.jinja").exists()
-            else token_config.get("chat_template")
+    tokenizer_files = [
+        {"path": f["path"], "sha256": f["sha256"]}
+        for f in files
+        if re.search(
+            r"(?:^|/)(?:tokenizer|special_tokens_map|added_tokens|tokenizer_config)(?:\.|$)",
+            f["path"],
         )
-        require(
-            isinstance(template, str) and template,
-            "missing-chat-template",
-            "one explicit chat template is required",
-        )
-        architecture = (config.get("architectures") or [None])[0]
-        dtype, _ = language_metadata(config)
-        require(
-            isinstance(architecture, str) and isinstance(dtype, str),
-            "invalid-model-config",
-            "model config must declare architecture and dtype",
-        )
-        index_path = root / "model.safetensors.index.json"
-        if index_path.exists():
-            mapping = json.loads(index_path.read_text()).get("weight_map")
-            require(
-                isinstance(mapping, dict)
-                and set(mapping) == set(tensors)
-                and all(tensors[k]["file"] == file for k, file in mapping.items()),
-                "invalid-shard-index",
-                "HF shard index must cover every tensor exactly",
-            )
-        elif len(weights) != 1:
-            require(
-                False,
-                "missing-shard-index",
-                "multiple safetensors shards require an index",
-            )
-        tokenizer_files = [
-            {"path": f["path"], "sha256": f["sha256"]}
-            for f in files
-            if re.search(
-                r"(?:^|/)(?:tokenizer|special_tokens_map|added_tokens|tokenizer_config)(?:\.|$)",
-                f["path"],
-            )
-        ]
-        manifest.update(
-            {
-                "weightsDigest": digest_json(weights),
-                "tokenizerDigest": digest_json(tokenizer_files),
-                "chatTemplateDigest": digest_bytes(template.encode()),
-                "architecture": architecture,
-                "dtype": dtype,
-                "tensorLayoutDigest": digest_json(tensors),
-            }
-        )
+    ]
+    manifest.update(
+        {
+            "weightsDigest": digest_json(weights),
+            "tokenizerDigest": digest_json(tokenizer_files),
+            "chatTemplateDigest": digest_bytes(template.encode()),
+            "architecture": architecture,
+            "dtype": dtype,
+            "tensorLayoutDigest": digest_json(tensors),
+        }
+    )
     return store.put_json(manifest)
 
-
-def dataset_destination(manifest, destination):
-    if manifest.get("schemaVersion") != 2 or manifest.get("format") != "harbor-dataset":
-        return Path(destination)
-    name = manifest.get("name")
-    require(
-        isinstance(name, str)
-        and name not in ("", ".", "..")
-        and "/" not in name
-        and "\\" not in name
-        and "\0" not in name,
-        "invalid-dataset-name",
-        "dataset name must be one path component",
-    )
-    return Path(destination) / name
 
 
 def materialize(store, ref, destination):
     manifest = store.read_json(ref)
-    dataset = manifest.get("schemaVersion") == 2 and manifest.get("format") == "harbor-dataset"
-    require(
-        dataset
-        or manifest.get("schemaVersion") == 1
-        and manifest.get("format") in ("hf-safetensors", "trainer-files", "harbor-dataset"),
-        "invalid-file-manifest",
-        "unknown snapshot format",
-    )
-    destination = Path(destination)
+    require(manifest.get("schemaVersion") == 1 and manifest.get("format") == "hf-safetensors",
+            "invalid-file-manifest", "standalone inference accepts only HF serving snapshots")
+    files = manifest.get("files")
+    require(isinstance(files, list) and files, "invalid-file-manifest", "HF snapshot files are missing")
     seen = set()
-    directories = manifest.get("directories") if dataset else []
-    if dataset:
-        dataset_destination(manifest, destination)
-        require(
-            isinstance(directories, list),
-            "invalid-file-manifest",
-            "dataset directories are missing",
-        )
-
-    def valid_mode(mode):
-        return type(mode) is int and 0 <= mode <= 0o7777
-
-    if dataset:
-        require(
-            valid_mode(manifest.get("mode")),
-            "invalid-file-manifest",
-            "dataset root mode is invalid",
-        )
-    require(
-        isinstance(manifest.get("files"), list) and manifest["files"],
-        "invalid-file-manifest",
-        "snapshot files are missing",
-    )
-    for item in manifest["files"]:
+    for item in files:
         name = item["path"]
-        require(
-            isinstance(name, str)
-            and name not in seen
-            and "\\" not in name
-            and not Path(name).is_absolute()
-            and all(p not in ("", ".", "..") for p in name.split("/")),
-            "invalid-export-path",
-            "file manifest path escapes or duplicates the snapshot",
-        )
-        require(
-            item["sha256"] == item["contentRef"]["digest"]
-            and type(item["size"]) is int
-            and item["size"] >= 0,
-            "invalid-export-file",
-            "file identity or size mismatch",
-        )
-        if dataset:
-            require(
-                valid_mode(item.get("mode")),
-                "invalid-file-manifest",
-                "dataset file mode is invalid",
-            )
+        require(isinstance(name, str) and name not in seen and "\\" not in name and "\0" not in name
+                and not Path(name).is_absolute() and all(p not in ("", ".", "..") for p in name.split("/")),
+                "invalid-export-path", "file manifest path escapes or duplicates the snapshot")
+        require(item["sha256"] == item["contentRef"]["digest"] and type(item["size"]) is int and item["size"] >= 0,
+                "invalid-export-file", "file identity or size mismatch")
         seen.add(name)
-    directory_names = set()
-    for item in directories:
-        name = item["path"]
-        require(
-            isinstance(name, str)
-            and name not in seen
-            and name not in directory_names
-            and "\\" not in name
-            and not Path(name).is_absolute()
-            and all(p not in ("", ".", "..") for p in name.split("/"))
-            and valid_mode(item.get("mode")),
-            "invalid-export-path",
-            "dataset directory path or mode is invalid",
-        )
-        directory_names.add(name)
-    if dataset:
-        for name in seen | directory_names:
-            require(
-                all(
-                    str(parent) in directory_names
-                    for parent in Path(name).parents
-                    if str(parent) != "."
-                ),
-                "invalid-file-manifest",
-                "dataset parent directory is missing",
-            )
+    destination = Path(destination)
     if destination.exists():
-        require(
-            destination.is_dir() and not destination.is_symlink(),
-            "materialization-drift",
-            "snapshot root must be a directory",
-        )
-        actual, actual_directories = set(), set()
+        require(destination.is_dir() and not destination.is_symlink(), "materialization-drift", "snapshot root must be a directory")
+        actual = set()
         for path in destination.rglob("*"):
-            require(
-                not path.is_symlink(),
-                "materialization-drift",
-                "snapshot cannot contain symlinks",
-            )
-            if path.is_dir():
-                actual_directories.add(path.relative_to(destination).as_posix())
-            else:
+            require(not path.is_symlink() and (path.is_dir() or path.is_file()), "materialization-drift", "snapshot contains a symlink or special file")
+            if path.is_file():
                 actual.add(path.relative_to(destination).as_posix())
-        require(
-            actual == seen,
-            "materialization-drift",
-            "snapshot has missing or unexpected files",
-        )
-        if dataset:
-            require(
-                actual_directories == directory_names
-                and destination.stat().st_mode & 0o7777 == manifest["mode"],
-                "materialization-drift",
-                "dataset directories or root permissions changed",
-            )
-            for item in directories:
-                require(
-                    (destination / item["path"]).stat().st_mode & 0o7777 == item["mode"],
-                    "materialization-drift",
-                    "dataset directory permissions changed",
-                )
-        for item in manifest["files"]:
+        require(actual == seen, "materialization-drift", "snapshot has missing or unexpected files")
+        for item in files:
             path = destination / item["path"]
-            require(
-                path.is_file()
-                and path.stat().st_size == item["size"]
-                and digest_file(path) == item["sha256"],
-                "materialization-drift",
-                "existing snapshot differs from sealed content",
-            )
-            if dataset:
-                require(
-                    path.stat().st_mode & 0o7777 == item["mode"],
-                    "materialization-drift",
-                    "dataset file permissions changed",
-                )
+            require(path.is_file() and path.stat().st_size == item["size"] and digest_file(path) == item["sha256"],
+                    "materialization-drift", "existing snapshot differs from sealed content")
         return destination
-    temp = destination.with_name(destination.name + "." + uuid.uuid4().hex + ".tmp")
-    temp.mkdir(parents=True, mode=0o700)
-
-    def restore_mode(path, mode):
-        fd = os.open(path, os.O_RDONLY)
-        try:
-            os.fchmod(fd, mode)
-            os.fsync(fd)
-        finally:
-            os.close(fd)
-
+    temporary = destination.with_name(destination.name + "." + uuid.uuid4().hex + ".tmp")
+    temporary.mkdir(parents=True, mode=0o700)
     try:
-        for item in directories:
-            (temp / item["path"]).mkdir(parents=True, exist_ok=True)
-        for item in manifest["files"]:
-            path = temp / item["path"]
+        for item in files:
+            path = temporary / item["path"]
             path.parent.mkdir(parents=True, exist_ok=True)
             store.copy_ref(item["contentRef"], path)
-            require(
-                path.stat().st_size == item["size"],
-                "invalid-export-file",
-                "file manifest size mismatch",
-            )
-            if dataset:
-                restore_mode(path, item["mode"])
-        for directory in sorted((p for p in temp.rglob("*") if p.is_dir()), reverse=True):
+            require(path.stat().st_size == item["size"], "invalid-export-file", "file manifest size mismatch")
+        for directory in sorted((p for p in temporary.rglob("*") if p.is_dir()), reverse=True):
             sync_dir(directory)
-        sync_dir(temp)
-        if dataset:
-            for item in sorted(
-                directories,
-                key=lambda item: len(Path(item["path"]).parts),
-                reverse=True,
-            ):
-                restore_mode(temp / item["path"], item["mode"])
-            restore_mode(temp, manifest["mode"])
-        os.rename(temp, destination)
+        sync_dir(temporary)
+        os.rename(temporary, destination)
         sync_dir(destination.parent)
     finally:
-        if temp.exists():
-            shutil.rmtree(temp)
+        if temporary.exists():
+            shutil.rmtree(temporary)
     return destination

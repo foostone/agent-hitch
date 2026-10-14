@@ -23,7 +23,7 @@ from hitch_inference.runtime import observe_runtime, package_version
 from hitch_inference.hardware import gpu_processes
 from hitch_inference.process_identity import owned_alive, process_identity, stop_owned
 from hitch_inference.content import ContentStore, atomic_json, digest_json, require
-from hitch_inference.snapshots import materialize, seal_directory
+from .preparation import ModelPreparation
 from hitch_inference.state import load, lock
 from .launch import runtime_matches
 from .topology import selected_devices, service_port
@@ -35,6 +35,7 @@ class ProcessService:
         self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
         self.store = ContentStore(config["storeRoot"])
         self.devices = NodeDeviceLedger(config["nodeRoot"], node)
+        self.preparation = ModelPreparation(config, node)
 
     def directory(self, payload):
         service_id = payload.get("serviceId")
@@ -62,7 +63,7 @@ class ProcessService:
         )
         return identity
 
-    def prepare(self, payload):
+    def admit(self, payload):
         model, frozen, runtime = payload["model"], payload["lock"], payload["runtime"]
         require(
             model.get("schema_version") == "1" and model.get("format") == "hf-safetensors",
@@ -148,114 +149,76 @@ class ProcessService:
                 "unknown-node-gpu",
                 "locked GPU is absent on this model node",
             )
-        files = [
-            {
-                **item,
-                "contentRef": {
-                    "uri": "cas:" + item["sha256"],
-                    "digest": item["sha256"],
-                    "mediaType": "application/octet-stream",
-                },
-            }
-            for item in model["files"]
-        ]
-        ref = self.store.put_json({"schemaVersion": 1, "format": "hf-safetensors", "files": files})
-        destination = self.root / "models" / model["model_id"][7:]
-        with lock(self.root / "models" / (model["model_id"][7:] + ".lock")):
-            materialize(self.store, ref, destination)
-            seal_directory(self.store, destination, serving=True)
         return {
             "modelId": model["model_id"],
             "inferenceId": frozen["inference_id"],
             "runtimeId": runtime["runtime_id"],
         }
 
-    def start(self, payload):
+    def preparation_guard(self, payload):
         directory = self.directory(payload)
-        with lock(Path(self.config["nodeRoot"]) / "inference-admission.lock"), lock(self.root / "admission.lock"):
+        with lock(Path(self.config["nodeRoot"]) / "inference-admission.lock"):
+            if (directory / "identity.json").exists():
+                identity = self.identity(directory, payload)
+                require(identity["inputDigest"] is not None and identity["inputDigest"] == digest_json(payload)
+                        and not (directory / "stop.json").exists(), "inference-start-fenced", "model preparation was stopped or changed")
+
+    def prepare(self, payload, *, prepared=None):
+        result = self.admit(payload)
+        if prepared is None:
+            self.preparation.prepare(payload, lambda: self.preparation_guard(payload))
+        else:
+            # This argument is supplied only by the trusted pool worker, never RPC payload.
+            require(payload["model"] == prepared["model"] and payload["runtime"] == prepared["runtime"],
+                    "prepared-identity-drift", "replica differs from its deployment model/runtime")
+            self.preparation.verify(prepared)
+        return result
+
+    def start(self, payload, *, prepared=None):
+        directory = self.directory(payload)
+        digest = digest_json(payload)
+        # Publish identity before heavy I/O, allowing concurrent stop to install a fence.
+        with lock(Path(self.config["nodeRoot"]) / "inference-admission.lock"), lock(self.root / "admission.lock"), lock(directory / "launch.lock"):
             identity = load(directory / "identity.json")
             if identity:
                 self.identity(directory, payload)
-                if identity["inputDigest"] is None:
-                    return self.inspect(payload)
-                require(
-                    identity["inputDigest"] == digest_json(payload),
-                    "inference-start-conflict",
-                    "service ID already identifies another immutable start request",
-                )
-                status = self.inspect(payload)
-                if status["state"] not in ("admitting", "starting") or status.get("handle"):
-                    return status
+                require(identity["inputDigest"] is None or identity["inputDigest"] == digest,
+                        "inference-start-conflict", "service ID already identifies another immutable start request")
+                status = load(directory / "status.json", {})
+                if not status:
+                    status = {"schemaVersion": 2, "state": "admitting", "resourcesReleased": False}
+                    atomic_json(directory / "status.json", status)
+                admit = identity["inputDigest"] is not None and not (directory / "stop.json").exists() and status.get("state") in ("admitting", "starting") and not status.get("handle")
             else:
-                self.prepare(payload)
-                port = service_port(self.config, directory)
-                require(
-                    type(port) is int and 1 <= port <= 65535,
-                    "invalid-inference-port",
-                    "node configuration requires a stable inferencePort",
-                )
                 directory.mkdir(mode=0o700, exist_ok=True)
-                identity = {
-                    "node": self.node,
-                    "ownerId": payload["ownerId"],
-                    "inputDigest": digest_json(payload),
-                    "inferenceId": payload["lock"]["inference_id"],
-                }
-                atomic_json(directory / "identity.json", identity)
-            # Every admission write is replayable after a lost RPC. The durable
-            # identity prevents a partial admission from changing its meaning.
-            if (
-                not (directory / "status.json").exists()
-                or load(directory / "status.json")["state"] == "admitting"
-            ):
-                self.prepare(payload)
-                port = service_port(self.config, directory)
-                require(
-                    type(port) is int and 1 <= port <= 65535,
-                    "invalid-inference-port",
-                    "node configuration requires a stable inferencePort",
-                )
+                atomic_json(directory / "identity.json", {"node": self.node, "ownerId": payload["ownerId"],
+                            "inputDigest": digest, "inferenceId": payload["lock"]["inference_id"]})
+                atomic_json(directory / "status.json", {"schemaVersion": 2, "state": "admitting", "resourcesReleased": False})
+                admit = True
+            if admit:
                 atomic_json(directory / "request.json", payload)
                 atomic_json(directory / "config.json", self.config)
-                if not (directory / "access.json").exists():
-                    atomic_json(
-                        directory / "access.json",
-                        {
-                            "port": port,
-                            "wireModel": "hitch-" + payload["model"]["model_id"][7:23],
-                            "engineToken": secrets.token_hex(32),
-                            "adminToken": secrets.token_hex(32),
-                        },
-                    )
-                atomic_json(directory / "allocation.json", {"port": load(directory / "access.json")["port"], "inputDigest": digest_json(payload)})
-                backend = payload["lock"]["execution"]["platform"]
-                self.devices.acquire(
-                    self.owner(directory.name),
-                    selected_devices(payload["lock"]),
-                )
-                atomic_json(
-                    directory / "status.json",
-                    {
-                        "schemaVersion": 2,
-                        "state": "starting",
-                        "resourcesReleased": False,
-                    },
-                )
-            with (directory / "supervisor.log").open("ab") as output:
-                subprocess.Popen(
-                    [
-                        sys.executable,
-                        "-m",
-                        "hitch_inference.worker",
-                        "_supervisor",
-                        "--directory",
-                        str(directory),
-                    ],
-                    stdin=subprocess.DEVNULL,
-                    stdout=output,
-                    stderr=output,
-                    start_new_session=True,
-                )
+        if not admit:
+            return self.inspect(payload)
+        self.prepare(payload, prepared=prepared)
+        with lock(Path(self.config["nodeRoot"]) / "inference-admission.lock"), lock(self.root / "admission.lock"), lock(directory / "launch.lock"):
+            identity = self.identity(directory, payload)
+            require(identity["inputDigest"] == digest, "inference-start-conflict", "start identity changed during preparation")
+            status = load(directory / "status.json", {})
+            admit = not (directory / "stop.json").exists() and status.get("state") in ("admitting", "starting") and not status.get("handle")
+            if admit:
+                if status["state"] == "admitting":
+                    port = service_port(self.config, directory)
+                    require(type(port) is int and 1 <= port <= 65535, "invalid-inference-port", "node configuration requires a stable inferencePort")
+                    if not (directory / "access.json").exists():
+                        atomic_json(directory / "access.json", {"port": port, "wireModel": "hitch-" + payload["model"]["model_id"][7:23],
+                                    "engineToken": secrets.token_hex(32), "adminToken": secrets.token_hex(32)})
+                    atomic_json(directory / "allocation.json", {"port": load(directory / "access.json")["port"], "inputDigest": digest})
+                    self.devices.acquire(self.owner(directory.name), selected_devices(payload["lock"]))
+                    atomic_json(directory / "status.json", {"schemaVersion": 2, "state": "starting", "resourcesReleased": False})
+                with (directory / "supervisor.log").open("ab") as output:
+                    subprocess.Popen([sys.executable, "-m", "hitch_inference.worker", "_supervisor", "--directory", str(directory)],
+                                     stdin=subprocess.DEVNULL, stdout=output, stderr=output, start_new_session=True)
         return self.inspect(payload)
 
     def attach(self, payload):

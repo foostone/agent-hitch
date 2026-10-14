@@ -27,11 +27,12 @@ class DeploymentManager:
         require(isinstance(value, dict) and set(value) == {"serviceId", "model", "runtime", "lock"},
                 "invalid-deployment", "deployment requires exactly serviceId, model, runtime and lock")
         payload = {**value, "ownerId": self.owner}
+        # Validate and prepare outside management locks; start reuses its sealed receipt.
+        self.service.prepare(payload)
         with self.mutex, lock(self.path.with_suffix(".lock")):
             deployments = self.deployments()
             previous = deployments.get(value["serviceId"])
             require(not previous or previous == payload, "deployment-identity-conflict", "a deployment ID cannot change model, runtime or topology")
-            self.service.prepare(payload)
             deployments[value["serviceId"]] = payload
             atomic_json(self.path, {"schemaVersion": 1, "deployments": deployments})
         return self.service.start(payload)
@@ -87,7 +88,7 @@ class DeploymentManager:
                 self.routes[service_id] = Router([{**status["access"], "baseUrl": "http://127.0.0.1:" + str(status["access"]["port"])}],
                     running=running, queued=topology.get("max_queued_requests", execution["max_queued_requests"]),
                     queue_timeout=execution["queue_timeout_ms"] / 1000,
-                    request_timeout=execution["request_timeout_ms"] / 1000, engine_capacity=running, frozen=payload["lock"])
+                    request_timeout=execution["request_timeout_ms"] / 1000, engine_capacity=running, frozen=payload["lock"], engine_boundary=payload["lock"]["schema_version"] != "3")
             return self.routes[service_id]
 
     @staticmethod
