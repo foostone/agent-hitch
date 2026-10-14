@@ -34,8 +34,6 @@ def startup_diagnostics(root):
                                        for owner in ledger.get("owners", {}).values()]})
         except (OSError, ValueError):
             pass
-    for path in sorted(Path(root).rglob("gpu-observations.jsonl")):
-        records.append({"gpu_observations": path.read_text().splitlines()[-4:]})
     return json.dumps(records, indent=2)[:20000]
 
 
