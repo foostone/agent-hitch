@@ -7,6 +7,7 @@ report its own version or integrity.
 """
 
 import hashlib
+from collections import Counter
 import importlib.util
 import json
 import marshal
@@ -14,16 +15,145 @@ import os
 from pathlib import Path
 import re
 import stat
+import struct
 import sys
 import sysconfig
 import types
+import zipimport
 
 
 MAX_FILES = 250_000
 MAX_BYTES = 2 * 1024**3
+LIMIT_ENV_PREFIX = "HITCH_HARBOR_PYTHON_RUNTIME_"
+
+
+def inventory_limit(name, default):
+    """Bound host work independently of the candidate's task and model deadlines."""
+    value = os.environ.get(LIMIT_ENV_PREFIX + name)
+    if value is None:
+        return default
+    if not re.fullmatch(r"[1-9][0-9]{0,18}", value) or int(value) > sys.maxsize:
+        raise ValueError("invalid Python runtime inventory limit")
+    return int(value)
+
+
+def constant_key(value):
+    """Compare compiled constants without NaN equality or signed-zero ambiguity."""
+    if isinstance(value, types.CodeType):
+        # Preserve the interpreter's code comparison for every non-constant field.
+        return (types.CodeType, value.replace(co_consts=()),
+                tuple(constant_key(item) for item in value.co_consts))
+    if isinstance(value, float):
+        return (float, struct.pack("!d", value))
+    if isinstance(value, complex):
+        return (complex, struct.pack("!dd", value.real, value.imag))
+    if isinstance(value, tuple):
+        return (tuple, tuple(constant_key(item) for item in value))
+    if isinstance(value, frozenset):
+        # Distinct NaNs with identical bits can coexist in a frozen set.
+        return (frozenset, frozenset(Counter(constant_key(item) for item in value).items()))
+    return (type(value), value)
+
+
+def nan_graph(value, references):
+    """Project the only constants whose equality depends on shared identity."""
+    if isinstance(value, (float, complex)) and value != value:
+        references[id(value)] += 1
+        return ("nan", id(value))
+    if isinstance(value, types.CodeType):
+        value = value.co_consts
+    if isinstance(value, (tuple, frozenset)):
+        children = []
+        for index, child in enumerate(value):
+            graph = nan_graph(child, references)
+            if graph is not None:
+                label = constant_key(child) if isinstance(value, frozenset) else index
+                children.append((label, graph))
+        if children:
+            return ("set" if isinstance(value, frozenset) else "sequence", tuple(children))
+    return None
+
+
+def mapped_nan_graph(graph, mapping=None):
+    """An order-independent key once every left-hand NaN has a known partner."""
+    kind, items = graph
+    if kind == "nan":
+        identity = items if mapping is None else mapping.get(items)
+        return None if identity is None else (kind, identity)
+    children = []
+    for label, child in items:
+        key = mapped_nan_graph(child, mapping)
+        if key is None:
+            return None
+        children.append((label, key))
+    return (kind, frozenset(Counter(children).items()) if kind == "set" else tuple(children))
+
+
+def compiled_constants_equal(left, right):
+    if constant_key(left) != constant_key(right):
+        return False
+    left_refs, right_refs = Counter(), Counter()
+    left_graph, right_graph = nan_graph(left, left_refs), nan_graph(right, right_refs)
+    if sorted(left_refs.values()) != sorted(right_refs.values()):
+        return False
+    if all(count == 1 for count in left_refs.values()):
+        return True
+
+    def set_choices(first, second, pending, forward, backward):
+        label, child = first[0]
+        for index, (other_label, other_child) in enumerate(second):
+            if label == other_label:
+                remaining = second[:index] + second[index + 1:]
+                yield (pending + [(("set", first[1:]), ("set", remaining)), (child, other_child)],
+                       forward.copy(), backward.copy())
+
+    # Set iteration order changes across compilation/marshal. Match a bijection
+    # lazily, retaining alternatives when later ordered constants constrain it.
+    # An explicit stack avoids recursion proportional to the number of constants.
+    choices = [iter([([(left_graph, right_graph)], {}, {})])]
+    while choices:
+        state = next(choices[-1], None)
+        if state is None:
+            choices.pop()
+            continue
+        pending, forward, backward = state
+        while pending:
+            first, second = pending.pop()
+            kind, items = first
+            other_kind, other_items = second
+            if kind != other_kind or (kind != "nan" and len(items) != len(other_items)):
+                break
+            if kind == "nan":
+                if forward.get(items, other_items) != other_items or backward.get(other_items, items) != items:
+                    break
+                forward[items], backward[other_items] = other_items, items
+            elif kind == "sequence":
+                if any(a[0] != b[0] for a, b in zip(items, other_items)):
+                    break
+                for a, b in reversed(tuple(zip(items, other_items))):
+                    pair = (a[1], b[1])
+                    # Ordered positions constrain identities without guessing.
+                    # Apply all such anchors before considering unordered sets.
+                    if a[1][0] == "set":
+                        pending.insert(0, pair)
+                    else:
+                        pending.append(pair)
+            elif items:
+                mapped = mapped_nan_graph(first, forward)
+                if mapped is not None:
+                    if mapped != mapped_nan_graph(second):
+                        break
+                    continue
+                choices.append(set_choices(items, other_items, pending, forward, backward))
+                break
+        else:
+            return True
+    return False
 
 
 def inventory(launcher):
+    max_files = inventory_limit("MAX_FILES", MAX_FILES)
+    max_bytes = inventory_limit("MAX_BYTES", MAX_BYTES)
     launcher = Path(launcher).absolute()
     if not launcher.is_file():
         raise ValueError("missing launcher")
@@ -38,6 +168,7 @@ def inventory(launcher):
     snapshots = {}
     directories = {}
     active = set()
+    visited = set()
     byte_count = 0
 
     def read(file):
@@ -45,7 +176,7 @@ def inventory(launcher):
         before = file.stat()
         if not stat.S_ISREG(before.st_mode):
             raise ValueError("non-regular Python runtime file")
-        if byte_count + before.st_size > MAX_BYTES:
+        if byte_count + before.st_size > max_bytes:
             raise ValueError("Python runtime inventory exceeds byte limit")
         data = file.read_bytes()
         byte_count += len(data)
@@ -75,16 +206,19 @@ def inventory(launcher):
         if not isinstance(code, types.CodeType):
             raise ValueError("invalid Python bytecode cache")
         expected = compile(read(source), code.co_filename, "exec", dont_inherit=True, optimize=int(match[2] or 0))
-        if code != expected:
+        if not compiled_constants_equal(code, expected):
             raise ValueError("Python bytecode cache disagrees with source")
         return True
 
     def visit(file):
         name = str(file)
-        if name in records:
+        if name in visited:
             return
-        if len(records) >= MAX_FILES:
+        # Derived caches still consume traversal work even though they do not
+        # contribute records to the runtime's content identity.
+        if len(visited) >= max_files:
             raise ValueError("Python runtime inventory exceeds file limit")
+        visited.add(name)
         if file.is_symlink():
             target = file.resolve(strict=True)
             records[name] = ["link", os.readlink(file), str(target)]
@@ -109,7 +243,16 @@ def inventory(launcher):
         elif file.exists():
             raise ValueError("unsupported Python runtime file")
         else:
-            records[name] = ["missing"]
+            # sys.path and module origins can refer inside an archive. Those
+            # paths are importable even though filesystem stat reports missing.
+            try:
+                importer = zipimport.zipimporter(name)
+            except zipimport.ZipImportError:
+                records[name] = ["missing"]
+            else:
+                archive = Path(importer.archive)
+                records[name] = ["zip-path", str(archive), importer.prefix]
+                visit(archive)
 
     for file in [launcher, Path(sys.executable), Path(sys.prefix) / "pyvenv.cfg"]:
         visit(file)

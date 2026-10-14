@@ -33,3 +33,4 @@ export type { RemoteWorkerCleanupChallengeV2, RemoteWorkerCleanupObservationV2, 
 export type { RemoteWorkerHostIdentityV1, RemoteWorkerExecutionOwnership, RemoteWorkerExecutionOwnershipV3 } from "./worker-recovery.js";
 export type { RemoteWorkerCleanupObservation, RemoteWorkerRebootCleanupObservationV3, RemoteWorkerCleanupReceipt, RemoteWorkerCleanupReceiptV3 } from "./worker-recovery.js";
 export type { EvaluationBindingV1 } from "./evaluation-binding.js";
+export { DEFAULT_EVALUATION_BINDING_TIMEOUT_MS, MAX_EVALUATION_BINDING_TIMEOUT_MS } from "./evaluation-binding.js";

@@ -18,3 +18,4 @@ export type { HarborTrialRuntimeContract } from "./harbor/index.js";
 export type { DoctorCheck, DoctorHarborOptions, DoctorResult, HarborLocation, LocateHarborOptions, HarborSetupResult, SetupHarborOptions } from "./harbor/index.js";
 export { prepareEvaluationBinding, boundEvaluationEnvironment } from "./harbor/index.js";
 export { parseEvalArtifactPins, assertHarborArtifactPin, assertHarborArtifactPins } from "./harbor/index.js";
+export { evaluationCredentialValidity } from "./harbor/host-credential-helper.js";

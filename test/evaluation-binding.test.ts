@@ -9,7 +9,9 @@ import { boundEvaluationEnvironment, prepareEvaluationBinding, runHarborBackend 
 import type { RunHarborBackendOptions } from "../src/backends/index.js";
 import { DaemonServer } from "../src/daemon/index.js";
 import { runCommand } from "../src/foundation/index.js";
-import { boundHarborEnvironment } from "../src/backends/harbor/evaluation-binding.js";
+import { boundHarborEnvironment, harborRequestEnvironment, readBoundHelperCredentials } from "../src/backends/harbor/evaluation-binding.js";
+import { assertEvalEnvironmentBinding } from "../src/evals/environment-binding.js";
+import { evaluationCredentialValidity, HOST_CREDENTIAL_VALIDITY_MARGIN_MS } from "../src/backends/harbor/host-credential-helper.js";
 import { snapshotHostCredentials } from "../src/backends/harbor/credential-snapshot.js";
 import { EvalScheduler, ResourceLedger } from "../src/control-plane/index.js";
 import { parseEvalSubmission } from "../src/control-plane/eval-records.js";
@@ -32,6 +34,36 @@ async function fixture(t: TestContext) {
   return root;
 }
 const prepare = (root: string, supplied = env) => prepareEvaluationBinding({ root, env: supplied, model, passEnv, minimumValidityMs: 1000 });
+
+test("admission and launch include the bridge margin before consuming resources", async t => {
+  const root = await fixture(t);
+  const helper = path.join(root, "helper.cjs");
+  await writeFile(helper, `console.log(JSON.stringify({version:1,env:{TOKEN:'fixture'},expiresAtMs:${Date.now() + 120000}}));`);
+  const supplied = { ...env, HITCH_HOST_CREDENTIAL_HELPER_JSON: JSON.stringify({ version: 1,
+    argv: [process.execPath, helper], credentialNames: ["TOKEN"], timeoutMs: 5000 }) };
+  const binding = await prepareEvaluationBinding({ root, env: supplied, model, passEnv: ["TOKEN"], minimumValidityMs: 1000 });
+  const request = await validateEvalRequest({ dataset: "fixture@1.0", harness_ref: "pi@version:1.2.3", model,
+    pass_env: ["TOKEN"], timeout_ms: 10000, setup_timeout_ms: 10000, environment_binding: binding.binding_id });
+  await assert.rejects(assertEvalEnvironmentBinding(request, root, supplied), unavailable);
+  await assert.rejects(harborRequestEnvironment({ root, env: supplied, request, runtimeDirectory: root }), unavailable);
+});
+
+test("credential validity covers a full-day task plus setup and the Python bridge margin", async t => {
+  const root = await fixture(t);
+  const bridge = fileURLToPath(new URL("../../integrations/harbor/hitch_host_credentials.py", import.meta.url));
+  const result = await runCommand(python, ["-c", "import runpy,sys;print(runpy.run_path(sys.argv[1])['HOST_CREDENTIAL_VALIDITY_MARGIN_MS'])", bridge]);
+  assert.equal(Number(result.stdout.trim()), HOST_CREDENTIAL_VALIDITY_MARGIN_MS);
+  const validity = evaluationCredentialValidity({ timeout_ms: 24 * 60 * 60 * 1000, setup_timeout_ms: 0 });
+  const helper = path.join(root, "helper.cjs");
+  await writeFile(helper, `console.log(JSON.stringify({version:1,env:{TOKEN:'fixture'},expiresAtMs:${Date.now() + validity + 600000}}));`);
+  const supplied = { ...env, HITCH_HOST_CREDENTIAL_HELPER_JSON: JSON.stringify({ version: 1,
+    argv: [process.execPath, helper], credentialNames: ["TOKEN"], timeoutMs: 5000 }) };
+  const binding = await prepareEvaluationBinding({ root, env: supplied, model, passEnv: ["TOKEN"], minimumValidityMs: validity });
+  assert.deepEqual((await readBoundHelperCredentials(root, binding.binding_id, ["TOKEN"], validity)).env, { TOKEN: "fixture" });
+  for (const invalid of [-1, Number.NaN, Number.POSITIVE_INFINITY, Number.MAX_SAFE_INTEGER]) {
+    await assert.rejects(readBoundHelperCredentials(root, binding.binding_id, ["TOKEN"], invalid), { code: "invalid_input" });
+  }
+});
 
 test("resident bindings are stable across connections, root-private and never disclose values", async t => {
   const root = await fixture(t), other = await fixture(t);
@@ -112,7 +144,7 @@ test("bound Harbor execution reads frozen credentials from the selected shared r
   await mkdir(bin); await mkdir(shared);
   await symlink(fileURLToPath(new URL("../../", import.meta.url)), path.join(shared, "payload"));
   const harbor = path.join(bin, "harbor"), helper = path.join(root, "helper.cjs"), counter = path.join(root, "helper-calls");
-  await writeFile(helper, `const fs=require('node:fs');fs.appendFileSync(${JSON.stringify(counter)},'1');console.log(JSON.stringify({version:1,env:{TOKEN:'frozen-test-token'},expiresAtMs:${Date.now() + 120000}}));`);
+  await writeFile(helper, `const fs=require('node:fs');fs.appendFileSync(${JSON.stringify(counter)},'1');console.log(JSON.stringify({version:1,env:{TOKEN:'frozen-test-token'},expiresAtMs:${Date.now() + 600000}}));`);
   await writeFile(harbor, `#!${python}
 import json, os, subprocess, sys
 if '--version' in sys.argv:
@@ -190,7 +222,7 @@ test("authenticated CLI prepares a nonce-bound resident binding without submitti
   assert.equal(response.status, 401);
   await assert.rejects(readFile(path.join(root, "evaluation-bindings/key.json")), { code: "ENOENT" });
   const result = JSON.parse((await runCommand(process.execPath, [cli, "--root", root, "eval", "bind", "--model", model,
-    ...passEnv.flatMap(name => ["--pass-env", name]), "--minimum-validity", "1s", "--json"], {
+    ...passEnv.flatMap(name => ["--pass-env", name]), "--minimum-validity", "1s", "--timeout", "2m", "--json"], {
     env: { ...env, PRIVATE_ENDPOINT: "https://caller-must-not-be-authority.invalid" }, timeoutMs: 10000,
   })).stdout);
   assert.equal(result.daemon_instance_id, server.instanceId);

@@ -1491,7 +1491,9 @@ test("Harbor importer uses lock task id when result task_name is display-qualifi
 
 test("Harbor eval publishes a completed trial before the aggregate benchmark result", async (t) => {
   const root = await mkdtemp(path.join(tmpdir(), "hitch-eval-incremental-"));
-  t.after(() => forceRemove(root));
+  const release = path.join(root, "release-incremental-result");
+  let published!: () => void;
+  const progressPublished = new Promise<void>(resolve => { published = resolve; });
   const evalId = newEvalId();
   const dataset = path.join(root, "dataset");
   for (const taskId of ["task-one", "task-two"]) {
@@ -1529,12 +1531,19 @@ test("Harbor eval publishes a completed trial before the aggregate benchmark res
     root,
     harborExecutable: harbor,
     env: { ...process.env, HITCH_NPM_PATH: npm },
+    signal: t.signal,
+    onEvent: event => { if (event.type === "eval.trial.published" && event.run_id === first.runId) published(); },
     request: {
       dataset,
       harness_ref: "pi@version:1.2.3",
       model: "openai/test-model",
       timeout_ms: 5_000,
     },
+  });
+  t.after(async () => {
+    await writeFile(release, "release");
+    await running.catch(() => {});
+    await forceRemove(root);
   });
 
   const evalDirectory = path.join(root, "evals", evalId);
@@ -1545,12 +1554,8 @@ test("Harbor eval publishes a completed trial before the aggregate benchmark res
     planned_trials: number | null;
     trials: Array<{ run_id: string }>;
   };
-  let observed: ObservedProgress | null = null;
-  for (let index = 0; index < 200; index += 1) {
-    observed = await readJSON<ObservedProgress | null>(path.join(evalDirectory, "progress.json"), null).catch(() => null);
-    if (observed?.trials.length === 1) break;
-    await new Promise<void>((resolve) => setTimeout(resolve, 25));
-  }
+  await Promise.race([progressPublished, running.then(() => { throw new Error("eval completed before publishing progress"); })]);
+  const observed = await readJSON<ObservedProgress>(path.join(evalDirectory, "progress.json"));
   assert.equal(observed?.status, "running");
   assert.equal(observed?.generation, 1);
   assert.equal(observed?.planned_tasks, 2);
@@ -1558,6 +1563,7 @@ test("Harbor eval publishes a completed trial before the aggregate benchmark res
   assert.deepEqual(observed?.trials.map((trial) => trial.run_id), [first.runId]);
   await assert.rejects(stat(path.join(evalDirectory, "result.json")), (error: NodeJS.ErrnoException) => error.code === "ENOENT");
 
+  await writeFile(release, "release");
   const result = await running;
   assert.equal(result.status, "succeeded");
   const finalProgress = await readJSON<ObservedProgress>(path.join(evalDirectory, "progress.json"));
@@ -1703,7 +1709,9 @@ test("exhausted verifier-only retries fail explicitly without starting another c
 
 test("Harbor eval publishes a diagnostic trial after the bundle readiness grace", async (t) => {
   const root = await mkdtemp(path.join(tmpdir(), "hitch-eval-diagnostic-progress-"));
-  t.after(() => forceRemove(root));
+  const release = path.join(root, "release-missing-bundle");
+  let published!: () => void;
+  const progressPublished = new Promise<void>(resolve => { published = resolve; });
   const evalId = newEvalId();
   const dataset = path.join(root, "dataset");
   await mkdir(path.join(dataset, "task-timeout"), { recursive: true });
@@ -1715,6 +1723,8 @@ test("Harbor eval publishes a diagnostic trial after the bundle readiness grace"
     root,
     harborExecutable: harbor,
     env: { ...process.env, HITCH_NPM_PATH: npm },
+    signal: t.signal,
+    onEvent: event => { if (event.type === "eval.trial.published") published(); },
     trialBundleGraceMs: 100,
     request: {
       dataset,
@@ -1724,6 +1734,11 @@ test("Harbor eval publishes a diagnostic trial after the bundle readiness grace"
       infrastructure_retries: 0,
     },
   });
+  t.after(async () => {
+    await writeFile(release, "release");
+    await running.catch(() => {});
+    await forceRemove(root);
+  });
 
   const evalDirectory = path.join(root, "evals", evalId);
   type DiagnosticProgress = {
@@ -1731,12 +1746,8 @@ test("Harbor eval publishes a diagnostic trial after the bundle readiness grace"
     planned_trials: number | null;
     trials: Array<{ task_id: string; observation_status: string; invalid_reason?: string }>;
   };
-  let observed: DiagnosticProgress | null = null;
-  for (let index = 0; index < 200; index += 1) {
-    observed = await readJSON<DiagnosticProgress | null>(path.join(evalDirectory, "progress.json"), null).catch(() => null);
-    if (observed?.trials.length === 1) break;
-    await new Promise<void>((resolve) => setTimeout(resolve, 25));
-  }
+  await Promise.race([progressPublished, running.then(() => { throw new Error("eval completed before publishing progress"); })]);
+  const observed = await readJSON<DiagnosticProgress>(path.join(evalDirectory, "progress.json"));
   assert.equal(observed?.planned_tasks, 1);
   assert.equal(observed?.planned_trials, 1);
   assert.deepEqual(observed?.trials.map(({ task_id, observation_status, invalid_reason }) => ({
@@ -1750,6 +1761,7 @@ test("Harbor eval publishes a diagnostic trial after the bundle readiness grace"
   }]);
   await assert.rejects(stat(path.join(evalDirectory, "result.json")), (error: NodeJS.ErrnoException) => error.code === "ENOENT");
 
+  await writeFile(release, "release");
   const result = await running;
   assert.equal(result.status, "failed");
   assert.equal((result.trials as Array<{ observation_status: string }>)[0]?.observation_status, "invalid");
@@ -2514,14 +2526,19 @@ function publish(trial, reward) {
 const first = ${JSON.stringify(options.first)};
 const second = ${JSON.stringify(options.second)};
 publish(first, 1);
-setTimeout(() => {
+const release = ${JSON.stringify(path.join(directory, "release-incremental-result"))};
+const watcher = fs.watch(path.dirname(release), finish);
+function finish() {
+  if (!fs.existsSync(release)) return;
+  watcher.close();
   publish(second, 0.5);
   fs.writeFileSync(path.join(output, "result.json"), JSON.stringify({
     n_total_trials: 2,
     stats: {n_completed_trials:2,n_errored_trials:0,n_cancelled_trials:0}
   }));
   process.stdout.write("Results written\\n");
-}, 1000);
+}
+finish();
 `;
   await writeFile(executable, source, { mode: 0o755 });
   return executable;
@@ -2677,13 +2694,18 @@ fs.writeFileSync(path.join(trialDirectory, "result.json"), JSON.stringify({
   exception_info: {exception_type:"AgentTimeoutError"},
   verifier_result: {rewards:{reward:0}}
 }));
-setTimeout(() => {
+const release = ${JSON.stringify(path.join(directory, "release-missing-bundle"))};
+const watcher = fs.watch(path.dirname(release), finish);
+function finish() {
+  if (!fs.existsSync(release)) return;
+  watcher.close();
   fs.writeFileSync(path.join(output, "result.json"), JSON.stringify({
     n_total_trials: 1,
     stats: {n_completed_trials:0,n_errored_trials:1,n_cancelled_trials:0}
   }));
   process.stdout.write("Results written\\n");
-}, 1000);
+}
+finish();
 `;
   await writeFile(executable, source, { mode: 0o755 });
   return executable;

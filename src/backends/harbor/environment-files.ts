@@ -41,7 +41,7 @@ export async function evaluationEnvironmentFiles(env: NodeJS.ProcessEnv): Promis
         if (!env[variable!]) add("default/" + name, path.join(home, name!), false);
       }
     }
-    const dockerConfig = env.DOCKER_CONFIG ?? (home ? path.join(home, ".docker") : undefined);
+    const dockerConfig = env.DOCKER_CONFIG || (home ? path.join(home, ".docker") : undefined);
     if (dockerConfig) {
       if (!path.isAbsolute(dockerConfig)) throw unavailable();
       add("DOCKER_CONFIG/config.json", path.join(dockerConfig, "config.json"), false);
