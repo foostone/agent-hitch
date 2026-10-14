@@ -269,3 +269,5 @@ Hitch 的设计受到 [Multica](https://github.com/multica-ai/multica) 启发，
 ## 许可证
 
 [Apache License 2.0](LICENSE)。
+
+普通推理服务可从 [packages/inference](packages/inference/README.md) 独立安装运行，支持显式张量并行、互不重叠的副本与并发请求；任务与评测编排仍由 Hitch 管理。

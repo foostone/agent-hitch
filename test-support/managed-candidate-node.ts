@@ -18,7 +18,7 @@ export async function managedCandidateNode(directory: string, root: string) {
   const runtime = { schemaVersion: 2, kind: "python-env", pythonVersion: "3.12.1", packagesDigest: sha256JSON(packages), packages,
     system: "Linux", machine: "x86_64", bridgeDigest: sha256JSON("bridge-fixture"), outerImageDigest: null };
   const observation = { nodeId: "candidate-node", generation: "boot-1", runtimeDigest: sha256JSON(runtime), runtime,
-    gpuUuids: ["GPU-fixture"], launchers: ["process"], capabilities: { binaryCas: true, durableInferenceProcesses: true } };
+    gpuUuids: ["GPU-fixture"], launchers: ["process"], capabilities: { binaryCas: true, durableInferenceProcesses: true, standaloneInference: "1" } };
   const binding = { schema_version: "2" as const, node_id: observation.nodeId, generation: observation.generation,
     runtime_digest: observation.runtimeDigest, launcher: "process" as const };
   const access = { engineToken: "d".repeat(64), adminToken: "e".repeat(64), wireModel: `hitch-${model.model_id.slice(7, 23)}`, port: 0 };

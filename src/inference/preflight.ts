@@ -1,5 +1,6 @@
 import type {
   InferenceLockV1,
+  InferencePoolTopologyV3,
   InferenceRuntimeManifestV1,
   LocalInferenceSelectionV1,
   LocalModelManifestV1,
@@ -19,6 +20,7 @@ import type { ModelNodeObservationV2 } from "./node-registry.js";
 
 export interface LocalInferencePreflightOptions {
   root: string;
+  pool?: InferencePoolTopologyV3;
   selection: LocalInferenceSelectionV1;
   harnessRef?: string;
   doctor?: InferenceDoctorOptions;
@@ -111,6 +113,7 @@ async function prepareModelNodeInference(options: LocalInferencePreflightOptions
   if (sha256JSON(persistedRuntime) !== sha256JSON(runtime)) throw new HitchError("registered model-node runtime changed", { code: "inference_runtime_mismatch", exitCode: 12 });
   const reusable = options.reusableLocks?.find(lock => lock.model_id === model.model_id && lock.profile === options.selection.profile
     && sha256JSON(lock.model_node ?? null) === sha256JSON(binding)
+    && sha256JSON(lock.topology ?? null) === sha256JSON(options.pool ?? null)
     && lock.protocol.api === (options.harnessRef?.startsWith("training-tool@") ? "chat-completions" : "responses"));
   const inferenceId = options.selection.inference_id ?? reusable?.inference_id;
   const device = options.doctor?.deviceConstraint;
@@ -120,13 +123,15 @@ async function prepareModelNodeInference(options: LocalInferencePreflightOptions
     if (sha256JSON(lock.model_node ?? null) !== sha256JSON(binding) || lock.model_id !== model.model_id || lock.runtime_id !== runtime.runtime_id) {
       throw new HitchError("inference lock differs from the frozen model node, runtime or model", { code: "inference_lock_mismatch", exitCode: 2 });
     }
+    if (options.pool && sha256JSON(lock.topology ?? null) !== sha256JSON(options.pool)) throw new HitchError("inference pool topology changed", { code: "inference_lock_mismatch", exitCode: 2 });
     if (device && (lock.execution.platform.backend !== "cuda" || lock.execution.platform.device_constraint !== device)) throw new HitchError("inference device changed", { code: "inference_lock_mismatch", exitCode: 2 });
   } else {
     if (!device) throw new HitchError("plan model-node inference with an explicit --gpu before submitting it", { code: "inference_device_unavailable", exitCode: 3 });
     lock = buildInferenceLock(model, runtime, { backend: "cuda", profile: options.selection.profile, modelNode: binding, deviceConstraint: device,
+      ...(options.pool ? { pool: options.pool, tensorParallelSize: options.pool.replicas[0]!.devices.length } : {}),
       ...(options.harnessRef?.startsWith("training-tool@") ? { api: "chat-completions" as const } : {}) });
   }
-  if (lock.execution.platform.backend !== "cuda" || !observation.gpuUuids.includes(lock.execution.platform.device_constraint ?? "")) {
+  if (lock.execution.platform.backend !== "cuda" || !(lock.topology?.replicas.flatMap(r => r.devices) ?? [lock.execution.platform.device_constraint ?? ""]).every(device => observation.gpuUuids.includes(device))) {
     throw new HitchError("locked physical GPU is absent on the model node", { code: "inference_device_unavailable", exitCode: 3 });
   }
   assertHarnessCompatibility(options.harnessRef, lock);

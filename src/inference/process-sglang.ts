@@ -1,4 +1,4 @@
-import type { InferenceRuntimeObservationV2, InferenceServiceHandleV2, InferenceServiceRecordV1, PythonRuntimeObservationV2 } from "../domain/index.js";
+import type { InferenceRuntimeObservationV3, ProcessInferenceRuntimeObservation, InferenceServiceHandleV2, InferenceServiceRecordV1, PythonRuntimeObservationV2 } from "../domain/index.js";
 import { HitchError, delay, hitchRootId, sha256JSON } from "../foundation/index.js";
 import { parseInferenceRuntimeManifest, parseInferenceServiceHandle, parseInferenceServiceRecord, parseLocalModelManifest } from "./manifest.js";
 import { validateInferenceLockShape } from "./lock.js";
@@ -19,6 +19,8 @@ interface NodeStatus {
   runtime?: { pythonVersion: string; packagesDigest: PythonRuntimeObservationV2["packages_digest"]; outerImageDigest: PythonRuntimeObservationV2["outer_image_digest"] };
   serverInfo?: unknown;
   gpuUuid?: string | null;
+  gpuUuids?: string[];
+  replicaObservations?: import("../domain/index.js").InferenceRuntimeObservationV3["replica_observations"];
 }
 
 export class ProcessSGLangLauncher implements SGLangLauncher {
@@ -71,7 +73,7 @@ export class ProcessSGLangLauncher implements SGLangLauncher {
     validateInput(input);
     const record = parseInferenceServiceRecord(input.record);
     const handle = record.service_handle;
-    if (!this.client.attach || !input.observation || input.observation.schema_version !== "2"
+    if (!this.client.attach || !input.observation || !["2", "3"].includes(input.observation.schema_version)
       || record.state !== "ready" || record.container_id || handle?.kind !== "process"
       || record.inference_id !== input.lock.inference_id
       || sha256JSON(record.model_node ?? null) !== sha256JSON(input.lock.model_node ?? null)
@@ -90,7 +92,7 @@ export class ProcessSGLangLauncher implements SGLangLauncher {
   }
 
   private async connect(input: SGLangLaunchInput, owner: InferenceNodeOwner, status: NodeStatus, handle: ProcessHandle,
-    recovery?: { observation: InferenceRuntimeObservationV2 }): Promise<SGLangLaunchedService> {
+    recovery?: { observation: ProcessInferenceRuntimeObservation }): Promise<SGLangLaunchedService> {
     const access = status.access; const actual = status.runtime;
     if (status.state !== "ready" || status.resourcesReleased || !access || !actual
       || !/^[a-f0-9]{64}$/.test(access.engineToken) || !/^[a-f0-9]{64}$/.test(access.adminToken)
@@ -102,8 +104,14 @@ export class ProcessSGLangLauncher implements SGLangLauncher {
     if (!catalogue?.data?.some(model => model.id === access.wireModel)) throw new HitchError("model-node route serves another model", { code: "inference_runtime_mismatch", exitCode: 12 });
     const observed: PythonRuntimeObservationV2 = { kind: "python-env", node_id: this.client.node.nodeId, generation: this.client.node.generation,
       environment_digest: sha256JSON(actual), python_version: actual.pythonVersion, packages_digest: actual.packagesDigest, outer_image_digest: actual.outerImageDigest };
-    const currentObservation = validateProcessRuntimeObservation(status.serverInfo, observed, status.gpuUuid ?? null, input.lock, input.runtime,
+    const observedEngine = validateProcessRuntimeObservation(status.serverInfo, observed, status.gpuUuid ?? null, input.lock, input.runtime,
       { node_id: this.client.node.nodeId, generation: this.client.node.generation });
+    const devices = input.lock.topology?.replicas.flatMap(r => r.devices);
+    if (devices && sha256JSON(status.gpuUuids) !== sha256JSON(devices)) throw new TypeError("pool physical device observation differs from the lock");
+    const replicas = devices ? validateReplicaObservations(status.replicaObservations, input, observed, this.client.node) : undefined;
+    const currentObservation: ProcessInferenceRuntimeObservation = devices
+      ? { ...observedEngine, schema_version: "3", gpu_uuids: devices, tensor_parallel_size: input.lock.execution.tensor_parallel_size,
+          replica_count: input.lock.topology!.replicas.length, replica_observations: replicas! } : observedEngine;
     let observation = currentObservation;
     if (recovery) {
       const prior = recovery.observation;
@@ -151,4 +159,35 @@ function validateInput(input: Pick<SGLangLaunchInput, "lock" | "model" | "runtim
   parseLocalModelManifest(input.model); parseInferenceRuntimeManifest(input.runtime); validateInferenceLockShape(input.lock);
   if (input.runtime.schema_version !== "2" || input.runtime.package.kind !== "python-env"
     || input.lock.runtime_id !== input.runtime.runtime_id || input.lock.model_id !== input.model.model_id) throw new TypeError("process launcher requires a locked v2 Python runtime/model");
+}
+
+/** Validate every replica and project only fields owned by the public contract. */
+function validateReplicaObservations(value: unknown, input: SGLangLaunchInput, observed: PythonRuntimeObservationV2,
+  node: { nodeId: string; generation: string }): InferenceRuntimeObservationV3["replica_observations"] {
+  const topology = input.lock.topology!;
+  if (!Array.isArray(value) || value.length !== topology.replicas.length) throw new TypeError("pool replica observations are incomplete");
+  const fields = ["version", "device", "dtype", "kv_cache_dtype", "attention_backend", "sampling_backend", "context_length", "max_running_requests",
+    "tp_size", "dp_size", "pp_size", "disable_radix_cache", "disable_overlap_schedule", "mem_fraction_static"];
+  return value.map((replica, index) => {
+    if (!replica || typeof replica !== "object" || Object.keys(replica).sort().join(",") !== "configuration,devices,inference_id,max_total_num_tokens,runtime_id"
+      || !replica.configuration || Object.keys(replica.configuration).sort().join(",") !== [...fields].sort().join(",")
+      || sha256JSON(replica.devices) !== sha256JSON(topology.replicas[index]!.devices) || replica.runtime_id !== input.runtime.runtime_id) {
+      throw new TypeError("replica observation contains a changed identity or unsupported fields");
+    }
+    const child = structuredClone(input.lock);
+    if (child.execution.platform.backend !== "cuda") throw new TypeError("replica pools require CUDA");
+    child.execution.platform.device_constraints = [...topology.replicas[index]!.devices];
+    child.execution.platform.device_constraint = topology.replicas[index]!.devices[0]!;
+    child.topology = { ...topology, replicas: [topology.replicas[index]!], max_running_requests: child.execution.max_running_requests };
+    child.resources = { ...child.resources, gpu_count: child.execution.tensor_parallel_size,
+      cpu_millis: Math.floor(child.resources.cpu_millis / topology.replicas.length), memory_bytes: Math.floor(child.resources.memory_bytes / topology.replicas.length) };
+    const { inference_id: _oldIdentity, ...identity } = child;
+    child.inference_id = sha256JSON(identity);
+    if (replica.inference_id !== child.inference_id) throw new TypeError("replica inference identity changed");
+    validateInferenceLockShape(child);
+    validateProcessRuntimeObservation({ ...replica.configuration, max_total_num_tokens: replica.max_total_num_tokens }, observed,
+      child.execution.platform.device_constraint, child, input.runtime, { node_id: node.nodeId, generation: node.generation });
+    return { devices: [...child.execution.platform.device_constraints], configuration: Object.fromEntries(fields.map(field => [field, replica.configuration[field]])),
+      max_total_num_tokens: replica.max_total_num_tokens, runtime_id: input.runtime.runtime_id, inference_id: child.inference_id };
+  });
 }

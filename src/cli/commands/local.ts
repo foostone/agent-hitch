@@ -4,7 +4,7 @@ import { invalidInput } from "../../foundation/index.js";
 import { doctorLocalInference, resolveLocalInferenceDevice, loadInferenceLock, prepareLocalInference } from "../../inference/index.js";
 import { daemonClient, probeDaemonHealth } from "../../daemon/index.js";
 import { assertNoArgs, takeFlag, takeOption } from "../arguments.js";
-import { readModelNodeBinding, inspectModelNodeService, readServiceRecords } from "../../inference/index.js";
+import { readInferencePoolTopology, readModelNodeBinding, inspectModelNodeService, readServiceRecords } from "../../inference/index.js";
 
 export async function localCommand(args: string[], root: string): Promise<void> {
   const action = args.shift();
@@ -18,14 +18,17 @@ export async function localCommand(args: string[], root: string): Promise<void> 
     const model = args.shift();
     const harnessRef = takeOption(args, "--harness");
     const gpu = takeOption(args, "--gpu");
+    const poolFile = takeOption(args, "--pool-file");
+    const pool = poolFile ? await readInferencePoolTopology(poolFile) : undefined;
+    const profile = localProfile(takeOption(args, "--profile") || "baseline");
     const nodeFile = takeOption(args, "--model-node-file");
     const modelNode = nodeFile ? await readModelNodeBinding(nodeFile) : undefined;
     const offline = takeFlag(args, "--offline");
     takeFlag(args, "--json");
     assertNoArgs(args);
     if (!model || !harnessRef || !gpu || !/^GPU-[a-fA-F0-9-]+$/.test(gpu)) throw invalidInput("local plan requires MODEL --harness REF --gpu GPU-UUID");
-    const planned = await prepareLocalInference({ root, selection: { model, device: "cuda", profile: "baseline", offline, ...(modelNode ? { model_node: modelNode } : {}) },
-      harnessRef, doctor: { deviceConstraint: gpu } });
+    const planned = await prepareLocalInference({ root, selection: { model, device: "cuda", profile, offline, ...(modelNode ? { model_node: modelNode } : {}) },
+      harnessRef, ...(pool ? { pool } : {}), doctor: { deviceConstraint: gpu } });
     process.stdout.write(`${JSON.stringify(planned, null, 2)}\n`);
     return;
   }

@@ -2,7 +2,7 @@ import { randomBytes } from "node:crypto";
 import http from "node:http";
 import type { AddressInfo } from "node:net";
 import path from "node:path";
-import type { InferenceRuntimeObservation, InferenceRuntimeObservationV1, InferenceRuntimeObservationV2, InferenceLockV1, InferenceRuntimeManifestV1, InferenceServiceRecordV1, InferenceServiceHandleV2, LocalModelManifestV1 } from "../domain/index.js";
+import type { InferenceRuntimeObservation, InferenceRuntimeObservationV1, ProcessInferenceRuntimeObservation, InferenceLockV1, InferenceRuntimeManifestV1, InferenceServiceRecordV1, InferenceServiceHandleV2, LocalModelManifestV1 } from "../domain/index.js";
 import { HitchError, delay, ensureDir, hitchRootId, runCommand, statePaths } from "../foundation/index.js";
 import type { CommandResult } from "../foundation/index.js";
 import { defaultDeviceReservationDirectory, releaseInferenceDevice, reserveInferenceDevice } from "./device-reservation.js";
@@ -45,7 +45,7 @@ export interface SGLangLauncher {
 /** Explicit original startup evidence. Attachment never creates a new service. */
 export interface SGLangAttachInput extends Pick<SGLangLaunchInput, "root" | "lock" | "model" | "runtime" | "signal"> {
   record: InferenceServiceRecordV1;
-  observation: InferenceRuntimeObservationV2;
+  observation: ProcessInferenceRuntimeObservation;
 }
 
 export interface DockerSGLangLauncherOptions {

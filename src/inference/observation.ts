@@ -38,7 +38,7 @@ function validateEngineInfo(value: unknown, gpuUuid: string | null, lock: Infere
     dtype: lock.execution.dtype, kv_cache_dtype: lock.execution.kv_cache_dtype,
     attention_backend: lock.execution.attention_backend, sampling_backend: lock.execution.sampling_backend,
     context_length: lock.execution.context_tokens_per_request, max_running_requests: lock.execution.max_running_requests,
-    tp_size: 1, dp_size: 1, pp_size: 1,
+    tp_size: lock.execution.tensor_parallel_size, dp_size: 1, pp_size: 1,
     disable_radix_cache: lock.execution.prefix_cache.mode === "disabled",
     disable_overlap_schedule: !lock.execution.platform.overlap_schedule,
   };

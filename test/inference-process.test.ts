@@ -47,7 +47,7 @@ test("process launcher preserves ambiguous ownership after a lost stop reply and
 test("node client keeps SSH configuration out of remote shell syntax and pins a stable route", async () => {
   const client = new PythonInferenceNodeClient({ transport: { type: "ssh", host: "gpu-node" }, python: ["/env with space/bin/python"],
     configPath: "/node/it'works.json", gateway: { localPort: 30000, nodePort: 30001 } }, { nodeId: "node", generation: "boot-1" });
-  assert.equal(client.command("rpc").at(-1), "'/env with space/bin/python' '-m' 'gear_training.node' 'rpc' '--config' '/node/it'\\''works.json'");
+  assert.equal(client.command("rpc").at(-1), "'/env with space/bin/python' '-m' 'hitch_inference.node' 'rpc' '--config' '/node/it'\\''works.json'");
   await assert.rejects(client.route("/unused", 31000), /configured route/);
 });
 
@@ -72,10 +72,10 @@ test("Hitch process launcher uses real node RPC, separate model CAS and durable 
   const configPath = path.join(temporary, "node.json");
   await writeFile(configPath, JSON.stringify({ schemaVersion: 2, nodeId: "cpu-process-fixture", nodeRoot: path.join(temporary, "node"),
     storeRoot: path.join(temporary, "node-cas"), jobConfigPath: path.join(temporary, "absent-job.json"), inferencePort: port }));
-  const result = await promisify(execFile)(python, ["-c", "import json,sys; from gear_training.node import NodeService; print(json.dumps(NodeService(json.load(open(sys.argv[1]))).probe()))", configPath], { env });
+  const result = await promisify(execFile)(python, ["-c", "import json,sys; from gear.training.runtime.node import NodeService; print(json.dumps(NodeService(json.load(open(sys.argv[1]))).probe()))", configPath], { env });
   const probe = JSON.parse(result.stdout);
   const client = new PythonInferenceNodeClient({ transport: { type: "local" }, python: [python], configPath,
-    gateway: { localPort: port, nodePort: port } }, { nodeId: probe.nodeId, generation: probe.generation }, env);
+    gateway: { localPort: port, nodePort: port }, runtime: "gear-legacy-v2" }, { nodeId: probe.nodeId, generation: probe.generation }, env);
   const model = await fixture(temporary); const manifest = runtime(probe.runtime);
   const lock = buildInferenceLock(model, manifest, { backend: "cpu", profile: "baseline", api: "chat-completions" });
   const input: SGLangLaunchInput = { root: path.join(temporary, "hitch"), serviceId: `inference_${"b".repeat(32)}`, model, runtime: manifest, lock };

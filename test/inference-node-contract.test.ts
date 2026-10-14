@@ -61,7 +61,7 @@ test("process runtime observation requires the actual node environment and omits
   const runtime = pythonRuntime();
   const lock = { execution: { platform: { backend: "cuda", overlap_schedule: false, device_constraint: "GPU-123", mem_fraction_static: 0.5 },
     dtype: "bfloat16", kv_cache_dtype: "auto", attention_backend: "flashinfer", sampling_backend: "pytorch",
-    context_tokens_per_request: 128, max_running_requests: 1, max_total_tokens: 128, prefix_cache: { mode: "disabled" } },
+    tensor_parallel_size: 1, context_tokens_per_request: 128, max_running_requests: 1, max_total_tokens: 128, prefix_cache: { mode: "disabled" } },
     protocol: { api: "chat-completions" } } as InferenceLockV1;
   const info = { version: "0.5.16", device: "cuda", dtype: "bfloat16", kv_cache_dtype: "auto", attention_backend: "flashinfer",
     sampling_backend: "pytorch", context_length: 128, max_running_requests: 1, max_total_num_tokens: 128,

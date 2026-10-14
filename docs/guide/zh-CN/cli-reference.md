@@ -338,3 +338,7 @@ hitch feedback delete RUN_ID --message MESSAGE_ID [--if-version VERSION] [--json
 ## 兼容与内部参数
 
 本页覆盖用户命令路径与参数。`--internal-*` 保留给 Hitch 的 Harbor 桥接，在该上下文之外会被拒绝。JSON 集成文件需符合[带版本的 Schema](../../schemas)，不能任意添加字段。确认版本差异时，结合 `hitch --version`、`hitch capabilities --json` 与源码版本检查。
+
+## 独立推理副本池
+
+`hitch local plan MODEL --harness REF --gpu GPU-UUID --model-node-file NODE.json --pool-file POOL.json --profile baseline|throughput --offline --json` 冻结显式的 v3 TP/副本池。`--pool-file` 包含 `replicas`（按 TP rank 排序的物理 GPU UUID 分组）、`routing: "least-active"`、`max_running_requests` 和 `max_queued_requests`；`--gpu` 必须对应首个副本的首个 rank。每个引擎的 SGLang DP/PP 仍为 1。新注册使用独立安装的 `hitch_inference.node`；历史连接保留显式 `gear-legacy-v2` 适配器。安装和硬件验收见[独立推理包](../../../packages/inference/README.md)。

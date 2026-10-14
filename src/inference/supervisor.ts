@@ -3,6 +3,7 @@ import { lstat, readdir } from "node:fs/promises";
 import path from "node:path";
 import type {
   InferenceRuntimeObservation,
+  ProcessInferenceRuntimeObservation,
   InferenceLockV1,
   InferenceRuntimeManifestV1,
   InferenceServiceRecordV1,
@@ -274,8 +275,8 @@ export class SGLangServiceSupervisor {
       };
       const entry: ServiceEntry = { key, lock: input.lock, record: ready, service: launched, owners: new Map() };
       if (ready.model_node) {
-        if (launched.observation?.schema_version !== "2") throw new TypeError("model-node service lacks its validated startup observation");
-        await writeServiceAttachment(this.root, ready, { lock: input.lock, model: input.model, runtime: input.runtime }, launched.observation);
+        if (!launched.observation || !["2", "3"].includes(launched.observation.schema_version)) throw new TypeError("model-node service lacks its validated startup observation");
+        await writeServiceAttachment(this.root, ready, { lock: input.lock, model: input.model, runtime: input.runtime }, launched.observation as ProcessInferenceRuntimeObservation);
       }
       this.services.set(key, entry);
       await writeRecord(this.root, ready);

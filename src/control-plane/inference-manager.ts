@@ -351,7 +351,7 @@ async function writeInferenceEvidence(
       : path.join(statePaths(root).evals, owner.eval_id, "inference")
     : path.join(statePaths(root).runs, runId, "inference"));
   const execution = {
-      schema_version: evidence.model_node_observation ? "2" : "1", run_id: runId,
+      schema_version: (evidence.lock as InferenceLockV1).schema_version === "3" ? "3" : evidence.model_node_observation ? "2" : "1", run_id: runId,
       ...(owner ? { eval_id: owner.eval_id, ...(owner.rerun_id ? { rerun_id: owner.rerun_id } : {}) } : {}),
       service: evidence.service, doctor: evidence.doctor, observation: evidence.observation,
       ...(evidence.model_node_observation ? { model_node_observation: evidence.model_node_observation } : {}),
@@ -361,7 +361,7 @@ async function writeInferenceEvidence(
     ["runtime.manifest.json", evidence.runtime], ["execution.json", execution]];
   await withFileLock(statePaths(root).inferenceOperationLocks, sha256JSON({ inference_evidence: directory }), async () => {
     const previous = await readJSON<Record<string, unknown> | null>(path.join(directory, "execution.json"), null);
-    if (execution.schema_version === "2" && previous && sha256JSON(previous.service) === sha256JSON(execution.service)) {
+    if (["2", "3"].includes(execution.schema_version) && previous && sha256JSON(previous.service) === sha256JSON(execution.service)) {
       // Recovery can finish the worker and retire its gateway before the eval
       // scheduler reacquires the same service to finalize. Retain the original
       // evidence, including its time, instead of making that service look new.

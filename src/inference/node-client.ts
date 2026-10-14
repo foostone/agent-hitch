@@ -15,6 +15,7 @@ export interface InferenceModelNodeIdentity { nodeId: string; generation: string
 export interface InferenceNodeConnection {
   transport: { type: "local" } | { type: "ssh"; host: string };
   python: string[];
+  runtime?: "standalone-v1" | "gear-legacy-v2";
   configPath: string;
   gateway: { localPort: number; nodePort: number };
 }
@@ -31,7 +32,7 @@ export interface InferenceNodeClient {
 interface Envelope { schemaVersion: 2; requestId: string; node: InferenceModelNodeIdentity; operation: string; inputDigest: string; payload: unknown }
 const quote = (value: string): string => `'${value.replaceAll("'", "'\\''")}'`;
 
-/** Gear node protocol v2. Model bytes use separate bounded-header binary CAS. */
+/** Standalone inference node protocol v2. Model bytes use separate bounded-header binary CAS. */
 export class PythonInferenceNodeClient implements InferenceNodeClient {
   constructor(readonly connection: InferenceNodeConnection, readonly node: InferenceModelNodeIdentity, readonly env: NodeJS.ProcessEnv = process.env) {
     if (!connection.python.length || connection.python.some(arg => typeof arg !== "string" || !arg || arg.includes("\0"))
@@ -43,7 +44,7 @@ export class PythonInferenceNodeClient implements InferenceNodeClient {
   }
 
   command(action: "rpc" | "cas-import"): string[] {
-    const command = [...this.connection.python, "-m", "gear_training.node", action, "--config", this.connection.configPath];
+    const command = [...this.connection.python, "-m", this.connection.runtime === "gear-legacy-v2" ? "gear.training.cli.node" : "hitch_inference.node", action, "--config", this.connection.configPath];
     return this.connection.transport.type === "local" ? command
       : ["ssh", "-T", "-o", "BatchMode=yes", "-o", "ConnectTimeout=15", "--", this.connection.transport.host, command.map(quote).join(" ")];
   }

@@ -283,3 +283,5 @@ and remote model inference.
 ## License
 
 [Apache License 2.0](LICENSE).
+
+Standalone ordinary inference is independently installable from [packages/inference](packages/inference/README.md). It supports explicit tensor parallelism, disjoint replicas and concurrent requests; Hitch retains task/evaluation orchestration.

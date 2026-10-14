@@ -338,3 +338,7 @@ These commands connect evaluation episodes to a training system. Use `--training
 ## Compatibility and internal options
 
 This reference covers user-facing command paths and options. `--internal-*` options are reserved for Hitch’s Harbor bridge and are rejected outside that context. JSON integration files must match the [versioned schemas](../../schemas); they are not arbitrary configuration bags. For release differences, compare `hitch --version` and `hitch capabilities --json` with the source checkout.
+
+## Standalone inference pools
+
+`hitch local plan MODEL --harness REF --gpu GPU-UUID --model-node-file NODE.json --pool-file POOL.json --profile baseline|throughput --offline --json` freezes an explicit v3 TP/replica pool. `--pool-file` contains `replicas` (ordered physical UUID groups), `routing: "least-active"`, `max_running_requests` and `max_queued_requests`; `--gpu` must equal the first rank of the first replica. Per-engine SGLang DP/PP remain 1. New registrations use the independently installed `hitch_inference.node` runtime; historical connections retain the explicit `gear-legacy-v2` adapter. See [independent service installation and hardware smoke](../../../packages/inference/README.md).

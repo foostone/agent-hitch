@@ -31,3 +31,5 @@ export { readServiceRecords } from "./supervisor.js";
 export { reconcileModelNodeService } from "./generation-recovery.js";
 export { addModelFromNode, verifyModelOnNode } from "./remote-model-store.js";
 export { parseModelSnapshotRef } from "./model-location.js";
+
+export { parseInferencePoolTopology, readInferencePoolTopology } from "./lock.js";

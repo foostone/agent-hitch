@@ -1,0 +1,34 @@
+{
+  "name": "@rsi-gear/inference",
+  "version": "0.1.0",
+  "description": "Standalone immutable SGLang inference pools, ordinary OpenAI API and explicit GPU ownership",
+  "license": "Apache-2.0",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "bin": {
+    "hitch-inference": "./src/cli.mjs"
+  },
+  "exports": {
+    ".": {
+      "types": "./src/index.d.ts",
+      "default": "./src/index.mjs"
+    }
+  },
+  "files": [
+    "src/",
+    "python/hitch_inference/*.py",
+    "pyproject.toml",
+    "README.md",
+    "LICENSE.gear",
+    "NOTICE",
+    "scripts/"
+  ],
+  "scripts": {
+    "test": "node --test test/*.test.mjs",
+    "test:python": "python3 -m unittest discover -s test -p 'test_*.py' -v",
+    "pack:smoke": "node test/packed-smoke.mjs",
+    "smoke:gpu": "node scripts/hardware-smoke.mjs"
+  }
+}

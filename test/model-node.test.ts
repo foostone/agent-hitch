@@ -39,7 +39,7 @@ async function fixture(t: test.TestContext) {
   const configPath = path.join(directory, "node.json"), script = path.join(directory, "node-peer.mjs"), calls = path.join(directory, "calls.jsonl");
   await writeFile(configPath, JSON.stringify({ observation, calls })); await writeFile(script, peer);
   const registration: ModelNodeRegistrationV2 = { schema_version: "2", binding,
-    connection: { transport: { type: "local" }, python: [process.execPath, script], configPath, gateway: { localPort: 31000, nodePort: 31000 } } };
+    connection: { runtime: "gear-legacy-v2", transport: { type: "local" }, python: [process.execPath, script], configPath, gateway: { localPort: 31000, nodePort: 31000 } } };
   const registrationFile = path.join(directory, "registration.json"), bindingFile = path.join(directory, "binding.json");
   await writeFile(registrationFile, JSON.stringify(registration)); await writeFile(bindingFile, JSON.stringify(binding));
   const cli = async (args: string[]) => JSON.parse((await promisify(execFile)(process.execPath, ["dist/bin/hitch.js", "--root", root, ...args], { timeout: 15_000 })).stdout);
@@ -144,6 +144,24 @@ test("node identity affects inference hashes and JSON contracts require v2 lock 
   assert.equal(validate(lock), true, JSON.stringify(validate.errors));
   assert.equal(validate({ ...lock, model_node: undefined }), false);
   assert.equal(validate({ ...lock, resources: { ...lock.resources, container_slots: 1 } }), false);
+});
+
+test("explicit v3 TP/replica locks round-trip and legacy locks reject widened topology", async t => {
+  const f = await fixture(t); await f.register(); const prepared = await f.plan();
+  const pool = { replicas: [{ devices: ["GPU-1234", "GPU-2345"] }, { devices: ["GPU-3456", "GPU-4567"] }],
+    routing: "least-active" as const, max_running_requests: 2, max_queued_requests: 3 };
+  const lock = buildInferenceLock(f.model, prepared.runtime, { backend: "cuda", profile: "baseline", modelNode: f.binding,
+    deviceConstraint: "GPU-1234", tensorParallelSize: 2, pool, api: "chat-completions" });
+  assert.equal(lock.schema_version, "3"); assert.equal(lock.resources.gpu_count, 4);
+  assert.deepEqual(validateInferenceLockShape(lock), lock);
+  assert.throws(() => validateInferenceLockShape({ ...lock, schema_version: "2" }));
+  assert.throws(() => buildInferenceLock(f.model, prepared.runtime, { backend: "cuda", profile: "baseline", modelNode: f.binding,
+    deviceConstraint: "GPU-1234", tensorParallelSize: 2, pool: { ...pool, replicas: [pool.replicas[0]!, pool.replicas[0]!] } }));
+  const bindingSchema = JSON.parse(await readFile("docs/schemas/model-node-binding.schema.json", "utf8"));
+  const schema = JSON.parse(await readFile("docs/schemas/inference-lock.schema.json", "utf8"));
+  const validate = new Ajv2020({ strict: false, validateFormats: false }).addSchema(bindingSchema).compile(schema);
+  assert.equal(validate(lock), true, JSON.stringify(validate.errors));
+  assert.equal(validate({ ...lock, schema_version: "2" }), false);
 });
 
 test("managed model-node services use node ownership without reserving controller GPUs", async t => {

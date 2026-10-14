@@ -83,6 +83,8 @@ export interface SGLangCpuConfigV1 {
 export interface SGLangCudaConfigV1 {
   backend: "cuda";
   device_constraint?: string;
+  /** V3: ordered physical TP ranks for the first replica. */
+  device_constraints?: string[];
   mem_fraction_static: number;
   overlap_schedule: boolean;
   cuda_graph: "enabled" | "disabled";
@@ -96,9 +98,18 @@ export interface SGLangMetalConfigV1 {
 
 export type SGLangBackendConfigV1 = SGLangCpuConfigV1 | SGLangCudaConfigV1 | SGLangMetalConfigV1;
 
+export interface InferencePoolTopologyV3 {
+  replicas: Array<{ devices: string[] }>;
+  routing: "least-active";
+  max_running_requests: number;
+  max_queued_requests: number;
+}
+
 export interface InferenceLockV1 {
-  schema_version: "1" | "2";
-  /** Required for v2; prohibited on legacy locks. */
+  schema_version: "1" | "2" | "3";
+  /** Only v3 locks carry an explicit immutable replica pool. */
+  topology?: InferencePoolTopologyV3;
+  /** Required for v2/v3; prohibited on v1 locks. */
   model_node?: ModelNodeBindingV2;
   engine: "sglang";
   model_id: Sha256;
@@ -110,7 +121,7 @@ export interface InferenceLockV1 {
     load_format: "safetensors";
     dtype: string;
     quantization: string | null;
-    tensor_parallel_size: 1;
+    tensor_parallel_size: number;
     data_parallel_size: 1;
     pipeline_parallel_size: 1;
     context_tokens_per_request: number;
@@ -259,4 +270,13 @@ export interface InferenceRuntimeObservationV2 extends Omit<InferenceRuntimeObse
   schema_version: "2";
   runtime: PythonRuntimeObservationV2;
 }
-export type InferenceRuntimeObservation = InferenceRuntimeObservationV1 | InferenceRuntimeObservationV2;
+export interface InferenceRuntimeObservationV3 extends Omit<InferenceRuntimeObservationV2, "schema_version"> {
+  schema_version: "3";
+  gpu_uuids: string[];
+  tensor_parallel_size: number;
+  replica_count: number;
+  replica_observations: Array<{ devices: string[]; configuration: Record<string, unknown>; max_total_num_tokens: number;
+    runtime_id: Sha256; inference_id: Sha256 }>;
+}
+export type ProcessInferenceRuntimeObservation = InferenceRuntimeObservationV2 | InferenceRuntimeObservationV3;
+export type InferenceRuntimeObservation = InferenceRuntimeObservationV1 | ProcessInferenceRuntimeObservation;

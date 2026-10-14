@@ -16,6 +16,8 @@ export function capabilitiesCommand(args: string[]): void {
     training_harnesses: ["training-tool"],
     training_gpu_validation: "pending",
     managed_model_node: "2",
+    standalone_inference: "1",
+    inference_pool: "3",
     model_node_usage: "2",
     model_node_storage: "1",
     ordered_eval_control: "2",

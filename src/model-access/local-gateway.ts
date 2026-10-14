@@ -216,11 +216,11 @@ export class LocalModelGateway {
 
   private acquirePermit(signal: AbortSignal): Promise<() => void> {
     if (signal.aborted) throw new HitchError("local inference request cancelled", { code: "cancelled", exitCode: 9 });
-    if (this.active < this.lock.execution.max_running_requests) {
+    if (this.active < (this.lock.topology?.max_running_requests ?? this.lock.execution.max_running_requests)) {
       this.active += 1;
       return Promise.resolve(this.releasePermit());
     }
-    if (this.queue.length >= this.lock.execution.max_queued_requests) {
+    if (this.queue.length >= (this.lock.topology?.max_queued_requests ?? this.lock.execution.max_queued_requests)) {
       throw new HitchError("local inference queue capacity exceeded", { code: "inference_capacity_exceeded", exitCode: 12 });
     }
     return new Promise((resolve, reject) => {

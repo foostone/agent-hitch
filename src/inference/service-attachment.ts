@@ -1,5 +1,5 @@
 import path from "node:path";
-import type { InferenceRuntimeObservationV2, InferenceServiceRecordV1 } from "../domain/index.js";
+import type { ProcessInferenceRuntimeObservation, InferenceServiceRecordV1 } from "../domain/index.js";
 import { HitchError, atomicWriteJSON, readJSON, sha256JSON, statePaths } from "../foundation/index.js";
 import { validateInferenceLockShape } from "./lock.js";
 import { parseInferenceRuntimeManifest, parseInferenceServiceRecord, parseLocalModelManifest } from "./manifest.js";
@@ -10,7 +10,7 @@ interface Attachment {
   schema_version: "2";
   service_digest: string;
   inputs: Inputs;
-  observation: InferenceRuntimeObservationV2;
+  observation: ProcessInferenceRuntimeObservation;
 }
 function serviceIdentity(record: InferenceServiceRecordV1) {
   return { service_id: record.service_id, inference_id: record.inference_id, isolation_key: record.isolation_key,
@@ -21,7 +21,7 @@ function validate(record: InferenceServiceRecordV1, attachment: Attachment): voi
   if (Object.keys(attachment).sort().join(",") !== "inputs,observation,schema_version,service_digest" || attachment.schema_version !== "2"
     || attachment.service_digest !== sha256JSON(serviceIdentity(record)) || !record.model_node || record.service_handle?.kind !== "process"
     || !attachment.inputs || Object.keys(attachment.inputs).sort().join(",") !== "lock,model,runtime"
-    || !attachment.observation || attachment.observation.schema_version !== "2") throw ambiguous();
+    || !attachment.observation || !["2", "3"].includes(attachment.observation.schema_version)) throw ambiguous();
   const { lock, model, runtime } = attachment.inputs;
   validateInferenceLockShape(lock); parseLocalModelManifest(model); parseInferenceRuntimeManifest(runtime);
   if (record.inference_id !== lock.inference_id || lock.model_id !== model.model_id || lock.runtime_id !== runtime.runtime_id
@@ -30,7 +30,7 @@ function validate(record: InferenceServiceRecordV1, attachment: Attachment): voi
 const file = (root: string, id: string) => path.join(statePaths(root).inferenceServices, id, "attachment.json");
 
 /** Seal after startup's protocol probe and cache drain, before publishing ready. */
-export async function writeServiceAttachment(root: string, record: InferenceServiceRecordV1, inputs: Inputs, observation: InferenceRuntimeObservationV2): Promise<void> {
+export async function writeServiceAttachment(root: string, record: InferenceServiceRecordV1, inputs: Inputs, observation: ProcessInferenceRuntimeObservation): Promise<void> {
   const attachment: Attachment = { schema_version: "2", service_digest: sha256JSON(serviceIdentity(record)), inputs: structuredClone(inputs), observation: structuredClone(observation) };
   validate(record, attachment);
   const value = { digest: sha256JSON(attachment), attachment };
