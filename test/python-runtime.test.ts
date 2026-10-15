@@ -46,7 +46,10 @@ if (!process.argv.includes('-B')) {
   fs.writeFileSync(${JSON.stringify(versionProbe)}, 'unverified-launch');
   console.log('harbor 0.21.0'); process.exit(0);
 }
-fs.writeFileSync(${JSON.stringify(marker)}, String(process.pid));
+// fs.watch can report creation before writeFileSync finishes writing.
+// Publish the complete PID atomically before the parent advances its timers.
+fs.writeFileSync(${JSON.stringify(marker + ".pid")}, String(process.pid));
+fs.renameSync(${JSON.stringify(marker + ".pid")}, ${JSON.stringify(marker)});
 setInterval(() => {
   if (fs.existsSync(${JSON.stringify(release)})) {
     console.log(${JSON.stringify(JSON.stringify(observation))}); process.exit(0);
@@ -96,6 +99,7 @@ test("configured inventory deadlines stop the subprocess with an actionable erro
   t.mock.timers.enable({ apis: ["setTimeout"] });
   const fixture = await waitingInventory(t, "100");
   const pid = Number(await readFile(fixture.marker, "utf8"));
+  assert.ok(Number.isSafeInteger(pid) && pid > 0, "inventory marker must identify the actual child PID");
   t.mock.timers.tick(100);
   await assert.rejects(fixture.result, { code: "harbor_python_runtime_timeout" });
   assert.throws(() => process.kill(pid, 0), { code: "ESRCH" });
@@ -104,6 +108,7 @@ test("configured inventory deadlines stop the subprocess with an actionable erro
 test("cancelling a runtime inventory stops its subprocess without claiming file drift", async t => {
   const fixture = await waitingInventory(t);
   const pid = Number(await readFile(fixture.marker, "utf8"));
+  assert.ok(Number.isSafeInteger(pid) && pid > 0, "inventory marker must identify the actual child PID");
   fixture.controller.abort();
   await assert.rejects(fixture.result, { code: "cancelled" });
   assert.throws(() => process.kill(pid, 0), { code: "ESRCH" });
