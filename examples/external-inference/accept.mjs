@@ -93,10 +93,20 @@ function view(json) {
   return { text: message.content ?? '', tools: (message.tool_calls ?? []).map(item => ({ id: item.id, name: item.function?.name, arguments: item.function?.arguments })), history: [{ role: 'assistant', content: message.content ?? null, ...(message.tool_calls?.length ? { tool_calls: message.tool_calls } : {}) }], usage: json.usage, terminal: choice.finish_reason };
 }
 function verifyUsage(result) {
-  const input = result.usage?.[responses ? 'input_tokens' : 'prompt_tokens'];
-  const output = result.usage?.[responses ? 'output_tokens' : 'completion_tokens'];
-  for (const [name, value] of [['input', input], ['output', output]]) check(Number.isSafeInteger(value) && value >= 0, `Missing or invalid ${name} usage; missing values are not replaced with zero`);
-  check(output <= args.budget, `Reported output usage ${output} exceeds the unchanged budget ${args.budget}`);
+  const usage = result.usage;
+  check(usage && typeof usage === 'object' && !Array.isArray(usage), 'Missing or invalid usage; missing values are not replaced with zero');
+  function count(name, aliases) {
+    const fields = aliases.filter(field => Object.hasOwn(usage, field));
+    check(fields.length > 0 && fields.every(field => Number.isSafeInteger(usage[field]) && usage[field] >= 0), `Missing or invalid ${name} usage; missing values are not replaced with zero`);
+    const value = usage[fields[0]];
+    check(fields.every(field => usage[field] === value), `Inconsistent ${name} usage aliases: ${fields.join(', ')}`);
+    return { value, fields };
+  }
+  // Verify recognized wire variants without rewriting the captured upstream usage.
+  const input = count('input', ['input_tokens', 'prompt_tokens']);
+  const output = count('output', ['output_tokens', 'completion_tokens']);
+  check(output.value <= args.budget, `Reported output usage ${output.value} exceeds the unchanged budget ${args.budget}`);
+  return { input_tokens: input.value, output_tokens: output.value, source_fields: { input_tokens: input.fields, output_tokens: output.fields } };
 }
 async function exchange(name, url, { data, mode = 'json', signal, onContent, expectedAbort = false, acceptedStatus, key = apiKey } = {}) {
   const started = performance.now();
@@ -116,7 +126,7 @@ async function exchange(name, url, { data, mode = 'json', signal, onContent, exp
       const json = JSON.parse(text);
       record.response.body = json;
       const result = view(json);
-      verifyUsage(result);
+      record.response.usage_verification = verifyUsage(result);
       return result;
     }
     check(response.headers.get('content-type')?.includes('text/event-stream'), 'Streaming response is not SSE');
@@ -166,7 +176,7 @@ async function exchange(name, url, { data, mode = 'json', signal, onContent, exp
     if (responses) check(finalResponse, 'SSE ended without a terminal Responses snapshot');
     else check(done && finishReason, 'SSE ended without chat finish_reason and [DONE]');
     const result = view(responses ? finalResponse : { choices: [{ finish_reason: finishReason, message: { role: 'assistant', content: streamedText || null, ...(calls.size ? { tool_calls: [...calls.values()] } : {}) } }], usage });
-    verifyUsage(result);
+    record.response.usage_verification = verifyUsage(result);
     result.streamed_text = streamedText;
     result.streamed_tool_arguments = responses ? events.filter(item => item.data?.type === 'response.function_call_arguments.delta').map(item => item.data.delta ?? '').join('') : [...calls.values()].map(item => item.function.arguments).join('');
     record.response.terminal = result.terminal;

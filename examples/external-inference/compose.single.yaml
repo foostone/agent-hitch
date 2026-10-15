@@ -15,7 +15,7 @@ services:
           --model-path /model --tokenizer-path /model \
           --served-model-name "$$WIRE_MODEL" \
           --host 0.0.0.0 --port 30000 --api-key "$$key" \
-          --tp-size "$$TP_SIZE" --dtype bfloat16 \
+          --tp-size "$$TP_SIZE" --dtype bfloat16 --disable-cuda-graph \
           --context-length "$$CONTEXT_LENGTH" \
           --mem-fraction-static "$$MEM_FRACTION_STATIC" \
           --max-running-requests "$$ENGINE_MAX_RUNNING" \
@@ -24,8 +24,8 @@ services:
     environment:
       WIRE_MODEL: ${WIRE_MODEL:?Set a versioned wire model name}
       TP_SIZE: "1"
-      CONTEXT_LENGTH: ${CONTEXT_LENGTH:-8192}
-      MEM_FRACTION_STATIC: ${MEM_FRACTION_STATIC:-0.80}
+      CONTEXT_LENGTH: ${CONTEXT_LENGTH:-16384}
+      MEM_FRACTION_STATIC: ${MEM_FRACTION_STATIC:-0.82}
       ENGINE_MAX_RUNNING: ${ENGINE_MAX_RUNNING:-4}
       ENGINE_MAX_QUEUED: ${ENGINE_MAX_QUEUED:-8}
       HF_HUB_OFFLINE: "1"

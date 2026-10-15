@@ -11,24 +11,38 @@
     "resolved_image_digest": null,
     "source_commit": "e00930c5489053f26d86b179cee0d087f846acbb",
     "configured_sglang_version": "0.5.21",
-    "configured_gateway_version": "0.3.2",
+    "observed_package_versions": null
+  },
+  "gateway": {
+    "enabled": false,
+    "image": "lightseekorg/smg:1.12.0@sha256:d08b509491f222c2c9786323a3df90136127364c25b9b9b48e91b4b3e9e695d6",
+    "resolved_image_digest": null,
+    "source_commit": "dcc5cb0b8f2a64694938c10f02c6caaa0c40d5ef",
+    "configured_smg_version": "1.12.0",
     "observed_package_versions": null
   },
   "configuration": {
-    "compose_files": ["compose.single.yaml"],
+    "compose_files": [
+      "compose.single.yaml"
+    ],
     "wire_model": "qwen25-7b-a09a35458c70",
     "tensor_parallel_size": 1,
     "replicas": 1,
     "dtype": "bfloat16",
     "quantization": "none",
-    "context_length": 8192,
+    "context_length": 16384,
     "tool_parser": "qwen25",
     "tokenizer_and_template": "from-the-same-read-only-HF-snapshot",
     "radix_cache": "upstream-default-enabled",
     "max_running_requests_per_worker": 4,
     "max_queued_requests_per_worker": 8,
     "gateway": null,
-    "request_sampling": {"temperature": 0, "output_budget": 1024}
+    "request_sampling": {
+      "temperature": 0,
+      "output_budget": 1024
+    },
+    "mem_fraction_static": 0.82,
+    "disable_cuda_graph": true
   },
   "isolation": {
     "policy": "static-exclusive-device-allocation-by-deployment-owner",
@@ -36,6 +50,9 @@
     "training_gpu_uuids": [],
     "allocation_record_ref": null
   },
-  "hardware_validation": {"status": "NOT RUN", "evidence_ref": null},
+  "hardware_validation": {
+    "status": "NOT RUN",
+    "evidence_ref": null
+  },
   "receipt_source": null
 }
