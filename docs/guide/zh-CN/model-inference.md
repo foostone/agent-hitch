@@ -74,6 +74,6 @@ usage 保留真实字段来源，累计摘要归一化 input/prompt 和 output/c
 
 ## 上游部署与历史读取
 
-固定版本的[单副本、TP=2 和官方 Gateway 双副本示例](../../../examples/external-inference/README.md)显式配置队列与并发限制；首版训练和推理使用静态分开的 GPU。示例包含正常预算验收探针与未执行项明确标注的实机清单，CPU 契约测试不能替代目标硬件验收。
+固定版本的[单副本、TP=2 和官方 Gateway 双副本示例](../../../examples/external-inference/README.md)显式配置队列与并发限制；首版训练和推理使用静态分开的 GPU。2026-10-15 的有界记录覆盖[真实推理拓扑](../../validation/external-inference-gpu-2026-10-15.md)及另一轮[训练/HF 导出与 Harbor 端点评测诊断](../../validation/training-gpu-loop-2026-10-15.md)。后者完成一次真实更新及 baseline/candidate 证据配对，均为有效 reward=0、meanDelta=0；仍明确 validated:false / pending-gpu、loss/梯度为 0，不构成学习提升或正式认证。完整本机制品全闭包与离线 finite 复核已通过（108 个对象、35,467,670,234 字节），精确租机销毁已确认；Compose 容器、完整 benchmark 和远程 Harbor worker 尚未验收。CPU 契约测试不能替代目标硬件验收。
 
 保留 models add、本地模型 manifest/CAS 校验及历史推理 schema。普通 Python 推理包、local 服务命令、模型节点 RPC 与 models add-node 已退出。旧任务不能静默改绑新端点恢复；试用环境先用旧版本工具停止旧服务，再移除环境。需要重新评测时创建关联历史记录的新任务。

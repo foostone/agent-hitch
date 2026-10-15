@@ -12,16 +12,16 @@ A bounded GPU smoke on 2026-10-15 passed the checks below. It ran SMG from an of
 | --- | --- |
 | Compose parsing: single TP=1, single TP=2, two TP=1 replicas | Checked locally; no containers started |
 | Probe syntax and controlled standard HTTP protocol exercise | Checked locally; 15 usage fixture cases passed |
-| Standalone TP=1 direct endpoint | **NOT RUN as a separate acceptance scenario** |
+| Standalone TP=1 direct endpoint | A later Qwen3.5-2B / SGLang 0.5.15.post1 training diagnostic passed strict Hitch verification and real Harbor baseline/candidate evaluations, both valid with reward 0; this is a different model/runtime from the 7B Compose example |
 | Real SGLang TP=2 | Responses and Chat Completions each passed all 9 HTTP checks |
 | SMG 1.12.0 wheel + two TP=1 SGLang workers | Both APIs passed all 9 checks, including forced named JSON/SSE tools, worker distribution and cancellation isolation |
 | Actual Codex 0.145 Harness | TP=2 SHA-256 task and SMG arithmetic task passed with actual terminal tool roundtrips |
 | Legacy bundled `sglang-router` 0.3.2 + two TP=1 workers | Chat Completions passed; Responses rejected the flat named function `tool_choice` with HTTP 400 before reaching a worker |
 | Official SMG 1.12.0 image and Compose container deployment | **NOT RUN; image metadata/source and Compose parsing checked only** |
-| Harbor container execution path | **NOT RUN** |
-| Static training/inference split, training rollout and HF export regression | **NOT RUN** |
+| Harbor container execution path | One real local Harbor/Docker canary with remote GPU generation completed training feedback and baseline/candidate evaluation; a complete benchmark and remote Harbor workers remain **NOT RUN** |
+| Static training/inference split, training rollout and HF export regression | A later 2×3090 diagnostic completed one real Slime update/native checkpoint/HF export on GPU 0 and ordinary endpoint evaluation on GPU 1; the shared service survived training cleanup and evidence pairing passed with meanDelta 0. Explicitly validated:false / pending-gpu, zero loss/gradient; complete local artifact closure (108 objects, 35,467,670,234 bytes), offline finite verification and exact-instance rental destruction passed |
 
-Historical custom inference-pool records cannot substitute for these checks. A successful HTTP probe does not establish GPU topology, trusted weight identity, or actual Harness behavior.
+The later [training and endpoint diagnostic](../../docs/validation/training-gpu-loop-2026-10-15.md) used the pinned Slime image and Qwen3.5-2B with SGLang 0.5.15.post1, not these Qwen2.5-7B / SGLang 0.5.21 Compose commands. Its one-task results establish a bounded pipeline exercise, not learning, formal runtime certification or container acceptance. Historical custom inference-pool records cannot substitute for these checks. A successful HTTP probe does not establish GPU topology, trusted weight identity, or actual Harness behavior.
 
 ## Host and device requirements
 
