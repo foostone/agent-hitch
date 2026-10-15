@@ -81,7 +81,7 @@ Usage:
   hitch inspect <harness> [--json]
   hitch resolve <harness-ref> [--json]
   hitch prepare <harness-ref> [--json]
-  hitch models connect --name <name> --file <endpoint.json>
+  hitch models connect --name <name> --file <endpoint.json> [--persist-credential]
   hitch models add <checkpoint-directory> --name <name> [--force] [--json]
   hitch models inspect <endpoint/name|local/name> [--verify] [--json]
   hitch models gc [--dry-run | --apply] [--json]
@@ -104,7 +104,7 @@ Usage:
       [--model-capture off|native|proxy|hybrid] [--require-model-capture]
   hitch eval watch <eval-id> [--output json|jsonl]
   hitch eval cancel <eval-id>
-  hitch eval rerun <eval-id> (--invalid | --task <name> [--task <name> ...]) [--type <type>] [--verifier-runtime <sha256:id>] [--daemon] [--rerun-id <id>] [--output json]
+  hitch eval rerun <eval-id> (--invalid | --task <name> [--task <name> ...]) [--type <type>] [--verifier-runtime <sha256:id>] [--daemon] [--rerun-id <id>] [--endpoint-attempt-file <ready-attempt.json>] [--control-file <intent.json>] [--output json]
   hitch eval rerun-cancel <eval-id> <rerun-id>
   hitch eval list [--json]
   hitch eval inspect <eval-id> [--json]

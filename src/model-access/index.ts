@@ -13,5 +13,6 @@ export { scrubLocalInferenceEnvironment } from "./environment.js";
 
 export { parseEndpointConfig, parseEndpointBinding, parseReadyEndpointBinding, publicEndpointBinding, parseGeneration, endpointRequest } from "./endpoint-contract.js";
 export { freezeEndpointSubmission, connectEndpoint, resolveEndpoint, loadFrozenEndpoint, endpointCredential, freezeEndpointRequest, assertEndpointHarness, saveEndpointVerification, requireEndpointVerification } from "./endpoints.js";
+export { persistEndpointCredential } from "./endpoint-credentials.js";
 export { verifyEndpoint } from "./endpoint-verification.js";
 export { aggregateModelUsage } from "./usage.js";

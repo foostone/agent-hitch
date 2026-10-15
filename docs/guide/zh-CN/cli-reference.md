@@ -129,6 +129,7 @@ hitch run --harness HARNESS_REF [--prompt TEXT | --prompt-file PATH] [RUN_OPTION
 | 命令 / 参数 | 用途与说明 |
 | --- | --- |
 | `--type TYPE` | 默认 `candidate-restart`；`collect-only` 只补收已完成证据。`verifier-only` 要求受支持的保留产物。`candidate-resume`、`trajectory-replay` 依赖尚不具备的检查点/适配能力，可能被拒绝。 |
+| `--endpoint-attempt-file READY_ATTEMPT.json` | 配合 `--daemon --invalid --type candidate-restart` 冻结新的端点绑定及父 attempt，保留有效槽位与所有实际成本。 |
 | `--verifier-runtime SHA256` | 仅用于 `--type verifier-only`，指定精确 Verifier 运行时。 |
 | `--daemon`, `--rerun-id RERUN_ID` | 使用 daemon 修复；显式修复 ID 要求 daemon 模式。已有控制面评测也会路由到 daemon。 |
 | `--harbor PATH` | 仅用于直接修复，不可与 daemon 修复组合。 |
@@ -164,7 +165,7 @@ hitch run --harness HARNESS_REF [--prompt TEXT | --prompt-file PATH] [RUN_OPTION
 
 | Command / options | Purpose |
 | --- | --- |
-| `hitch models connect --name NAME --file ENDPOINT.json [--json]` | Save an immutable connection revision and update its alias; no deployment. |
+| `hitch models connect --name NAME --file ENDPOINT.json [--persist-credential] [--json]` | Save an immutable connection revision and update its alias; no deployment. |
 | `hitch models inspect MODEL [--verify] [--json]` | Inspect endpoint/name or local/name; endpoint verification probes text, SSE and declared tool capabilities. |
 | `hitch models add DIRECTORY --name NAME [--force] [--json]` | Import a complete safetensors model artifact. |
 | `hitch models gc [--dry-run] [--apply] [--json]` | Inspect or apply local artifact garbage collection. |
@@ -312,3 +313,5 @@ hitch feedback delete RUN_ID --message MESSAGE_ID [--if-version VERSION] [--json
 本页覆盖用户命令路径与参数。`--internal-*` 保留给 Hitch 的 Harbor 桥接，在该上下文之外会被拒绝。JSON 集成文件需符合[带版本的 Schema](../../schemas)，不能任意添加字段。确认版本差异时，结合 `hitch --version`、`hitch capabilities --json` 与源码版本检查。
 
 ## 独立推理副本池
+
+`--persist-credential` explicitly imports the endpoint environment secret into revision-scoped private host storage (0600), so existing/restarted daemons can resolve later incarnation keys. Same-revision secret replacement is rejected; public bindings and tasks retain no secret value.

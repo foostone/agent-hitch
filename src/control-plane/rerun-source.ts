@@ -1,6 +1,6 @@
 import path from "node:path";
 import type { EvalId, EvalRequest, EvalExecutionPolicyV1, ExecutionProviderStatusV1, ModelCapturePlanV1, ResourceVectorV1 } from "../domain/index.js";
-import { assertRemoteRerunQuiescent, parseEvalExecutionPlan } from "../evals/index.js";
+import { assertRemoteRerunQuiescent, parseEvalExecutionPlan, readEndpointEvaluationAttempts } from "../evals/index.js";
 import type { EvalRerunType } from "../evals/index.js";
 import { HitchError, readJSON, statePaths } from "../foundation/index.js";
 import { defaultEvalExecutionPolicy, isTerminalControl, parseEvalControl, parseEvalSubmission } from "./eval-records.js";
@@ -9,6 +9,7 @@ import type { RemoteWorkCoordinator } from "./remote-work-coordinator.js";
 
 export async function loadRerunSource(input: {
   root: string; evalId: EvalId; rerunType: EvalRerunType; localProvider: string;
+  endpointAttempt?: import("../evals/index.js").EndpointEvaluationAttemptV1;
   trialResources: ResourceVectorV1; localStatus: ExecutionProviderStatusV1; remoteWork?: RemoteWorkCoordinator;
 }): Promise<{ request: EvalRequest; execution: EvalExecutionPolicyV1; modelCapturePlan?: ModelCapturePlanV1 }> {
   const directory = path.join(statePaths(input.root).evals, input.evalId);
@@ -21,7 +22,9 @@ export async function loadRerunSource(input: {
   const submission = await parseEvalSubmission(submissionValue, input.evalId), control = parseEvalControl(controlValue);
   if (control.eval_id !== input.evalId) throw new TypeError("eval control identity does not match its directory");
   if (!isTerminalControl(control.state) || !result) throw new HitchError("eval rerun requires a terminal source eval", { code: "eval_rerun_source_not_terminal", exitCode: 12 });
-  if (control.state === "cancelled" || result.status === "cancelled") throw new HitchError("cancelled eval cannot be rerun", { code: "eval_rerun_cancelled", exitCode: 12 });
+  if ((control.state === "cancelled" || result.status === "cancelled") && !input.endpointAttempt) throw new HitchError("cancelled eval cannot be rerun", { code: "eval_rerun_cancelled", exitCode: 12 });
+  if (input.rerunType === "candidate-restart" && submission.request.endpoint_binding && !input.endpointAttempt
+    && (await readEndpointEvaluationAttempts(directory, submission.request)).length > 1) throw new HitchError("candidate restart must name the current immutable endpoint attempt", { code: "eval_endpoint_attempt_required", exitCode: 12 });
   if (submission.request.training_binding) throw new HitchError("training slots are repaired by the frozen Gear batch coordinator", { code: "training_rerun_fenced", exitCode: 12 });
   let execution = submission.execution || defaultEvalExecutionPolicy(submission.request, { provider: input.localProvider, trialResources: input.trialResources, buildMode: "backend" });
   const remote = execution.provider !== input.localProvider;

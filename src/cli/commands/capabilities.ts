@@ -12,6 +12,8 @@ export function capabilitiesCommand(args: string[]): void {
     verifier_diagnostic_pages: "1",
     training_external_binding: "1",
     external_endpoint_binding: "1",
+    endpoint_evaluation_attempts: "1",
+    endpoint_host_credentials: "1",
     endpoint_harnesses: ["codex", "model-call", "training-tool"],
     exact_policy_tokens: "1",
     training_policy_fencing: "1",

@@ -136,7 +136,7 @@ and resource admission; it is not a speed or cost comparison against native Harb
 
 ## Local and remote model inference
 
-Connect already deployed APIs with `hitch models connect --name coder --file ENDPOINT.json`, verify with `hitch models inspect endpoint/coder --verify --json`, then use `--model endpoint/coder` for run/eval. Submissions freeze revisions and generation parameters. Tasks share services and cancel only their own requests. See the [model inference guide](docs/guide/en/model-inference.md) and [pinned upstream deployment examples](examples/external-inference/README.md).
+Connect already deployed APIs with `hitch models connect --name coder --file ENDPOINT.json`, verify with `hitch models inspect endpoint/coder --verify --json`, then use `--model endpoint/coder` for run/eval. Submissions freeze revisions and generation parameters. `models connect --persist-credential` explicitly hands a revision-scoped credential to an existing daemon through private host storage. A recovered deployment uses `eval rerun --invalid --endpoint-attempt-file READY_ATTEMPT.json` with a stable rerun ID and parent attempt, preserving valid observations and cumulative cost. Tasks share services and cancel only their own requests. See the [model inference guide](docs/guide/en/model-inference.md) and [pinned upstream deployment examples](examples/external-inference/README.md).
 
 ## Parallel execution and recovery
 

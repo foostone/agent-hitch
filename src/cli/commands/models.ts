@@ -1,14 +1,16 @@
 import { invalidInput, readJSON } from "../../foundation/index.js";
 import { addLocalModel, gcLocalModels, resolveLocalModel, verifyLocalModel } from "../../inference/index.js";
-import { connectEndpoint, resolveEndpoint, publicEndpointBinding, verifyEndpoint, saveEndpointVerification } from "../../model-access/index.js";
+import { connectEndpoint, resolveEndpoint, publicEndpointBinding, verifyEndpoint, saveEndpointVerification, persistEndpointCredential } from "../../model-access/index.js";
 import { assertNoArgs, takeFlag, takeOption } from "../arguments.js";
 
 export async function modelsCommand(args: string[], root: string): Promise<void> {
   const action = args.shift();
   if (action === "connect") {
-    const name = takeOption(args, "--name"), file = takeOption(args, "--file"); takeFlag(args, "--json"); assertNoArgs(args);
+    const name = takeOption(args, "--name"), file = takeOption(args, "--file"), persistCredential = takeFlag(args, "--persist-credential"); takeFlag(args, "--json"); assertNoArgs(args);
     if (!name || !file) throw invalidInput("models connect requires --name NAME --file ENDPOINT.json");
-    process.stdout.write(`${JSON.stringify(await connectEndpoint(root, name, await readJSON(file)), null, 2)}\n`); return;
+    const connected = await connectEndpoint(root, name, await readJSON(file));
+    if (persistCredential) await persistEndpointCredential(root, await resolveEndpoint(root, `endpoint/${name}@${connected.endpoint_revision}`));
+    process.stdout.write(`${JSON.stringify(connected, null, 2)}\n`); return;
   }
   if (action === "add") {
     const directory = args.shift(), name = takeOption(args, "--name"), force = takeFlag(args, "--force"), json = takeFlag(args, "--json"); assertNoArgs(args);

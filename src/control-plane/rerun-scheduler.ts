@@ -4,6 +4,7 @@ import path from "node:path";
 import type { EvalExecutionPolicyV1, EvalId, EvalRequest, ModelCapturePlanV1, ResourceVectorV1 } from "../domain/index.js";
 import {
   assertEvalRerunTypeSupported,
+  admitEndpointEvaluationAttempt, endpointAttemptRequest,
   acknowledgeRemoteRerunCompletion,
   assertRemoteRerunQuiescent,
   readRemoteRerunCompletion,
@@ -34,6 +35,7 @@ export interface EvalRerunSubmissionInput {
   rerun_id?: string;
   rerun_type?: EvalRerunType;
   verifier_runtime_id?: string;
+  endpoint_attempt?: import("../evals/index.js").EndpointEvaluationAttemptV1;
   selector: RerunSelector;
 }
 
@@ -61,6 +63,7 @@ interface QueuedRerun {
   rerunId: string;
   rerunType: EvalRerunType;
   verifierRuntimeId?: string;
+  endpointAttempt?: import("../evals/index.js").EndpointEvaluationAttemptV1;
   selector: RerunSelector;
   request: EvalRequest;
   execution: EvalExecutionPolicyV1;
@@ -135,7 +138,7 @@ export class EvalRerunScheduler {
       const existing = await readJSON<Record<string, unknown> | null>(path.join(directory, "submission.json"), null);
       if (existing) {
         const parsed = parsePersistedSubmission(existing, evalId, rerunId);
-        if (parsed.rerun_type !== input.rerun_type || parsed.verifier_runtime_id !== input.verifier_runtime_id || JSON.stringify(parsed.selector) !== JSON.stringify(input.selector)) {
+        if (parsed.rerun_type !== input.rerun_type || parsed.verifier_runtime_id !== input.verifier_runtime_id || sha256JSON(parsed.endpoint_attempt ?? null) !== sha256JSON(input.endpoint_attempt ?? null) || JSON.stringify(parsed.selector) !== JSON.stringify(input.selector)) {
           throw new HitchError("rerun identity already belongs to a different request", { code: "idempotency_conflict", exitCode: 12 });
         }
         return { evalId, rerunId, rerunType: input.rerun_type };
@@ -145,13 +148,16 @@ export class EvalRerunScheduler {
   }
 
   private async submitNew(evalId: EvalId, rerunId: string, input: ParsedRerunInput): Promise<{ evalId: EvalId; rerunId: string; rerunType: EvalRerunType }> {
-    const source = await this.loadSource(evalId, input.rerun_type);
+    const source = await this.loadSource(evalId, input.rerun_type, input.endpoint_attempt);
+    if (input.endpoint_attempt && source.execution.provider !== this.provider) throw new HitchError("endpoint recovery currently requires the original local task provider", { code: "eval_endpoint_recovery_provider_unsupported", exitCode: 12 });
     if (!this.resources.canEverFit(rerunResourceUnit(input.rerun_type, source.execution.resources.default_trial, source.execution.provider !== this.provider))) {
       throw new HitchError("one rerun trial exceeds the daemon resource capacity", { code: "resource_request_unsatisfiable", exitCode: 10 });
     }
     const directory = path.join(this.rerunsRoot, evalId, "reruns", rerunId);
-    const entry = await this.queuedEntry(evalId, rerunId, input.rerun_type, input.selector, source.request, source.execution, source.modelCapturePlan, directory);
+    if (input.endpoint_attempt) await admitEndpointEvaluationAttempt(this.root, path.dirname(path.dirname(directory)), source.request, input.endpoint_attempt, rerunId);
+    const entry = await this.queuedEntry(evalId, rerunId, input.rerun_type, input.selector, endpointAttemptRequest(source.request, input.endpoint_attempt), source.execution, source.modelCapturePlan, directory);
     if (input.verifier_runtime_id) entry.verifierRuntimeId = input.verifier_runtime_id;
+    if (input.endpoint_attempt) entry.endpointAttempt = input.endpoint_attempt;
     await ensureDir(path.dirname(directory));
     await mkdir(directory, { recursive: true, mode: 0o700 });
     const submittedAt = new Date().toISOString();
@@ -161,6 +167,7 @@ export class EvalRerunScheduler {
         rerun_id: rerunId,
         eval_id: evalId,
         rerun_type: input.rerun_type,
+        ...(input.endpoint_attempt ? { endpoint_attempt: input.endpoint_attempt } : {}),
         ...(input.verifier_runtime_id ? { verifier_runtime_id: input.verifier_runtime_id } : {}),
         semantics: evalRerunSemantics(input.rerun_type),
         selector: serializedSelector(input.selector),
@@ -211,8 +218,8 @@ export class EvalRerunScheduler {
     });
   }
 
-  private async serialize<T>(evalId: EvalId, rerunId: string, action: () => Promise<T>): Promise<T> {
-    const key = operationKey(evalId, rerunId);
+  private async serialize<T>(evalId: EvalId, _rerunId: string, action: () => Promise<T>): Promise<T> {
+    const key = evalId;
     const previous = this.mutations.get(key) ?? Promise.resolve();
     const current = previous.catch(() => {}).then(action);
     this.mutations.set(key, current);
@@ -339,6 +346,7 @@ export class EvalRerunScheduler {
       evalId: entry.evalId,
       rerunId: entry.rerunId,
       rerunType: entry.rerunType,
+      ...(entry.endpointAttempt ? { endpointAttempt: entry.endpointAttempt } : {}),
       ...(entry.verifierRuntimeId ? { verifierRuntimeId: entry.verifierRuntimeId } : {}),
       selector: entry.selector,
       root: this.root,
@@ -410,8 +418,8 @@ export class EvalRerunScheduler {
     await atomicWriteJSON(file, next);
   }
 
-  private async loadSource(evalId: EvalId, rerunType: EvalRerunType) {
-    return loadRerunSource({ root: this.root, evalId, rerunType, localProvider: this.provider, trialResources: this.trialResources,
+  private async loadSource(evalId: EvalId, rerunType: EvalRerunType, endpointAttempt?: import("../evals/index.js").EndpointEvaluationAttemptV1) {
+    return loadRerunSource({ root: this.root, evalId, rerunType, ...(endpointAttempt ? { endpointAttempt } : {}), localProvider: this.provider, trialResources: this.trialResources,
       localStatus: localProviderStatusSnapshot({ workerId: this.workerId, provider: this.provider,
         collisionDomainId: this.collisionDomainId, accepting: this.accepting, resources: this.resources }),
       ...(this.remoteWork ? { remoteWork: this.remoteWork } : {}),
@@ -435,13 +443,14 @@ export class EvalRerunScheduler {
   private async recoverInterrupted(): Promise<void> {
     await recoverPersistedReruns({ root: this.root, rerunsRoot: this.rerunsRoot, localProvider: this.provider,
       ...(this.remoteWork ? { remoteWork: this.remoteWork } : {}),
-      loadSource: (evalId, type) => this.loadSource(evalId, type), onEvent: this.onEvent,
+      loadSource: (evalId, type, attempt) => this.loadSource(evalId, type, attempt), onEvent: this.onEvent,
       fail: (identity, code, message) => this.fail(identity, code, message),
       complete: (identity, result, sourceDigest) => this.complete(identity, result, sourceDigest),
       enqueue: async (identity, parsed, source, resume) => {
         const queued = await this.queuedEntry(identity.evalId, identity.rerunId, parsed.rerun_type, parsed.selector,
-          source.request, source.execution, source.modelCapturePlan, identity.directory);
+          endpointAttemptRequest(source.request, parsed.endpoint_attempt), source.execution, source.modelCapturePlan, identity.directory);
         if (parsed.verifier_runtime_id) queued.verifierRuntimeId = parsed.verifier_runtime_id;
+        if (parsed.endpoint_attempt) queued.endpointAttempt = parsed.endpoint_attempt;
         if (resume) queued.resumeRemoteRerun = true;
         this.queue.push(queued);
       },

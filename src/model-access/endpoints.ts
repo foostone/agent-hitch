@@ -1,4 +1,5 @@
 import { chmod } from "node:fs/promises";
+import { restoreEndpointCredential, persistedEndpointCredential } from "./endpoint-credentials.js";
 import path from "node:path";
 import type { EndpointVerificationV1, ExternalEndpointBindingV1, ExternalEndpointConfigV1, ReadyEndpointBindingV1 } from "../domain/index.js";
 import { atomicWriteJSON, ensureDir, HitchError, invalidInput, readJSON, sha256JSON, statePaths, withFileLock } from "../foundation/index.js";
@@ -26,17 +27,17 @@ export async function resolveEndpoint(root: string, reference: string, generatio
   if (!revision || !/^sha256:[a-f0-9]{64}$/.test(revision)) throw invalidInput(`endpoint is not registered: ${reference}`);
   const config = parseEndpointConfig(await readJSON(configFile(root, revision)));
   if (sha256JSON(config) !== revision) throw invalidInput("stored endpoint revision has changed");
-  return { schema_version: "1", kind: "external-endpoint", endpoint_ref: reference, endpoint_revision: revision as ExternalEndpointBindingV1["endpoint_revision"],
+  return restoreEndpointCredential(root, { schema_version: "1", kind: "external-endpoint", endpoint_ref: reference, endpoint_revision: revision as ExternalEndpointBindingV1["endpoint_revision"],
     api: config.api, wire_model: config.wire_model, capabilities: config.capabilities, generation: parseGeneration(generation),
-    connection: { base_url: config.base_url, auth: config.auth } };
+    connection: { base_url: config.base_url, auth: config.auth } });
 }
 export async function loadFrozenEndpoint(root: string, binding: ExternalEndpointBindingV1): Promise<ReadyEndpointBindingV1> {
   const publicBinding = parseEndpointBinding(binding), config = parseEndpointConfig(await readJSON(configFile(root, binding.endpoint_revision)));
-  return parseReadyEndpointBinding({ ...publicBinding, connection: { base_url: config.base_url, auth: config.auth } });
+  return restoreEndpointCredential(root, parseReadyEndpointBinding({ ...publicBinding, connection: { base_url: config.base_url, auth: config.auth } }));
 }
 export function endpointCredential(ready: ReadyEndpointBindingV1, env: NodeJS.ProcessEnv = process.env): string | undefined {
   if (ready.connection.auth.kind === "none") return undefined;
-  const value = env[ready.connection.auth.name];
+  const value = persistedEndpointCredential(ready) ?? env[ready.connection.auth.name];
   if (!value || /[\r\n\0]/.test(value)) throw new HitchError(`endpoint credential environment variable is unavailable: ${ready.connection.auth.name}`, { code: "endpoint_credential_missing", exitCode: 2 });
   return value;
 }
@@ -48,7 +49,7 @@ export async function freezeEndpointRequest<T extends { model?: unknown; harness
   }
   let ready: ReadyEndpointBindingV1;
   if (request.model_binding) {
-    ready = parseReadyEndpointBinding(request.model_binding);
+    ready = await restoreEndpointCredential(root, parseReadyEndpointBinding(request.model_binding));
     if (request.generation !== undefined && sha256JSON(parseGeneration(request.generation)) !== sha256JSON(ready.generation)) throw invalidInput("generation conflicts with ready endpoint binding");
   } else if (request.endpoint_binding) ready = await loadFrozenEndpoint(root, parseEndpointBinding(request.endpoint_binding));
   else ready = await resolveEndpoint(root, request.model as string, request.generation);

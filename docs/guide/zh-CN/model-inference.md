@@ -53,6 +53,20 @@ Gear 使用 `--model-binding-file READY.json` 提交就绪绑定：公共字段�
 
 公开回执的 service_config 只接受 engine/version/digest、量化、解析器、tokenizer/template 摘要、缓存、隔离和 parsing 配置；连接 URL、秘密字段与候选路由身份不能混入公共条件。严格候选证据由 Gear 校验可信回执来源与不可变 HF snapshot digest。
 
+显式恢复新的部署实例时，使用关联 attempt，不能覆盖原 request 或 plan：
+
+```bash
+hitch eval rerun EVAL_ID --daemon --invalid --type candidate-restart \
+  --rerun-id rerun_STABLE32HEX --endpoint-attempt-file READY_ATTEMPT.json \
+  --control-file ORDERED_INTENT.json
+```
+
+私有输入含 `schema_version: "1"`、`id`、`parent_id` 和带 connection 的就绪 `endpoint_binding`。`id` 为 `endpoint_attempt_` 加公共 binding 规范 SHA-256 的前 32 个十六进制字符。CLI 校验连接后只向 daemon 传公共投影。模型回执、协议、能力、生成参数及公共引擎条件必须相同；新 binding、父 attempt 和无效槽位选择在任务 admission 前冻结。原 request/plan 字节不变，只执行缺失或无效槽位，有效零分及所有实际费用 publication 保留；`eval inspect` 展示 attempt 链。
+
+首版只支持原 local 任务 provider，可连接远端 GPU；独立 remote-worker 的跨实例修复明确失败。暂停后的 ordered eval 需要更高序号 start，不能靠新 attempt 绕过。旧 repair 活跃或状态不明时阻止新 admission 与服务释放。每次物理 repair 用稳定 rerun ID，丢失响应后协调该 ID，不透明重放生成，也不管理模型服务。
+
+受管实例每次可能生成新的认证引用。`models connect --persist-credential` 显式把当前环境中的引用值保存为按不可变 revision 区分的宿主私有 0600 文件。已启动的 daemon 及以后重启可读取该凭据；同一 revision 替换秘密值会被拒绝。公共 binding、日志和任务包不保存上游密钥。
+
 ## Harbor 与远程 Worker
 
 完成[评测准备](evaluations.md)后使用相同模型引用：

@@ -20,7 +20,7 @@ Save a private connection file. `base_url` is the API root, including any path p
 }
 ```
 
-Use `{"kind":"none"}` for an explicitly unauthenticated service. Secret values belong in the environment of the process that calls upstream. They do not belong in this file. Start a daemon with that environment; exporting a key in another shell does not update an existing daemon.
+Use `{"kind":"none"}` for an explicitly unauthenticated service. Secret values belong in the environment of the process that calls upstream. They do not belong in this file. Start a daemon with that environment, or explicitly pass `--persist-credential` to `models connect`. The latter imports the referenced environment value into a host-only mode-0600 file keyed by immutable endpoint revision. An already running daemon and later restarts can resolve it without receiving a new environment. Replacing the secret of that revision fails; a new incarnation needs a new revision. Public bindings and task packages never include the secret.
 
 ```bash
 hitch models connect --name coder --file ENDPOINT.json
@@ -50,6 +50,18 @@ Each connection has a content-addressed revision. Reconnecting an alias affects 
 Connection URL/auth references live in the private registry. Public requests, plans, work specs and results contain the frozen public projection. Credentials are resolved by the forwarding controller, never packaged for the Harness. The existing task-scoped TypeScript proxy provides authentication, forwarding, cancellation and capture; it does not load, schedule or stop a model service.
 
 For Gear, `--model-binding-file READY.json` accepts the public binding plus an input-only `connection` and optional `deployment_receipt`. The revision hashes normalized `schema_version/base_url/wire_model/api/auth/capabilities`; generation is frozen separately. Importing this file stores the immutable revision without repointing the alias. Public receipt `service_config` only accepts engine/version/digest, quantization, parsers, tokenizer/template digests, cache, isolation and parsing settings. Connection URLs, secret fields and candidate routing identities are rejected there. Gear must trust the receipt source and match its immutable HF snapshot digest before admitting strict candidate evidence.
+
+For an explicitly recovered deployment, use a linked endpoint attempt rather than changing the original request:
+
+```bash
+hitch eval rerun EVAL_ID --daemon --invalid --type candidate-restart \
+  --rerun-id rerun_STABLE32HEX --endpoint-attempt-file READY_ATTEMPT.json \
+  --control-file ORDERED_INTENT.json
+```
+
+The private input has `schema_version: "1"`, `id`, `parent_id` and `endpoint_binding` (a ready binding including its connection). `id` is `endpoint_attempt_` plus the first 32 hex characters of the canonical public-binding SHA-256. The CLI verifies and removes the connection before daemon admission. The source's model receipt, protocol, capabilities, generation and public engine conditions must match. The new binding, parent and invalid-slot selection are frozen before admission; original request/plan files remain byte-identical. Only missing/invalid slots execute. Valid zero rewards and all canonical cost publications remain. `eval inspect` exposes the attempt lineage.
+
+This first release supports the original local task provider, including local Docker tasks connected to a remote model. Independent remote-worker endpoint repair fails explicitly. A paused ordered evaluation requires a higher-sequence start; the attempt option cannot bypass that fence. Unknown or active old repairs block admission and service release. Every physical repair has a stable rerun identity; retrying a lost response reconciles that identity. Hitch does not transparently replay a generation or manage model services.
 
 ## Reach the model from a Docker evaluation
 

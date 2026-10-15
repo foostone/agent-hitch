@@ -15,7 +15,7 @@ type Source = Awaited<ReturnType<typeof loadRerunSource>>;
 
 export async function recoverPersistedReruns(input: {
   root: string; rerunsRoot: string; localProvider: string; remoteWork?: RemoteWorkCoordinator;
-  loadSource(evalId: EvalId, type: EvalRerunType): Promise<Source>;
+  loadSource(evalId: EvalId, type: EvalRerunType, endpointAttempt?: import("../evals/index.js").EndpointEvaluationAttemptV1): Promise<Source>;
   enqueue(identity: Identity, parsed: ParsedRerunInput, source: Source, resume: boolean): Promise<void>;
   fail(identity: Identity, code: string, message: string): Promise<void>;
   complete(identity: Identity, result: EvalRerunResult, sourceDigest: string): Promise<void>;
@@ -66,7 +66,7 @@ export async function recoverPersistedReruns(input: {
             cancelRequested: cancelled, emit: event => sink.emit({ ...event, rerun_id: entry.name }) }).finally(() => sink.close());
           if (recovered.status !== "resumable") throw new HitchError(recovered.message ?? "remote lease recovery is ambiguous", { code: recovered.code ?? "execution_state_ambiguous", exitCode: 12 });
           await assertRemoteRerunQuiescent(evalDirectory, source.execution.provider);
-        } else if (!cancelled) source = await input.loadSource(evalId, parsed.rerun_type);
+        } else if (!cancelled) source = await input.loadSource(evalId, parsed.rerun_type, parsed.endpoint_attempt);
         if (cancelled) {
           await atomicWriteJSON(path.join(directory, "state.json"), { ...state, status: "cancelled", updated_at: new Date().toISOString(), completed_at: new Date().toISOString() });
           continue;

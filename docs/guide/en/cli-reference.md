@@ -129,6 +129,7 @@ These options require `eval run --daemon` or `eval submit`.
 | Command / options | Purpose and notes |
 | --- | --- |
 | `--type TYPE` | Default `candidate-restart`; `collect-only` imports completed evidence without executing the candidate. `verifier-only` needs supported retained artifacts. `candidate-resume` and `trajectory-replay` require unavailable checkpoint/adapter prerequisites and may be rejected. |
+| `--endpoint-attempt-file READY_ATTEMPT.json` | With `--daemon --invalid --type candidate-restart`; freeze a new endpoint binding and parent attempt, retaining valid slots and all actual cost. |
 | `--verifier-runtime SHA256` | Only with `--type verifier-only`; selects an exact verifier runtime. |
 | `--daemon`, `--rerun-id RERUN_ID` | Use daemon recovery; explicit rerun IDs require daemon mode. Existing control-plane evaluations also route through the daemon. |
 | `--harbor PATH` | Direct rerun only; incompatible with daemon recovery. |
@@ -164,7 +165,7 @@ External model APIs use frozen endpoint bindings. Local model storage remains an
 
 | Command / options | Purpose |
 | --- | --- |
-| `hitch models connect --name NAME --file ENDPOINT.json [--json]` | Save an immutable connection revision and update its alias; no deployment. |
+| `hitch models connect --name NAME --file ENDPOINT.json [--persist-credential] [--json]` | Save an immutable connection revision and update its alias; no deployment. |
 | `hitch models inspect MODEL [--verify] [--json]` | Inspect endpoint/name or local/name; endpoint verification probes text, SSE and declared tool capabilities. |
 | `hitch models add DIRECTORY --name NAME [--force] [--json]` | Import a complete safetensors model artifact. |
 | `hitch models gc [--dry-run] [--apply] [--json]` | Inspect or apply local artifact garbage collection. |
@@ -310,3 +311,5 @@ These commands connect evaluation episodes to a training system. Use `--training
 ## Compatibility and internal options
 
 This reference covers user-facing command paths and options. `--internal-*` options are reserved for Hitch’s Harbor bridge and are rejected outside that context. JSON integration files must match the [versioned schemas](../../schemas); they are not arbitrary configuration bags. For release differences, compare `hitch --version` and `hitch capabilities --json` with the source checkout.
+
+`--persist-credential` explicitly imports the endpoint environment secret into revision-scoped private host storage (0600), so existing/restarted daemons can resolve later incarnation keys. Same-revision secret replacement is rejected; public bindings and tasks retain no secret value.

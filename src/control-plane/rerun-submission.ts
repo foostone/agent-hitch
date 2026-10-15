@@ -1,9 +1,9 @@
 import type { EvalId } from "../domain/index.js";
-import { evalRerunSemantics, parseEvalRerunType } from "../evals/index.js";
+import { evalRerunSemantics, parseEvalRerunType, parseEndpointEvaluationAttempt } from "../evals/index.js";
 import type { EvalRerunType, RerunSelector } from "../evals/index.js";
 import { invalidInput } from "../foundation/index.js";
 
-export type ParsedRerunInput = { rerun_id?: string; rerun_type: EvalRerunType; verifier_runtime_id?: string; selector: RerunSelector };
+export type ParsedRerunInput = { rerun_id?: string; rerun_type: EvalRerunType; verifier_runtime_id?: string; endpoint_attempt?: import("../evals/index.js").EndpointEvaluationAttemptV1; selector: RerunSelector };
 
 export function validateRerunId(value: string): void {
   if (!/^rerun_[a-f0-9]{32}$/.test(value)) throw invalidInput("eval rerun id is invalid");
@@ -12,7 +12,7 @@ export function validateRerunId(value: string): void {
 export function parseEvalRerunSubmissionInput(value: unknown): ParsedRerunInput {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw invalidInput("eval rerun request must be an object");
   const input = value as Record<string, unknown>;
-  if (Object.keys(input).some((key) => key !== "rerun_type" && key !== "selector" && key !== "rerun_id" && key !== "verifier_runtime_id")) throw invalidInput("eval rerun request has unknown fields");
+  if (Object.keys(input).some((key) => key !== "rerun_type" && key !== "selector" && key !== "rerun_id" && key !== "verifier_runtime_id" && key !== "endpoint_attempt")) throw invalidInput("eval rerun request has unknown fields");
   if (input.rerun_id !== undefined) {
     if (typeof input.rerun_id !== "string") throw invalidInput("eval rerun id is invalid");
     validateRerunId(input.rerun_id);
@@ -20,19 +20,20 @@ export function parseEvalRerunSubmissionInput(value: unknown): ParsedRerunInput 
   const rerunType = parseEvalRerunType(input.rerun_type ?? "candidate-restart");
   if (input.verifier_runtime_id !== undefined && (rerunType !== "verifier-only" || typeof input.verifier_runtime_id !== "string"
     || !/^sha256:[a-f0-9]{64}$/.test(input.verifier_runtime_id))) throw invalidInput("verifier runtime requires verifier-only and an exact digest");
-  return { ...(input.rerun_id === undefined ? {} : { rerun_id: input.rerun_id as string }),
+  if (input.endpoint_attempt !== undefined && (rerunType !== "candidate-restart" || (input.selector as { mode?: unknown })?.mode !== "invalid")) throw invalidInput("endpoint attempts require candidate-restart --invalid");
+  return { ...(input.endpoint_attempt === undefined ? {} : { endpoint_attempt: parseEndpointEvaluationAttempt(input.endpoint_attempt) }), ...(input.rerun_id === undefined ? {} : { rerun_id: input.rerun_id as string }),
     ...(input.verifier_runtime_id === undefined ? {} : { verifier_runtime_id: input.verifier_runtime_id as string }),
     rerun_type: rerunType, selector: parseSelector(input.selector) };
 }
 
 export function parsePersistedSubmission(value: Record<string, unknown>, evalId: EvalId, rerunId: string): ParsedRerunInput {
-  const allowed = new Set(["schema_version", "rerun_id", "eval_id", "rerun_type", "semantics", "selector", "submitted_at", "verifier_runtime_id"]);
+  const allowed = new Set(["schema_version", "rerun_id", "eval_id", "rerun_type", "semantics", "selector", "submitted_at", "verifier_runtime_id", "endpoint_attempt"]);
   if (value.schema_version !== "1" || value.eval_id !== evalId || value.rerun_id !== rerunId
     || Object.keys(value).some((key) => !allowed.has(key))
     || typeof value.submitted_at !== "string" || !Number.isFinite(Date.parse(value.submitted_at))) {
     throw new TypeError("eval rerun submission identity is invalid");
   }
-  const parsed = parseEvalRerunSubmissionInput({ rerun_type: value.rerun_type, selector: value.selector,
+  const parsed = parseEvalRerunSubmissionInput({ ...(value.endpoint_attempt === undefined ? {} : { endpoint_attempt: value.endpoint_attempt }), rerun_type: value.rerun_type, selector: value.selector,
     ...(value.verifier_runtime_id === undefined ? {} : { verifier_runtime_id: value.verifier_runtime_id }) });
   if (JSON.stringify(value.semantics) !== JSON.stringify(evalRerunSemantics(parsed.rerun_type))) {
     throw new TypeError("eval rerun submission semantics do not match rerun_type");
