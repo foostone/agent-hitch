@@ -1,145 +1,9 @@
-import { availableParallelism } from "node:os";
 import path from "node:path";
-import type {
-  InferenceLockV1,
-  InferenceRuntimeManifestV1,
-  LocalInferenceBackend,
-  LocalInferenceProfile,
-  LocalModelManifestV1,
-  ModelNodeBindingV2,
-  Sha256,
-} from "../domain/index.js";
-import { HitchError, atomicWriteJSON, readJSON, sha256JSON, statePaths } from "../foundation/index.js";
+import type { InferenceLockV1, InferencePoolTopologyV3, LocalInferenceBackend, Sha256 } from "../domain/index.js";
+import { HitchError, readJSON, sha256JSON, statePaths } from "../foundation/index.js";
 import { inferenceLockIdentity, parseModelNodeBinding } from "./manifest.js";
 
-export interface BuildInferenceLockOptions {
-  backend: Exclude<LocalInferenceBackend, "metal">;
-  profile: LocalInferenceProfile;
-  deviceConstraint?: string;
-  cpuThreads?: number;
-  api?: "responses" | "chat-completions";
-  modelNode?: ModelNodeBindingV2;
-}
-
-export function buildInferenceLock(
-  model: LocalModelManifestV1,
-  runtime: InferenceRuntimeManifestV1,
-  options: BuildInferenceLockOptions,
-): InferenceLockV1 {
-  if (runtime.backend !== options.backend || (runtime.package.kind !== "oci" && runtime.schema_version !== "2")) {
-    throw new TypeError("runtime backend does not match the lock request");
-  }
-  if (options.modelNode && (options.backend !== "cuda" || !options.deviceConstraint || runtime.schema_version !== "2"
-    || runtime.package.kind !== "python-env" || runtime.package.environment_digest !== options.modelNode.runtime_digest)) {
-    throw new TypeError("model node lock requires its observed Python CUDA runtime and explicit GPU");
-  }
-  if (model.dtype === "unknown") {
-    throw new HitchError("model config must declare torch_dtype", { code: "inference_model_unsupported", exitCode: 2 });
-  }
-  const throughput = options.profile === "throughput";
-  const context = Math.min(8_192, model.context_tokens ?? 8_192);
-  const maxRunning = throughput ? options.backend === "cuda" ? 8 : 2 : 1;
-  const weights = model.files.filter((file) => file.path.endsWith(".safetensors")).reduce((total, file) => total + file.size, 0);
-  const memoryBytes = Math.max(2 * 1024 ** 3, Math.ceil(weights * 1.25 + 1024 ** 3));
-  const parser = toolParserFor(model.model_type);
-  const cpuThreads = Math.max(1, Math.min(options.cpuThreads ?? availableParallelism(), 8));
-  const platform = options.backend === "cpu"
-    ? {
-      backend: "cpu" as const,
-      cpu_threads: cpuThreads,
-      numa_policy: "single-node" as const,
-      cpu_feature_requirement: "amx" as const,
-      overlap_schedule: false as const,
-    }
-    : {
-      backend: "cuda" as const,
-      ...(options.deviceConstraint ? { device_constraint: options.deviceConstraint } : {}),
-      mem_fraction_static: 0.8,
-      overlap_schedule: throughput,
-      cuda_graph: throughput ? "enabled" as const : "disabled" as const,
-    };
-  const withoutIdentity: Omit<InferenceLockV1, "inference_id"> = {
-    schema_version: options.modelNode ? "2" : "1",
-    ...(options.modelNode ? { model_node: parseModelNodeBinding(options.modelNode) } : {}),
-    engine: "sglang",
-    model_id: model.model_id,
-    runtime_id: runtime.runtime_id,
-    profile: options.profile,
-    execution: {
-      platform,
-      load_format: "safetensors",
-      dtype: model.dtype,
-      quantization: model.quantization,
-      tensor_parallel_size: 1,
-      data_parallel_size: 1,
-      pipeline_parallel_size: 1,
-      context_tokens_per_request: context,
-      max_running_requests: maxRunning,
-      max_queued_requests: maxRunning,
-      max_total_tokens: context * (maxRunning + 1),
-      chunked_prefill_size: throughput ? Math.min(4_096, context) : -1,
-      max_prefill_tokens: context,
-      kv_cache_dtype: model.dtype === "bfloat16" || model.dtype === "bf16" ? "bfloat16" : "auto",
-      attention_backend: options.backend === "cpu" ? "intel_amx" : "flashinfer",
-      sampling_backend: options.backend === "cpu" ? "pytorch" : "flashinfer",
-      deterministic_inference: false,
-      prefix_cache: {
-        mode: throughput ? "radix" : "disabled",
-        scope: "eval",
-        initial_state: "empty",
-      },
-      hicache: false,
-      speculative_decoding: false,
-      cpu_offload_gb: 0,
-      startup_timeout_ms: 600_000,
-      queue_timeout_ms: 60_000,
-      request_timeout_ms: 600_000,
-      idle_ttl_ms: 60_000,
-    },
-    generation: {
-      temperature: 0,
-      top_p: 1,
-      top_k: 0,
-      min_p: 0,
-      repetition_penalty: 1,
-      seed: 0,
-      max_output_tokens: Math.min(2_048, Math.max(1, Math.floor(context / 4))),
-      override_policy: "reject-conflicts",
-    },
-    protocol: {
-      api: options.api ?? "responses",
-      streaming: true,
-      tool_calls: parser !== null,
-      parallel_tool_calls: false,
-      input_modalities: ["text"],
-      tool_call_parser: parser,
-      reasoning_parser: null,
-      compatibility_profile_id: sha256JSON({
-        engine: "sglang",
-        runtime_id: runtime.runtime_id,
-        model_type: model.model_type,
-        template_digest: model.template_digest,
-        api: options.api ?? "responses",
-        tool_call_parser: parser,
-      }),
-    },
-    resources: {
-      cpu_millis: options.backend === "cpu" ? cpuThreads * 1_000 : 2_000,
-      memory_bytes: memoryBytes,
-      container_slots: options.modelNode ? 0 : 1,
-      build_slots: 0,
-      ...(options.backend === "cuda" ? { gpu_count: 1 } : {}),
-      ephemeral_disk_bytes: 4 * 1024 ** 3,
-    },
-  };
-  return { ...withoutIdentity, inference_id: inferenceLockIdentity(withoutIdentity) };
-}
-
-export async function persistInferenceLock(root: string, lock: InferenceLockV1): Promise<void> {
-  const directory = path.join(statePaths(root).inferenceLocks, lock.inference_id.slice("sha256:".length));
-  await atomicWriteJSON(path.join(directory, "lock.json"), lock);
-}
-
+/** Read historical locks without installing their former model runtime. */
 export async function loadInferenceLock(root: string, inferenceId: Sha256): Promise<InferenceLockV1> {
   let value: unknown;
   try {
@@ -155,19 +19,22 @@ export async function loadInferenceLock(root: string, inferenceId: Sha256): Prom
 }
 
 export function validateInferenceLockShape(value: unknown): InferenceLockV1 {
-  const record = exact(value, ["schema_version", "engine", "model_id", "runtime_id", "inference_id", "profile", "execution", "generation", "protocol", "resources", "model_node"], "inference lock");
-  if (!["1", "2"].includes(String(record.schema_version)) || record.engine !== "sglang"
+  const record = exact(value, ["schema_version", "engine", "model_id", "runtime_id", "inference_id", "profile", "execution", "generation", "protocol", "resources", "model_node", "topology"], "inference lock");
+  if (!["1", "2", "3"].includes(String(record.schema_version)) || record.engine !== "sglang"
     || !digest(record.model_id) || !digest(record.runtime_id) || !digest(record.inference_id)
     || (record.profile !== "baseline" && record.profile !== "throughput")) throw lockError("inference lock identity is invalid");
-  const execution = parseExecution(record.execution);
+  const execution = parseExecution(record.execution, record.schema_version === "3");
   const generation = parseGeneration(record.generation);
   const protocol = parseProtocol(record.protocol);
-  const modelNode = record.schema_version === "2" ? parseModelNodeBinding(record.model_node) : undefined;
+  const modelNode = record.schema_version !== "1" ? parseModelNodeBinding(record.model_node) : undefined;
   if (!modelNode && record.model_node !== undefined) throw lockError("legacy inference lock cannot contain a model node");
   if (modelNode && (execution.platform.backend !== "cuda" || !execution.platform.device_constraint)) throw lockError("model node requires an explicit physical CUDA device");
-  const resources = parseResources(record.resources, execution.platform.backend, !!modelNode);
+  const topology = record.schema_version === "3" ? parseInferencePoolTopology(record.topology, execution) : undefined;
+  if (!topology && record.topology !== undefined) throw lockError("legacy inference locks cannot contain a replica pool");
+  const gpuCount = topology ? topology.replicas.length * execution.tensor_parallel_size : 1;
+  const resources = parseResources(record.resources, execution.platform.backend, !!modelNode, gpuCount);
   const lock: InferenceLockV1 = {
-    schema_version: modelNode ? "2" : "1", ...(modelNode ? { model_node: modelNode } : {}), engine: "sglang", model_id: record.model_id, runtime_id: record.runtime_id,
+    schema_version: record.schema_version as InferenceLockV1["schema_version"], ...(topology ? { topology } : {}), ...(modelNode ? { model_node: modelNode } : {}), engine: "sglang", model_id: record.model_id, runtime_id: record.runtime_id,
     inference_id: record.inference_id, profile: record.profile, execution, generation, protocol, resources,
   };
   validateProfile(lock);
@@ -176,14 +43,35 @@ export function validateInferenceLockShape(value: unknown): InferenceLockV1 {
   return lock;
 }
 
-function parseExecution(value: unknown): InferenceLockV1["execution"] {
+function parseDevices(value: unknown): string[] {
+  if (!Array.isArray(value) || value.length === 0 || value.some(v => typeof v !== "string" || !/^GPU-[A-Za-z0-9-]+$/.test(v))
+    || new Set(value).size !== value.length) throw lockError("replica devices require unique physical GPU UUIDs");
+  return [...value] as string[];
+}
+
+export function parseInferencePoolTopology(value: unknown, execution?: InferenceLockV1["execution"]): InferencePoolTopologyV3 {
+  const record = exact(value, ["replicas", "routing", "max_running_requests", "max_queued_requests"], "inference pool");
+  if (record.routing !== "least-active" || !Array.isArray(record.replicas) || record.replicas.length === 0) throw lockError("invalid inference pool routing/replicas");
+  const replicas = record.replicas.map(value => ({ devices: parseDevices(exact(value, ["devices"], "inference replica").devices) }));
+  const tp = replicas[0]!.devices.length;
+  const devices = replicas.flatMap(r => r.devices);
+  if (replicas.some(r => r.devices.length !== tp) || new Set(devices).size !== devices.length) throw lockError("replicas must use disjoint equally sized TP groups");
+  const running = positiveInteger(record.max_running_requests, "pool running capacity");
+  const queued = nonNegativeInteger(record.max_queued_requests, "pool queue capacity");
+  if (execution && (execution.platform.backend !== "cuda" || execution.tensor_parallel_size !== tp
+    || JSON.stringify(execution.platform.device_constraints) !== JSON.stringify(replicas[0]!.devices)
+    || execution.platform.device_constraint !== replicas[0]!.devices[0] || running > replicas.length * execution.max_running_requests)) throw lockError("pool does not match per-engine execution capacity and TP placement");
+  return { replicas, routing: "least-active", max_running_requests: running, max_queued_requests: queued };
+}
+
+function parseExecution(value: unknown, pool: boolean): InferenceLockV1["execution"] {
   const record = exact(value, [
     "platform", "load_format", "dtype", "quantization", "tensor_parallel_size", "data_parallel_size", "pipeline_parallel_size",
     "context_tokens_per_request", "max_running_requests", "max_queued_requests", "max_total_tokens", "chunked_prefill_size",
     "max_prefill_tokens", "kv_cache_dtype", "attention_backend", "sampling_backend", "deterministic_inference", "prefix_cache",
     "hicache", "speculative_decoding", "cpu_offload_gb", "startup_timeout_ms", "queue_timeout_ms", "request_timeout_ms", "idle_ttl_ms",
   ], "inference execution");
-  if (record.load_format !== "safetensors" || record.tensor_parallel_size !== 1 || record.data_parallel_size !== 1
+  if (record.load_format !== "safetensors" || (pool ? !Number.isSafeInteger(record.tensor_parallel_size) || (record.tensor_parallel_size as number) < 1 : record.tensor_parallel_size !== 1) || record.data_parallel_size !== 1
     || record.pipeline_parallel_size !== 1 || typeof record.dtype !== "string" || !record.dtype
     || record.quantization !== null && (typeof record.quantization !== "string" || !record.quantization)
     || typeof record.deterministic_inference !== "boolean" || record.hicache !== false
@@ -204,13 +92,13 @@ function parseExecution(value: unknown): InferenceLockV1["execution"] {
     || (record.max_prefill_tokens as number) > (record.context_tokens_per_request as number)) {
     throw lockError("inference token budgets are inconsistent");
   }
-  const platform = parsePlatform(record.platform);
+  const platform = parsePlatform(record.platform, pool);
   return {
     platform,
     load_format: "safetensors",
     dtype: record.dtype,
     quantization: record.quantization as string | null,
-    tensor_parallel_size: 1, data_parallel_size: 1, pipeline_parallel_size: 1,
+    tensor_parallel_size: record.tensor_parallel_size as number, data_parallel_size: 1, pipeline_parallel_size: 1,
     context_tokens_per_request: record.context_tokens_per_request as number,
     max_running_requests: record.max_running_requests as number,
     max_queued_requests: record.max_queued_requests as number,
@@ -230,7 +118,7 @@ function parseExecution(value: unknown): InferenceLockV1["execution"] {
   };
 }
 
-function parsePlatform(value: unknown): InferenceLockV1["execution"]["platform"] {
+function parsePlatform(value: unknown, pool: boolean): InferenceLockV1["execution"]["platform"] {
   const base = exactRecord(value, "inference platform");
   if (base.backend === "cpu") {
     const record = exact(base, ["backend", "cpu_threads", "numa_policy", "cpu_feature_requirement", "overlap_schedule"], "CPU inference platform");
@@ -238,12 +126,12 @@ function parsePlatform(value: unknown): InferenceLockV1["execution"]["platform"]
     return { backend: "cpu", cpu_threads: positiveInteger(record.cpu_threads, "CPU inference threads"), numa_policy: "single-node", cpu_feature_requirement: "amx", overlap_schedule: false };
   }
   if (base.backend === "cuda") {
-    const record = exact(base, ["backend", "device_constraint", "mem_fraction_static", "overlap_schedule", "cuda_graph"], "CUDA inference platform");
+    const record = exact(base, ["backend", "device_constraint", ...(pool ? ["device_constraints"] : []), "mem_fraction_static", "overlap_schedule", "cuda_graph"], "CUDA inference platform");
     if (record.device_constraint !== undefined && (typeof record.device_constraint !== "string" || !record.device_constraint)
       || typeof record.mem_fraction_static !== "number" || !Number.isFinite(record.mem_fraction_static)
       || record.mem_fraction_static <= 0 || record.mem_fraction_static > 1 || typeof record.overlap_schedule !== "boolean"
       || record.cuda_graph !== "enabled" && record.cuda_graph !== "disabled") throw lockError("CUDA inference platform is invalid");
-    return { backend: "cuda", ...(record.device_constraint ? { device_constraint: record.device_constraint as string } : {}), mem_fraction_static: record.mem_fraction_static, overlap_schedule: record.overlap_schedule, cuda_graph: record.cuda_graph };
+    return { backend: "cuda", ...(pool ? { device_constraints: parseDevices(record.device_constraints) } : {}), ...(record.device_constraint ? { device_constraint: record.device_constraint as string } : {}), mem_fraction_static: record.mem_fraction_static, overlap_schedule: record.overlap_schedule, cuda_graph: record.cuda_graph };
   }
   if (base.backend === "metal") {
     const record = exact(base, ["backend", "mlx_quantization", "overlap_schedule"], "Metal inference platform");
@@ -281,7 +169,7 @@ function parseProtocol(value: unknown): InferenceLockV1["protocol"] {
     reasoning_parser: record.reasoning_parser as string | null, compatibility_profile_id: record.compatibility_profile_id };
 }
 
-function parseResources(value: unknown, backend: "cpu" | "cuda" | "metal", processNode: boolean): InferenceLockV1["resources"] {
+function parseResources(value: unknown, backend: "cpu" | "cuda" | "metal", processNode: boolean, gpuCount: number): InferenceLockV1["resources"] {
   const record = exact(value, ["cpu_millis", "memory_bytes", "container_slots", "build_slots", "gpu_count", "ephemeral_disk_bytes"], "inference resources");
   const resources = {
     cpu_millis: positiveInteger(record.cpu_millis, "inference CPU reservation"),
@@ -291,7 +179,7 @@ function parseResources(value: unknown, backend: "cpu" | "cuda" | "metal", proce
     ...(record.gpu_count === undefined ? {} : { gpu_count: nonNegativeInteger(record.gpu_count, "inference GPU reservation") }),
     ...(record.ephemeral_disk_bytes === undefined ? {} : { ephemeral_disk_bytes: nonNegativeInteger(record.ephemeral_disk_bytes, "inference disk reservation") }),
   };
-  if (resources.build_slots !== 0 || processNode && resources.container_slots !== 0 || backend === "cuda" && resources.gpu_count !== 1
+  if (resources.build_slots !== 0 || processNode && resources.container_slots !== 0 || backend === "cuda" && resources.gpu_count !== gpuCount
     || backend !== "cuda" && (resources.gpu_count ?? 0) !== 0) throw lockError("inference resource/backend combination is invalid");
   return resources;
 }

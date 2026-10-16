@@ -1,3 +1,4 @@
+import { parseEndpointBinding } from "../model-access/index.js";
 import { parseModelNodeBinding } from "../domain/index.js";
 import { lstat, readdir, readFile } from "node:fs/promises";
 import path from "node:path";
@@ -115,6 +116,7 @@ function projectModelIdentity(manifest: Record<string, unknown>, harnessId: stri
     if (!model.inference_id) throw new TypeError("model node identity requires an inference lock");
     model.model_node = parseModelNodeBinding(nested.model_node);
   }
+  if (nested?.endpoint_binding !== undefined) model.endpoint_binding = parseEndpointBinding(nested.endpoint_binding);
   const resolved = nested?.identity_resolved ?? manifest.model_identity_resolved;
   model.identity_resolved = resolved === true;
   return model;

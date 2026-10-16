@@ -1,5 +1,5 @@
 import path from "node:path";
-import type { EvalExecutionPlanV1, EvalId, EvalRequest, EvalTrialRefV1, ManagedInferenceLeaseV1, RemotePhysicalExecutionV2, ResolvedRevision } from "../domain/index.js";
+import type { EvalExecutionPlanV1, EvalId, EvalRequest, EvalTrialRefV1, RemotePhysicalExecutionV2, ResolvedRevision } from "../domain/index.js";
 import type { HarborBackendResult, HarborPreparedArtifactUse } from "../backends/index.js";
 import { HitchError, atomicWriteJSON, readJSON, sha256JSON } from "../foundation/index.js";
 import { assertPhysicalWork, candidateRestartWorkItem } from "./physical-work-plan.js";
@@ -20,7 +20,7 @@ export async function executeRemoteRerunGroup(input: {
   request: EvalRequest; plan: EvalExecutionPlanV1; slots: readonly EvalTrialSlot[];
   artifact: HarborPreparedArtifactUse; resolvedRevision: ResolvedRevision;
   runtimeDirectory: string; runtimeId: string; executor: EvalRemoteWorkExecutor;
-  inferenceLease?: ManagedInferenceLeaseV1; signal?: AbortSignal;
+  externalEndpoint?: import("../domain/index.js").ReadyEndpointBindingV1; signal?: AbortSignal;
   publish(ref: EvalTrialRefV1): Promise<void>;
 }): Promise<Array<{ attempt: number; run: HarborBackendResult }>> {
   const runs: Array<{ attempt: number; run: HarborBackendResult }> = [];
@@ -68,9 +68,7 @@ export async function executeRemoteRerunGroup(input: {
       runtimeDirectory: input.runtimeDirectory, runtimeId: input.runtimeId,
       ...(images ? { environmentImages: images } : {}),
       ...(plan.model_capture ? { modelCapturePlan: plan.model_capture } : {}),
-      ...(input.inferenceLease ? { modelTarget: { kind: "managed-inference", binding: input.inferenceLease.binding,
-        credential: input.inferenceLease.credential, modelId: input.inferenceLease.lock.model_id,
-        maxOutputTokens: input.inferenceLease.lock.generation.max_output_tokens } } : {}),
+      ...(input.externalEndpoint ? { modelTarget: { kind: "external-endpoint", endpoint: input.externalEndpoint } } : {}),
       ...(input.signal ? { signal: input.signal } : {}), publicationMode: "replace-invalid", publish,
       emit: event => sink.emit({ ...event, rerun_id: input.rerunId, execution_kind: "candidate-restart", source_work_id: source.work_id }),
       onLeaseState: async (leaseId, state) => { await atomicWriteJSON(file, { identity, lease_id: leaseId, state }); },

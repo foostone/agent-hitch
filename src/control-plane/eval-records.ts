@@ -238,8 +238,10 @@ function persistedRequestInput(request: EvalRequest): EvalRequestInput {
     setup_timeout_ms: request.setup_timeout_ms,
     agent_args: request.agent_args,
     pass_env: request.pass_env,
-    ...(request.local_inference ? { local_inference: request.local_inference } : {}),
+    ...(request.endpoint_binding ? { endpoint_binding: request.endpoint_binding } : {}),
     ...(request.training_binding ? { training_binding: request.training_binding } : {}),
+    ...(request.environment_binding ? { environment_binding: request.environment_binding } : {}),
+    ...(request.artifact_pins ? { artifact_pins: request.artifact_pins } : {}),
   };
 }
 

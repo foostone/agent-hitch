@@ -1,8 +1,13 @@
 import { lstat, readdir } from "node:fs/promises";
 import path from "node:path";
+import { pendingEvalReruns } from "./rerun-observation.js";
+import { cumulativeEndpointUsage } from "./endpoint-usage.js";
+import { readEndpointEvaluationAttempts } from "./endpoint-attempts.js";
+import type { EvalRequest } from "../domain/index.js";
 import { inspectEvalRuntimeKind } from "../controller-runtime/index.js";
 import type { ExecutionLeaseV1 } from "../domain/index.js";
 import { HitchError, SCHEMA_VERSION, invalidInput, readJSON, statePaths } from "../foundation/index.js";
+import { readEvalState } from "./progress.js";
 import { readExecutionLeases } from "./execution-leases.js";
 
 export interface ListedEval {
@@ -57,6 +62,8 @@ export interface InspectedEval {
   submission: Record<string, unknown> | null;
   control: Record<string, unknown> | null;
   progress: Record<string, unknown> | null;
+  pending_reruns: boolean;
+  endpoint_attempts: import("./endpoint-attempts.js").AdmittedEndpointAttemptV1[];
   leases: ExecutionLeaseV1[];
   result: Record<string, unknown> | null;
   runtime_storage: "controller-runtime-ref-v1" | "embedded-runtime-v1" | "none";
@@ -67,6 +74,11 @@ export async function inspectEval(evalId: string, { root }: { root: string }): P
   const directory = path.join(statePaths(root).evals, evalId);
   const request = await readJSON<Record<string, unknown> | null>(path.join(directory, "request.json"), null);
   if (!request) throw new HitchError(`eval not found: ${evalId}`, { code: "eval_not_found", exitCode: 3 });
+  const { progress, result } = await readEvalState(directory);
+  const attempts = await readEndpointEvaluationAttempts(directory, request as unknown as EvalRequest);
+  const pendingReruns = await pendingEvalReruns(directory, attempts);
+  if (result && request.endpoint_binding) result.usage = await cumulativeEndpointUsage(root, evalId,
+    (progress?.trials ?? []).flatMap(trial => trial.run_id ? [trial.run_id] : []));
   return {
     schema_version: SCHEMA_VERSION,
     eval_id: evalId,
@@ -77,9 +89,10 @@ export async function inspectEval(evalId: string, { root }: { root: string }): P
     execution_plan: await readJSON<Record<string, unknown> | null>(path.join(directory, "execution-plan.json"), null),
     submission: await readJSON<Record<string, unknown> | null>(path.join(directory, "submission.json"), null),
     control: await readJSON<Record<string, unknown> | null>(path.join(directory, "control.json"), null),
-    progress: await readJSON<Record<string, unknown> | null>(path.join(directory, "progress.json"), null),
+    progress: progress === null ? null : { ...progress },
+    endpoint_attempts: attempts, pending_reruns: pendingReruns,
     leases: await readExecutionLeases(directory),
-    result: await readJSON<Record<string, unknown> | null>(path.join(directory, "result.json"), null),
+    result,
     runtime_storage: await inspectEvalRuntimeKind(directory),
   };
 }

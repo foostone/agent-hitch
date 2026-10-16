@@ -342,7 +342,7 @@ function parseBackends(value: unknown): Array<{ id: string; version: string }> {
 
 function parseFeatures(value: unknown): RemoteWorkerRegistrationV1["features"] {
   const booleans = ["docker", "buildkit", "model_proxy", "isolated_same_task_attempts"];
-  const bindings = ["training_external_binding", "managed_model_node"];
+  const bindings = ["training_external_binding", "external_endpoint_binding"];
   const features = exact(value, [...booleans, ...bindings, "physical_work", "execution_observation", "verifier_source", "verifier_only", "benchmark_resources"], "remote worker features");
   if (booleans.some(key => typeof features[key] !== "boolean")
     || features.benchmark_resources !== undefined && (features.benchmark_resources !== "1" || !features.docker || !features.buildkit)
@@ -350,7 +350,7 @@ function parseFeatures(value: unknown): RemoteWorkerRegistrationV1["features"] {
     || features.execution_observation !== undefined && features.execution_observation !== "2"
     || features.verifier_source !== undefined && (features.verifier_source !== "2" || !features.docker)
     || features.verifier_only !== undefined && (features.verifier_only !== "2" || !features.docker || features.physical_work !== "2")
-    || bindings.some(key => features[key] !== undefined && (features[key] !== "2" || !features.docker || !features.model_proxy))) {
+    || bindings.some(key => features[key] !== undefined && (features[key] !== (key === "external_endpoint_binding" ? "1" : "2") || !features.docker || !features.model_proxy))) {
     throw invalidWorker("remote worker features are invalid");
   }
   return features as unknown as RemoteWorkerRegistrationV1["features"];

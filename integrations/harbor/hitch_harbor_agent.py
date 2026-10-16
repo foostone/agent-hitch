@@ -128,7 +128,6 @@ class HitchHarborAgent(BaseAgent):
         verifier_identity: str | None = None,
         logical_attempt: int | None = None,
         model_capture: dict[str, Any] | None = None,
-        managed_local_inference: dict[str, Any] | None = None,
         **kwargs: Any,
     ) -> None:
         super().__init__(logs_dir=logs_dir, **kwargs)
@@ -167,14 +166,6 @@ class HitchHarborAgent(BaseAgent):
             raise ValueError("logical_attempt must be a positive integer")
         self.logical_attempt = logical_attempt
         self.model_capture = _validate_model_capture(model_capture)
-        if managed_local_inference is not None and not _valid_managed_model_identity(managed_local_inference):
-            raise ValueError("managed_local_inference identity is invalid")
-        if managed_local_inference is not None and self.model_capture is None:
-            raise ValueError("managed_local_inference requires model_capture")
-        self.managed_local_inference = dict(managed_local_inference) if managed_local_inference else None
-        capture_inference = self.model_capture.get("managed_inference") if self.model_capture else None
-        if capture_inference != self.managed_local_inference:
-            raise ValueError("managed_local_inference must match model_capture identity")
         self._hitch_version: str | None = None
         self._entrypoint: str | None = None
         self._artifact_manifest: dict[str, Any] | None = None
@@ -249,7 +240,10 @@ class HitchHarborAgent(BaseAgent):
         # Upload the cached bundle's payload (package.json + dist/) as the
         # package root under /opt/hitch; the local cache path is host-side
         # bookkeeping and is not identity (spec §4.2).
-        await environment.upload_dir(payload_dir, "/opt/hitch")
+        shared = getattr(environment, "hitch_verify_shared_runtime", None)
+        shared_ready = await shared(payload_dir, self._artifact_host_directory) if shared else False
+        if not shared_ready:
+            await environment.upload_dir(payload_dir, "/opt/hitch")
         await self._ensure_node(environment)
         platform, node_version = await self._container_node_identity(environment)
         if self._artifact_manifest is None or not self._artifact_compatible(
@@ -259,8 +253,12 @@ class HitchHarborAgent(BaseAgent):
                 "hitch-artifact-platform: dedicated-builder artifact is incompatible with "
                 f"trial runtime {platform}/{node_version}"
             )
-        await self._upload_harness_artifact(environment, self._artifact_host_directory)
-        self._artifact_transport_status = "dedicated_builder_upload"
+        if shared_ready:
+            self._artifact_uploaded = True
+            self._artifact_transport_status = "shared_readonly_bind"
+        else:
+            await self._upload_harness_artifact(environment, self._artifact_host_directory)
+            self._artifact_transport_status = "dedicated_builder_upload"
         entry = self._remote_entry(entrypoint)
         version = await self._exec(environment, f"{self._node_prefix()} node {entry} --version")
         self._hitch_version = (version.stdout or "").strip() or None
@@ -1417,6 +1415,7 @@ mv "$stage_dir" "$target_dir"
             return [], "degraded-unreachable"
         base = self.model_capture["base_url_template"].replace("{run_id}", run_id)
         training = self.model_capture.get("training_external")
+        external = self.model_capture.get("external_endpoint")
         return [
             f"OPENAI_BASE_URL={shlex.quote(base.replace('{provider}', 'openai'))}",
             f"ANTHROPIC_BASE_URL={shlex.quote(base.replace('{provider}', 'anthropic'))}",
@@ -1427,14 +1426,10 @@ mv "$stage_dir" "$target_dir"
                 "OPENAI_API_KEY=hitch-training-external",
             ] if training else []),
             *([
-                "HITCH_MANAGED_LOCAL_INFERENCE=1",
-                f"HITCH_MANAGED_RUN_ID={run_id}",
-                f"HITCH_MANAGED_INFERENCE_ID={self.managed_local_inference['inference_id']}",
-                f"HITCH_MANAGED_MODEL_ID={self.managed_local_inference['model_id']}",
-                "OPENAI_API_KEY=hitch-managed-local",
-                *([f"HITCH_MANAGED_NODE_BINDING={shlex.quote(json.dumps(self.managed_local_inference['model_node'], separators=(',', ':')))}"]
-                  if self.managed_local_inference.get("model_node") else []),
-            ] if self.managed_local_inference else []),
+                f"HITCH_EXTERNAL_RUN_ID={run_id}",
+                f"HITCH_EXTERNAL_ENDPOINT_BINDING={shlex.quote(json.dumps(external, separators=(',', ':')))}",
+                "OPENAI_API_KEY=hitch-external-endpoint",
+            ] if external else []),
         ], "healthy"
 
     @staticmethod
@@ -1899,7 +1894,7 @@ def _validate_model_capture(value: dict[str, Any] | None) -> dict[str, Any] | No
     required_fields = {
         "schema_version", "mode", "required", "topology", "base_url_template", "health_url_template"
     }
-    if not isinstance(value, dict) or not required_fields.issubset(value) or set(value) - required_fields - {"managed_inference", "training_external"}:
+    if not isinstance(value, dict) or not required_fields.issubset(value) or set(value) - required_fields - {"external_endpoint", "training_external"}:
         raise ValueError("model_capture fields are invalid")
     if (
         value.get("schema_version") != "1"
@@ -1924,33 +1919,24 @@ def _validate_model_capture(value: dict[str, Any] | None) -> dict[str, Any] | No
         )
         if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username or parsed.password:
             raise ValueError(f"model_capture {field} URL is invalid")
-    managed = value.get("managed_inference")
+    external = value.get("external_endpoint")
     training = value.get("training_external")
     if training is not None:
-        if (managed is not None or not isinstance(training, dict)
+        if (external is not None or not isinstance(training, dict)
             or set(training) != {"binding_id", "training_run_id", "policy_version", "generation_contract_digest", "api", "max_output_tokens", "max_episode_steps"}
             or training.get("api") != "chat-completions" or value.get("required") is not True
             or any(not isinstance(training.get(k), str) or not training[k] for k in ("binding_id", "training_run_id", "policy_version"))
             or re.fullmatch(r"sha256:[a-f0-9]{64}", str(training.get("generation_contract_digest"))) is None
             or any(type(training.get(k)) is not int or training[k] <= 0 for k in ("max_output_tokens", "max_episode_steps"))):
             raise ValueError("model_capture training identity is invalid")
-    if managed is not None and not _valid_managed_model_identity(managed):
-        raise ValueError("model_capture managed inference identity is invalid")
+    if external is not None:
+        if (not isinstance(external, dict) or external.get("kind") != "external-endpoint"
+            or external.get("schema_version") != "1" or "connection" in external
+            or external.get("api") not in {"responses", "chat-completions"}
+            or re.fullmatch(r"sha256:[a-f0-9]{64}", str(external.get("endpoint_revision"))) is None
+            or value.get("required") is not True):
+            raise ValueError("model_capture external endpoint binding is invalid")
     return dict(value)
-
-
-def _valid_managed_model_identity(value: Any) -> bool:
-    if (not isinstance(value, dict) or not {"inference_id", "model_id"}.issubset(value)
-        or set(value) - {"inference_id", "model_id", "model_node"}
-        or any(not isinstance(value[k], str) or re.fullmatch(r"sha256:[a-f0-9]{64}", value[k]) is None for k in ("inference_id", "model_id"))):
-        return False
-    if "model_node" not in value:
-        return True
-    node = value["model_node"]
-    return (isinstance(node, dict) and set(node) == {"schema_version", "node_id", "generation", "runtime_digest", "launcher"}
-        and node["schema_version"] == "2" and node["launcher"] == "process"
-        and all(isinstance(node[k], str) and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", node[k]) is not None for k in ("node_id", "generation"))
-        and isinstance(node["runtime_digest"], str) and re.fullmatch(r"sha256:[a-f0-9]{64}", node["runtime_digest"]) is not None)
 
 
 def canonical_manifest_json(manifest: dict[str, Any]) -> str:

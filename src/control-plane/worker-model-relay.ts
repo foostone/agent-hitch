@@ -14,7 +14,7 @@ export async function startWorkerModelRelay(input: {
   const binding = parseRemoteModelBinding(input.binding), credential = randomBytes(32).toString("hex");
   const controller = new AbortController(), signal = AbortSignal.any([input.signal, controller.signal]);
   let runId: string | undefined;
-  const api = binding.kind === "training-external" ? "chat-completions" : binding.api;
+  const api = binding.kind === "training-external" ? "chat-completions" : binding.endpoint.api;
   const endpoint = api === "responses" ? "/v1/responses" : "/v1/chat/completions";
   const server = http.createServer((request, response) => {
     const serve = async () => {

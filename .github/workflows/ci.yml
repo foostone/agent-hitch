@@ -28,6 +28,11 @@ jobs:
         with:
           node-version: ${{ matrix.node }}
           cache: npm
+      - name: Prepare Python bridge test dependencies
+        run: |
+          python3 -m venv "$RUNNER_TEMP/hitch-test-python"
+          "$RUNNER_TEMP/hitch-test-python/bin/python" -m pip install -r test-support/requirements.txt
+          echo "$RUNNER_TEMP/hitch-test-python/bin" >> "$GITHUB_PATH"
       - run: npm ci
       # The build invokes tsc with the same configuration as typecheck.
       - name: Build and typecheck
@@ -40,13 +45,31 @@ jobs:
           npm run docs:check
       - name: Test
         if: matrix.os != 'ubuntu-latest' || matrix.node != 24
-        run: npm test
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            # The binding venv shares the host stdlib. Other Python tests can
+            # create bytecode caches while its runtime inventory is being read.
+            node --test --test-timeout=120000 dist/test/evaluation-binding.test.js
+            tests=()
+            for file in dist/test/*.test.js; do
+              if [ "$file" != "dist/test/evaluation-binding.test.js" ]; then
+                tests+=("$file")
+              fi
+            done
+            node --test --test-timeout=120000 "${tests[@]}"
+          else
+            npm test
+          fi
       - name: Test with coverage
         if: matrix.os == 'ubuntu-latest' && matrix.node == 24
         run: npm run coverage
       - name: Packaged harness canary
         if: matrix.os == 'ubuntu-latest'
         run: node dist/scripts/canary-packaged-harness.js
+      - name: External endpoint canary without Python or CUDA
+        if: matrix.os == 'ubuntu-latest'
+        run: node dist/scripts/canary-external-endpoint.js
       - if: matrix.os != 'ubuntu-latest' || matrix.node != 24
         run: npm pack --dry-run
       - name: Release validation smoke test
@@ -57,6 +80,7 @@ jobs:
           npm install --prefix "$PREFIX" "$PREFIX"/agent-hitch-*.tgz --no-save
           "$PREFIX"/node_modules/.bin/hitch --version
           "$PREFIX"/node_modules/.bin/hitch list --json
+          node "$PREFIX/node_modules/agent-hitch/dist/scripts/canary-external-endpoint.js"
           # eval doctor is a diagnostic command: without a managed Harbor
           # install or a running Docker daemon it reports "action_required"
           # and exits 3, which is a valid result for this smoke test. Require
@@ -68,6 +92,18 @@ jobs:
           python3 -c "import json,sys; json.load(open('$PREFIX/doctor.json')); sys.exit(0)"
           [ "$doctor_code" -eq 0 ] || [ "$doctor_code" -eq 3 ] || { echo "eval doctor exited $doctor_code" >&2; exit 1; }
           python3 -c "import pathlib; compile(pathlib.Path('$PREFIX/node_modules/agent-hitch/integrations/harbor/hitch_harbor_agent.py').read_text(), 'x', 'exec'); print('bridge syntax OK')"
+          # A local install may hoist unbundled dependencies outside Hitch.
+          # Verify the installed execution closure, not the source checkout.
+          node --input-type=module - "$PREFIX" <<'NODE'
+          import path from 'node:path';
+          import { pathToFileURL } from 'node:url';
+          const prefix = process.argv[2];
+          const modulePath = path.join(prefix, 'node_modules/agent-hitch/dist/src/controller-runtime/index.js');
+          const { ensureControllerRuntime, useControllerRuntimeDirectory } = await import(pathToFileURL(modulePath));
+          const runtime = await ensureControllerRuntime({ root: path.join(prefix, 'runtime-state') });
+          await useControllerRuntimeDirectory(runtime.directory, runtime.runtime_id);
+          console.log(`installed runtime verified: ${runtime.runtime_id}`);
+          NODE
 
   test-windows:
     strategy:

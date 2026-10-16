@@ -22,9 +22,15 @@
             "rerun_id": { "type": "string", "pattern": "^rerun_[a-f0-9]{32}$" },
             "rerun_type": { "$ref": "eval-rerun-submission.schema.json#/$defs/rerunType" },
             "selector": { "$ref": "eval-rerun-submission.schema.json#/$defs/selector" },
+            "endpoint_attempt": { "$ref": "endpoint-evaluation-attempt.schema.json" },
             "verifier_runtime_id": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" }
           },
-          "allOf": [{ "if": { "required": ["verifier_runtime_id"] }, "then": { "properties": { "rerun_type": { "const": "verifier-only" } } } }]
+          "allOf": [
+            { "if": { "required": ["verifier_runtime_id"] }, "then": { "properties": { "rerun_type": { "const": "verifier-only" } } } },
+            { "if": { "required": ["endpoint_attempt"] }, "then": { "properties": { "rerun_type": { "const": "candidate-restart" },
+              "selector": { "type": "object", "additionalProperties": false, "required": ["mode"], "properties": { "mode": { "const": "invalid" } } }
+            } } }
+          ]
         }
       }
     }

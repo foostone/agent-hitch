@@ -10,12 +10,19 @@
     "rerun_id": { "type": "string", "pattern": "^rerun_[a-f0-9]{32}$" },
     "eval_id": { "type": "string", "pattern": "^eval_[a-f0-9]{32}$" },
     "rerun_type": { "$ref": "#/$defs/rerunType" },
+    "endpoint_attempt": { "$ref": "endpoint-evaluation-attempt.schema.json" },
     "verifier_runtime_id": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" },
     "semantics": { "$ref": "#/$defs/semantics" },
     "selector": { "$ref": "#/$defs/selector" },
     "submitted_at": { "type": "string", "format": "date-time" }
   },
-  "allOf": [{ "if": { "required": ["verifier_runtime_id"] }, "then": { "properties": { "rerun_type": { "const": "verifier-only" } } } }],
+  "allOf": [
+    { "if": { "required": ["verifier_runtime_id"] }, "then": { "properties": { "rerun_type": { "const": "verifier-only" } } } },
+    { "if": { "required": ["endpoint_attempt"] }, "then": { "properties": {
+      "rerun_type": { "const": "candidate-restart" },
+      "selector": { "type": "object", "additionalProperties": false, "required": ["mode"], "properties": { "mode": { "const": "invalid" } } }
+    } } }
+  ],
   "$defs": {
     "rerunType": {
       "enum": ["candidate-restart", "candidate-resume", "trajectory-replay", "verifier-only", "collect-only"]

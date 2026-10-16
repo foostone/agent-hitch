@@ -23,7 +23,7 @@ export interface ModelProxyRouteV1 {
   topology: "host-side" | "in-sandbox";
   base_url_template: string;
   health_url_template: string;
-  managed_inference?: { inference_id: Sha256; model_id: Sha256; model_node?: import("./inference.js").ModelNodeBindingV2 };
+  external_endpoint?: import("./endpoints.js").ExternalEndpointBindingV1;
   training_external?: TrainingProxyIdentityV1;
 }
 

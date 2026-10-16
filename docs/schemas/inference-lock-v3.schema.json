@@ -1,0 +1,6 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agent-hitch.local/schemas/inference-lock-v3.schema.json",
+  "title": "Hitch explicit inference pool lock v3",
+  "$ref": "inference-lock.schema.json#/$defs/poolLockV3"
+}

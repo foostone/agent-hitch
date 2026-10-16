@@ -848,6 +848,7 @@ test("eval recovery reconciles a promoted bundle before progress and does not re
 
   await atomicWriteJSON(path.join(evalDirectory, "progress.json"), {
     ...originalProgress,
+    status: "running",
     generation: 0,
     trials: [],
     summary: { settled_trials: 0, valid_trials: 0, invalid_trials: 0 },
@@ -936,7 +937,8 @@ test("daemon exposes queued eval status and terminal result", async (t) => {
   const build = await client.request(`/v1/builds/${buildId}`);
   assert.equal((build.record as { state: string }).state, "succeeded");
   assert.equal((build.manifest as { image_id: Sha256 }).image_id, built.manifest.image_id);
-  const accepted = await client.request("/v1/evals", { method: "POST", body: JSON.stringify(request(4)) });
+  const accepted = await client.request("/v1/evals", { method: "POST",
+    headers: { accept: "application/vnd.hitch.preparation+ndjson" }, body: JSON.stringify(request(4)) });
   assert.match(accepted.eval_id as string, /^eval_[a-f0-9]{32}$/);
   assert.deepEqual(accepted.links, {
     self: `/v1/evals/${accepted.eval_id as string}`,

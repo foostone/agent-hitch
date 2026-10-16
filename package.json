@@ -1,6 +1,6 @@
 {
   "name": "agent-hitch",
-  "version": "0.2.16",
+  "version": "0.2.17",
   "description": "Content-addressed version control and evidence storage for agent harnesses",
   "keywords": [
     "ai-agents",
@@ -53,21 +53,30 @@
     "docs/local-model-inference-spec.zh-CN.md",
     "integrations/harbor/hitch_harbor_agent.py",
     "integrations/harbor/hitch_harbor_environment.py",
+    "integrations/harbor/hitch_shared_runtime.py",
+    "integrations/harbor/hitch_build_inputs.py",
+    "integrations/harbor/hitch_build_process.py",
+    "integrations/harbor/hitch_image_cache.py",
+    "integrations/harbor/hitch_compose_preparation.py",
     "integrations/harbor/hitch_host_credentials.py",
     "integrations/harbor/hitch_private_exec.py",
     "integrations/harbor/hitch_candidate_recycle.py",
     "integrations/harbor/hitch_phase_supervisor.py",
     "integrations/harbor/hitch_harbor_task_resources.py",
+    "integrations/harbor/hitch_python_runtime.py",
     "integrations/harbor/hitch_harbor_verifier.py",
     "integrations/harbor/hitch_benchmark.py",
     "integrations/harbor/hitch_tool_client.mjs",
     "integrations/model-call/cli.js",
     "integrations/training-tool/cli.js",
     "docs/resource-storage.zh-CN.md",
+    "docs/evidence/eval-preparation-2026-10-09.md",
+    "docs/evidence/eval-preparation-2026-10-09.json",
     "benchmark-packages/shared-tree/",
     "benchmark-packages/automationbench/resources.mjs",
     "benchmark-packages/automationbench/RESOURCES.md",
-    "test-contracts/hitch-resources-v1.json"
+    "test-contracts/hitch-resources-v1.json",
+    "examples/external-inference/"
   ],
   "scripts": {
     "docs:check": "node scripts/check-guide.mjs",
@@ -85,7 +94,8 @@
     "canary:gpu-hardware": "npm run build && node dist/scripts/canary-gpu-hardware.js",
     "check:architecture": "node dist/scripts/check-architecture.js",
     "check": "npm run typecheck && npm run build && npm run check:architecture && node dist/scripts/check-syntax.js && npm test",
-    "prepublishOnly": "npm run check"
+    "prepublishOnly": "npm run check",
+    "canary:external-endpoint": "npm run build && node dist/scripts/canary-external-endpoint.js"
   },
   "engines": {
     "node": ">=22"
@@ -101,5 +111,6 @@
   "license": "Apache-2.0",
   "dependencies": {
     "smol-toml": "1.8.0"
-  }
+  },
+  "bundleDependencies": true
 }

@@ -16,3 +16,6 @@ export { HOST_CREDENTIAL_HELPER_CAPABILITY, HOST_CREDENTIAL_HELPER_ENV } from ".
 export { DEFAULT_HARBOR_TRIAL_DOCKER_PLATFORM, HARBOR_NODE_VERSION, HARBOR_NODE_VERSION_WITH_PREFIX, HARBOR_PNPM_VERSION, harborTrialRuntimeContract } from "./harbor/index.js";
 export type { HarborTrialRuntimeContract } from "./harbor/index.js";
 export type { DoctorCheck, DoctorHarborOptions, DoctorResult, HarborLocation, LocateHarborOptions, HarborSetupResult, SetupHarborOptions } from "./harbor/index.js";
+export { prepareEvaluationBinding, boundEvaluationEnvironment } from "./harbor/index.js";
+export { parseEvalArtifactPins, assertHarborArtifactPin, assertHarborArtifactPins } from "./harbor/index.js";
+export { evaluationCredentialValidity } from "./harbor/host-credential-helper.js";

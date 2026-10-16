@@ -18,6 +18,27 @@ import { sha256JSON, statePaths } from "../src/foundation/index.js";
 const ZERO = { cpu_millis: 0, memory_bytes: 0, container_slots: 0, build_slots: 0 };
 const CAPACITY = { cpu_millis: 2_000, memory_bytes: 2 * 1024 ** 3, container_slots: 2, build_slots: 1 };
 
+test("worker shutdown between polling and heartbeat is quiet but does not hide other errors", async t => {
+  for (const unrelatedFailure of [false, true]) {
+    const controller = new AbortController(), errors: unknown[] = [];
+    const unrelated = new Error("poll failed during shutdown");
+    const client = new RemoteWorkerHttpClient({ baseUrl: "http://127.0.0.1:1", credential: {
+      schema_version: "1", worker_id: "worker_shutdown", generation: 1, token: "a".repeat(64),
+    } });
+    t.mock.method(client, "listOffers", async () => {
+      controller.abort(new Error("worker shutdown requested"));
+      if (unrelatedFailure) throw unrelated;
+      return [];
+    });
+    const heartbeat = t.mock.method(client, "heartbeat", async () => {});
+    const runner = new RemoteWorkerRunner({ client, capacity: CAPACITY, signal: controller.signal,
+      execute: async () => { throw new Error("no offers"); }, onError: error => errors.push(error) });
+    await runner.run();
+    assert.equal(heartbeat.mock.callCount(), 0);
+    assert.deepEqual(errors, unrelatedFailure ? [unrelated] : []);
+  }
+});
+
 test("remote worker client redacts its bearer credential from transport failures", async () => {
   const token = "a".repeat(64);
   const client = new RemoteWorkerHttpClient({
@@ -30,6 +51,51 @@ test("remote worker client redacts its bearer credential from transport failures
     assert.match((error as Error).message, /\[REDACTED\]/);
     return true;
   });
+});
+
+test("runner stops quietly when shutdown arrives during offer polling", async () => {
+  const controller = new AbortController();
+  const reason = new Error("worker shutdown requested");
+  const errors: unknown[] = [];
+  let requests = 0;
+  const client = new RemoteWorkerHttpClient({
+    baseUrl: "http://127.0.0.1:1",
+    credential: { schema_version: "1", worker_id: "worker_packaged", generation: 1, token: "a".repeat(64) },
+    request: async () => {
+      requests++;
+      controller.abort(reason);
+      return new Response(JSON.stringify({ schema_version: "1", offers: [] }));
+    },
+  });
+  const runner = new RemoteWorkerRunner({
+    client, capacity: CAPACITY, signal: controller.signal,
+    execute: async () => { throw new Error("unexpected execution"); },
+    onError: (error) => { errors.push(error); },
+  });
+  await runner.run();
+  assert.deepEqual(errors, []);
+  assert.equal(requests, 1, "shutdown must prevent a subsequent heartbeat request");
+});
+
+test("runner still reports a transport failure racing with shutdown", async () => {
+  const controller = new AbortController();
+  const errors: unknown[] = [];
+  const client = new RemoteWorkerHttpClient({
+    baseUrl: "http://127.0.0.1:1",
+    credential: { schema_version: "1", worker_id: "worker_packaged", generation: 1, token: "a".repeat(64) },
+    request: async () => {
+      controller.abort(new Error("worker shutdown requested"));
+      throw new Error("offer transport failed");
+    },
+  });
+  const runner = new RemoteWorkerRunner({
+    client, capacity: CAPACITY, signal: controller.signal,
+    execute: async () => { throw new Error("unexpected execution"); },
+    onError: (error) => { errors.push(error); },
+  });
+  await runner.run();
+  assert.equal(errors.length, 1);
+  assert.match((errors[0] as Error).message, /offer transport failed/);
 });
 
 test("packaged remote worker client and runner complete the HTTP offer lifecycle", async (t) => {

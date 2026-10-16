@@ -214,7 +214,7 @@ async function collectRemoteResult(input: Parameters<typeof recoverRemoteWorkerE
     work, lease: lease.epoch === offer.lease.epoch ? lease : offer.lease,
     artifactPath: input.protocol.artifactPath(offer.worker_id, lease.lease_id, artifact.digest),
     verifierSourceExpected: await verifierSourceRequested(input.root, offer),
-    ...(request.training_binding || request.local_inference ? { modelProof: await input.protocol.modelRoutes.boundRun(offer) } : {}),
+    ...(request.training_binding || request.endpoint_binding ? { modelProof: await input.protocol.modelRoutes.boundRun(offer) } : {}),
     ...(dynamic || journal ? { publicationMode: "replace-invalid" as const } : {}),
     ...(typeof runtime?.runtime_id === "string" ? { runtimeId: runtime.runtime_id } : {}),
     ...(environmentImages ? { environmentImages } : {}),
@@ -223,7 +223,8 @@ async function collectRemoteResult(input: Parameters<typeof recoverRemoteWorkerE
   const progress = dynamic || journal
     ? imported.ref.observation_status === "valid" ? replaceInvalidEvalProgressTrial(state.progress, imported.ref) : state.progress
     : mergeEvalProgressTrial(state.progress, imported.ref);
-  if (progress.generation !== state.progress.generation) await writeEvalProgress(input.evalDirectory, progress);
+  if (progress.generation !== state.progress.generation) await writeEvalProgress(input.evalDirectory, progress,
+    journal ? { terminalRepair: true } : {});
   if (journal) await collectRemoteRerunJournal(journal, { leaseId: lease.lease_id, refs: [imported.ref],
     ...(grading ? { assessments: [grading.assessment] } : {}),
     run: remoteBackendResult(offer, offer, imported.trial, imported.backendDirectory, journal.record.result?.run.backend.version,

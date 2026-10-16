@@ -1,5 +1,6 @@
-import { prepareInference } from "./inference-prepare.js";
-import { orderedEvalControl, withLegacyEvalMutation } from "../control-plane/index.js";
+import { evaluationBinding } from "./evaluation-binding.js";
+import { withLegacyEvalMutation } from "../control-plane/index.js";
+import { evaluationSubmission } from "./evaluation-submission.js";
 import { executionObservation } from "./execution-observation.js";
 import { randomBytes } from "node:crypto";
 import { createServer } from "node:http";
@@ -7,7 +8,7 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import { readFile, stat } from "node:fs/promises";
 import path from "node:path";
 import { Scheduler } from "./scheduler.js";
-import { CollisionLockManager, EvalRerunScheduler, EvalScheduler, LocalInferenceManager, ManagedServiceRecovery, RemoteWorkerProtocol, RemoteWorkerRegistry, RemoteExecutionObservationCoordinator, ResourceLedger, inspectBuild, validateResourceVector } from "../control-plane/index.js";
+import { CollisionLockManager, EvalRerunScheduler, EvalScheduler, RemoteWorkerProtocol, RemoteWorkerRegistry, RemoteExecutionObservationCoordinator, ResourceLedger, inspectBuild, validateResourceVector } from "../control-plane/index.js";
 import type { EvalRerunExecutor, EvalSchedulerOptions } from "../control-plane/index.js";
 import { HitchError, SCHEMA_VERSION, atomicWriteJSON, ensureDir, hitchRootId, invalidInput, readJSON, removeIfExists, statePaths } from "../foundation/index.js";
 import type { StatePaths } from "../foundation/index.js";
@@ -33,7 +34,7 @@ export interface DaemonServerOptions {
   evalTrialResources?: ResourceVectorV1;
   evalExecutor?: EvalSchedulerOptions["executor"];
   evalRerunExecutor?: EvalRerunExecutor;
-  /** Test/deployment injection point; credential values remain process-local. */
+  /** Test/deployment injection point; credential values stay private; explicit environment bindings persist helper snapshots. */
   credentialEnv?: NodeJS.ProcessEnv;
   /** Wired by the CLI from the resident executor's environment, never registration metadata. */
   executionObserver?: ExecutionObservationSourceV2;
@@ -59,7 +60,6 @@ export class DaemonServer {
   private evalScheduler: EvalScheduler | undefined;
   private evalRerunScheduler: EvalRerunScheduler | undefined;
   private resources: ResourceLedger | undefined;
-  private inferenceManager: LocalInferenceManager | undefined;
   private server: ReturnType<typeof createServer> | undefined;
   private readonly remoteWorkers: RemoteWorkerRegistry;
   private readonly remoteWorkerProtocol: RemoteWorkerProtocol;
@@ -108,19 +108,10 @@ export class DaemonServer {
       await this.executionObserver?.initialize();
       await this.remoteWorkers.initialize();
       await this.remoteWorkerProtocol.initialize();
-      this.remoteWorkerProtocol.modelRoutes.deferManagedRecovery();
       // Recovery needs worker heartbeats, terminal receipts and release acknowledgments.
       await this.listen();
       this.agents = await this.discoverHarnesses();
       this.resources = new ResourceLedger(this.resourceCapacity);
-      this.inferenceManager = new LocalInferenceManager({
-        root: this.paths.root,
-        resources: this.resources,
-        recovery: new ManagedServiceRecovery(this.paths.root, this.remoteWorkers, this.remoteWorkerProtocol),
-        onEvent: (event) => this.observeControlEvent(event),
-      });
-      await this.inferenceManager.initialize();
-      this.remoteWorkerProtocol.modelRoutes.finishManagedRecovery();
       this.scheduler = new Scheduler({
         runsRoot: this.paths.runs,
         root: this.paths.root,
@@ -129,7 +120,6 @@ export class DaemonServer {
         runResources: this.runResources,
         credentialEnv: this.credentialEnv,
         onEvent: (event) => this.observeRunEvent(event),
-        inferenceCoordinator: this.inferenceManager,
       });
       await this.scheduler.initialize();
       const collisions = new CollisionLockManager();
@@ -141,7 +131,6 @@ export class DaemonServer {
         remoteWorkers: this.remoteWorkers,
         remoteWorkerProtocol: this.remoteWorkerProtocol,
         credentialEnv: this.credentialEnv,
-        inferenceCoordinator: this.inferenceManager,
         ...(this.evalExecutor ? { executor: this.evalExecutor } : {}),
         onEvent: (event) => this.observeControlEvent(event),
       });
@@ -154,7 +143,6 @@ export class DaemonServer {
         ...(this.evalScheduler.remoteWork ? { remoteWork: this.evalScheduler.remoteWork } : {}),
         ...(this.evalRerunExecutor ? { executor: this.evalRerunExecutor } : {}),
         credentialEnv: this.credentialEnv,
-        inferenceCoordinator: this.inferenceManager,
         onEvent: (event) => this.observeControlEvent(event),
       });
       await this.evalRerunScheduler.initialize();
@@ -178,7 +166,6 @@ export class DaemonServer {
         this.scheduler?.shutdown().catch(() => {}),
         this.evalScheduler?.shutdown().catch(() => {}),
         this.evalRerunScheduler?.shutdown().catch(() => {}),
-        this.inferenceManager?.close().catch(() => {}),
       ]);
       await releaseInstanceLock(this.paths.lock, this.instanceId);
       this.ownsLock = false;
@@ -189,7 +176,8 @@ export class DaemonServer {
   private async listen(): Promise<void> {
     this.server = createServer((request, response) => {
       this.handle(request, response).catch((error) => {
-        this.logger("request_error", { error: boundedMessage((error as Error).message), path: boundedMessage(request.url || "", 2_048) });
+        this.logger("request_error", { error: boundedMessage(error instanceof Error ? error.message : error), path: boundedMessage(request.url || "", 2_048) });
+        if (response.headersSent) return;
         json(response, errorStatus(error), { error: {
           code: (error as { code?: string }).code || "internal_error", message: boundedMessage((error as Error).message),
           exit_code: Number.isInteger((error as { exitCode?: unknown }).exitCode) ? (error as { exitCode: number }).exitCode : 12,
@@ -211,7 +199,6 @@ export class DaemonServer {
     let failure: Error | undefined;
     try {
       await Promise.all([this.scheduler?.shutdown(), this.evalScheduler?.shutdown(), this.evalRerunScheduler?.shutdown()]);
-      await this.inferenceManager?.close();
       if (this.server) await new Promise<void>((resolve) => this.server?.close(() => resolve()));
     } catch (error) {
       failure = error as Error;
@@ -247,6 +234,10 @@ export class DaemonServer {
     }
     if (!this.ready && !this.closing) return json(response, 503, { error: { code: "daemon_recovering", message: "daemon is reconciling persisted execution; retry after recovery" } });
 
+    if (request.method === "POST" && url.pathname === "/v1/evaluation-bindings") {
+      return evaluationBinding(request, response, { instanceId: this.instanceId, prepare: input => this.evalScheduler!.prepareEnvironmentBinding(input) });
+    }
+
     if (request.method === "POST" && url.pathname === "/v2/execution-observation") {
       return executionObservation(request, response, { source: this.executionObserver, local: this.evalScheduler?.providerSnapshot(), instanceId: this.instanceId, remote: this.remoteObservations });
     }
@@ -268,20 +259,6 @@ export class DaemonServer {
       }));
       return json(response, 200, { schema_version: SCHEMA_VERSION, workers: [...(local ? [local] : []), ...remote] });
     }
-    if (request.method === "POST" && url.pathname === "/v1/inference/prepare") {
-      if (!this.inferenceManager) throw new HitchError("inference manager unavailable", { code: "inference_route_unavailable", exitCode: 12 });
-      return prepareInference(request, response, this.inferenceManager);
-    }
-    if (request.method === "GET" && url.pathname === "/v1/inference/services") {
-      return json(response, 200, { schema_version: SCHEMA_VERSION, services: await this.inferenceManager?.list() ?? [] });
-    }
-    const inferenceStop = url.pathname.match(/^\/v1\/inference\/services\/(inference_[a-f0-9]{32})\/stop$/);
-    if (request.method === "POST" && inferenceStop) {
-      const body = await readBodyJSON(request);
-      const force = (body as { force?: unknown }).force === true;
-      await this.inferenceManager?.stop(inferenceStop[1], force);
-      return json(response, 200, { schema_version: SCHEMA_VERSION, service_id: inferenceStop[1], status: "stopped" });
-    }
     const buildMatch = url.pathname.match(/^\/v1\/builds\/(build_[a-f0-9]{32})$/);
     if (request.method === "GET" && buildMatch) {
       const inspected = await inspectBuild(this.paths.root, buildMatch[1] as string);
@@ -294,24 +271,9 @@ export class DaemonServer {
       const runId = await this.scheduler?.submit(requestBody as RunRequestInput);
       return json(response, 202, { schema_version: SCHEMA_VERSION, run_id: runId, status: "queued" });
     }
-    if (request.method === "POST" && url.pathname === "/v1/eval-controls") {
-      return json(response, 200, await orderedEvalControl(this.paths.root, await readBodyJSON(request), this.evalScheduler!, this.evalRerunScheduler!));
-    }
-    if (request.method === "POST" && url.pathname === "/v1/evals") {
-      const requestBody = await readBodyJSON(request);
-      const header = request.headers["idempotency-key"];
-      if (Array.isArray(header)) throw invalidInput("idempotency-key header must appear once");
-      const evalId = await this.evalScheduler?.submit(requestBody as EvalRequestInput, header ? { idempotencyKey: header } : {});
-      return json(response, 202, {
-        schema_version: SCHEMA_VERSION,
-        eval_id: evalId,
-        status: "queued",
-        links: {
-          self: `/v1/evals/${evalId}`,
-          events: `/v1/evals/${evalId}/events`,
-          cancel: `/v1/evals/${evalId}/cancel`,
-        },
-      });
+    if (request.method === "POST" && ["/v1/eval-controls", "/v1/evals"].includes(url.pathname)) {
+      return evaluationSubmission(request, response, { root: this.paths.root, scheduler: this.evalScheduler!,
+        rerunScheduler: this.evalRerunScheduler!, ordered: url.pathname === "/v1/eval-controls" });
     }
     if (request.method === "POST" && url.pathname === "/shutdown") {
       json(response, 202, { schema_version: SCHEMA_VERSION, status: "shutting_down" });
@@ -490,4 +452,3 @@ export class DaemonServer {
 }
 
 type RunRequestInput = import("../runs/index.js").RunRequestInput;
-type EvalRequestInput = import("../evals/index.js").EvalRequestInput;

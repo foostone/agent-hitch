@@ -38,7 +38,8 @@ test("CLI advertises bounded trajectory capabilities", () => {
     verifier_diagnostic_pages: "1",
     training_external_binding: "1", exact_policy_tokens: "1", training_policy_fencing: "1",
     training_harnesses: ["training-tool"], training_gpu_validation: "pending",
-    managed_model_node: "2", model_node_usage: "2", model_node_storage: "1", ordered_eval_control: "2",
+    external_endpoint_binding: "1", endpoint_evaluation_attempts: "1", endpoint_host_credentials: "1", endpoint_harnesses: ["codex", "model-call", "training-tool"], ordered_eval_control: "2",
+    evaluation_environment_binding: "3", evaluation_preparation: "1", evaluation_artifact_pins: "1",
     controller_runtime_observation: "2", local_execution_observation: "2", remote_execution_observation: "2",
   });
 });
@@ -171,7 +172,7 @@ test("CLI environment image GC is a dry run unless --apply is explicit", async (
   assert.deepEqual(report.removed, []);
 });
 
-test("CLI local eval automatically uses the root daemon", async (t) => {
+test("CLI external endpoint eval uses the explicitly selected root daemon", async (t) => {
   const root = await mkdtemp(path.join(tmpdir(), "hitch-cli-local-eval-"));
   t.after(() => forceRemove(root));
   const token = "daemon-secret";
@@ -201,11 +202,10 @@ test("CLI local eval automatically uses the root daemon", async (t) => {
 
   const result = await runCli([
     "--root", root, "eval", "run", "--dataset", "demo@1.0", "--harness", "codex@version:0.145.0",
-    "--model", "local/coder", "--device", "cpu", "--output", "json",
+    "--model", "endpoint/coder", "--daemon", "--output", "json",
   ]);
   assert.equal(result.code, 0, result.stderr || undefined);
-  assert.equal(submitted?.model, "local/coder");
-  assert.equal((submitted?.local_inference as { device?: string } | undefined)?.device, "cpu");
+  assert.equal(submitted?.model, "endpoint/coder");
 });
 
 test("CLI exposes harness revision commands and rejects mixed legacy selection", () => {

@@ -23,6 +23,7 @@ export type { DockerResourceObserver, DockerResourceObserverOptions } from "./do
 export type { BuildEvalExecutionPlanOptions } from "./execution-plan.js";
 export { DEFAULT_EXECUTION_LEASE_HEARTBEAT_MS, DEFAULT_EXECUTION_LEASE_TTL_MS, acceptExecutionLease, createExecutionLease, heartbeatExecutionLease, markExecutionLeaseLost, markExecutionLeaseRunning, parseExecutionLease, readExecutionLeases, recoverExecutionLeases, reissueExecutionLease, releaseExecutionLease } from "./execution-leases.js";
 export type { ExecutionLeaseHandle, ExecutionWorkerIdentity } from "./execution-leases.js";
+export { persistTerminalEvalResult } from "./eval-state.js";
 export { runEval } from "./service.js";
 export { harborArtifactDirectory, loadHarborArtifact, prepareHarborArtifact } from "./harbor-artifact-builder.js";
 export { DEFAULT_HARBOR_ARTIFACT_BUILDER_BASE_IMAGE } from "./harbor-artifact-builder-image.js";
@@ -45,7 +46,9 @@ export type { RepairVerifierDiagnosticsOptions, RepairVerifierDiagnosticsResultV
 export { captureVerifierScoreEvidence } from "./verifier-score-artifacts.js";
 export { MAX_VERIFIER_FEEDBACK_BYTES, MAX_VERIFIER_PROCESS_BYTES } from "../domain/index.js";
 export type { CapturedVerifierScoreEvidenceV1 } from "./verifier-score-artifacts.js";
-export { createEvalProgress, evalTrialKey, mergeEvalProgressTrial, parseEvalTrialRef, readEvalProgress, replaceInvalidEvalProgressTrial, writeEvalProgress } from "./progress.js";
+export { createEvalProgress, evalTrialKey, mergeEvalProgressTrial, parseEvalTrialRef, readEvalProgress, readEvalState, replaceInvalidEvalProgressTrial, writeEvalProgress } from "./progress.js";
+export { endpointEvaluationAttemptId, parseEndpointEvaluationAttempt, readEndpointEvaluationAttempts, admitEndpointEvaluationAttempt, endpointAttemptRequest } from "./endpoint-attempts.js";
+export type { EndpointEvaluationAttemptV1 } from "./endpoint-attempts.js";
 export { rerunEval, selectRerunTasks, selectRerunTrialSlots } from "./rerun.js";
 export type { EvalTrialSlot, RerunSelector } from "./rerun.js";
 export { EVAL_RERUN_TYPES, assertEvalRerunTypeSupported, evalRerunSemantics, parseEvalRerunType } from "./rerun-types.js";
@@ -95,3 +98,5 @@ export { stageRemoteRerunCompletion, readRemoteRerunCompletion, acknowledgeRemot
 
 export { parseRemoteExecutionAdmission, parseRemoteExecutionOwnership, parseRemoteWorkerHostIdentity, remoteExecutionBindingDigest } from "./remote-execution-ownership.js";
 export { parseRemoteWorkerCleanupChallenge, parseRemoteWorkerCleanupReceipt } from "./remote-worker-cleanup.js";
+export { prepareEvaluationBinding } from "../backends/index.js";
+export { assertEvalEnvironmentBinding } from "./environment-binding.js";

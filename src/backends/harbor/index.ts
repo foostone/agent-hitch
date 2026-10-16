@@ -18,3 +18,5 @@ export type { HarborEnvironmentBuildDeclarationV1, HarborEnvironmentImageDeclara
 export { DEFAULT_HARBOR_VERSION, HARBOR_CREDENTIAL_ENV, doctorHarbor, locateHarbor, managedHarborExecutable, setupHarbor } from "./tools.js";
 export { HOST_CREDENTIAL_HELPER_CAPABILITY, HOST_CREDENTIAL_HELPER_ENV } from "./host-credential-helper.js";
 export type { DoctorCheck, DoctorHarborOptions, DoctorResult, HarborLocation, LocateHarborOptions, HarborSetupResult, SetupHarborOptions } from "./tools.js";
+export { prepareEvaluationBinding, boundEvaluationEnvironment } from "./evaluation-binding.js";
+export { parseEvalArtifactPins, assertHarborArtifactPin, assertHarborArtifactPins } from "./artifact-pins.js";

@@ -42,7 +42,7 @@ fs.writeFileSync(counter, String(count));
 (async () => {
   const capture = config.agents[0].kwargs.model_capture;
   if (!capture || capture.topology !== "in-sandbox" || capture.required !== true) process.exit(3);
-  if ((capture.training_external || capture.managed_inference) && process.env.OPENAI_API_KEY) process.exit(8);
+  if ((capture.training_external || capture.external_endpoint) && process.env.OPENAI_API_KEY) process.exit(8);
   const evalId = config.agents[0].kwargs.eval_id;
   const bundle = path.join(${JSON.stringify(path.join(root, "capture-bundles"))}, evalId);
   const manifest = JSON.parse(fs.readFileSync(path.join(bundle, "manifest.json"), "utf8"));
@@ -106,7 +106,7 @@ fs.writeFileSync(counter, String(count));
 
 export async function writeExportedBundle(options: {
   bundle: string; runId: string; evalId: string; trialId: string; taskId: string; benchmarkId: string; benchmarkRevision: string;
-  managed?: { inference_id: string; model_id: string; model_node: import("../src/domain/index.js").ModelNodeBindingV2 };
+  external?: import("../src/domain/index.js").ExternalEndpointBindingV1;
   training?: import("../src/domain/index.js").TrainingProxyIdentityV1;
   harnessRef?: string;
 }): Promise<void> {
@@ -137,9 +137,10 @@ export async function writeExportedBundle(options: {
     parent: { kind: "eval", eval_id: options.evalId, trial_id: options.trialId, attempt: 1 },
     status: "succeeded", harness: { harness_id: options.training ? "training-tool" : "codex", requested_ref: options.harnessRef ?? "codex@version:1.2.3", revision_identity: `sha256:${"a".repeat(64)}` },
     ...(options.training ? { training_external: options.training } : {}),
-    model: options.managed ? { provider: "local", requested_id: "local/test", effective_id: options.managed.model_id,
-      inference_id: options.managed.inference_id, model_node: options.managed.model_node, identity_resolved: true }
+    model: options.external ? { provider: "external-endpoint", requested_id: options.external.endpoint_ref,
+      effective_id: options.external.wire_model, identity_resolved: false, endpoint_binding: options.external }
       : { provider: "openai", requested_id: options.training ? `training/${options.training.binding_id}` : "openai/remote", effective_id: "openai/remote", identity_resolved: false },
+    ...(options.external ? { endpoint_binding: options.external } : {}),
     protocol: { timeout_ms: 0, workspace_mode: "shared" }, request_ref: "request.json", resolution_ref: "resolution.json",
     result_ref: "result.json", trajectory_ref: "trajectory.ref.json", created_at: now, completed_at: now, sealed: false,
   });

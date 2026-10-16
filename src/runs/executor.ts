@@ -18,7 +18,6 @@ import {
 } from "../workspaces/index.js";
 import { TrajectoryProjector, TrajectoryWriter, canonicalTrajectoryFileRef, importDeepseekNativeSession, trajectoryRefPath, trajectoryRefV2 } from "../trajectories/index.js";
 import { ProviderCaptureWriter, redactProviderText } from "../trajectories/index.js";
-import type { ManagedInferenceLeaseV1 } from "../domain/index.js";
 import { validateRunRequest, validateCandidateDeadline } from "./request.js";
 import type { RunRequestInput } from "./request.js";
 import { buildManifest, safeAgentArgsForPersistence } from "./manifest.js";
@@ -27,9 +26,10 @@ import { adapterFidelity, applyEffectiveModelIdentity, failureResult, mergeRedac
 import { writeResultBundleIndex } from "./bundle.js";
 import { prepareAdapterProcess, prepareAdapterRuntimeHome } from "./adapter-process.js";
 import { completedRunManifest } from "./finalizer.js";
-import { harnessChildEnvironment, managedHarborModelRuntime } from "./local-inference-environment.js";
+import { harnessChildEnvironment } from "./local-inference-environment.js";
+import { runEndpointRuntime, endpointPrivateCredentials } from "./endpoint-runtime.js";
+import { freezeEndpointRequest, aggregateModelUsage } from "../model-access/index.js";
 import type { ExecuteRunOptions } from "./executor-types.js";
-import { acquireRunInference, bindManagedModelProxy } from "./local-inference-run.js";
 import { trainingHarborIdentity } from "./training-runtime.js";
 export async function executeRun({
   runId,
@@ -44,23 +44,16 @@ export async function executeRun({
   onProcess,
   signal,
   candidateDeadlineNs,
-  inferenceCoordinator,
-  managedModelProxy,
 }: ExecuteRunOptions): Promise<Record<string, unknown>> {
-  let normalized = await validateRunRequest(request);
+  const internalBinding = process.env.HITCH_HARBOR_INTERNAL === "1" && process.env.HITCH_EXTERNAL_ENDPOINT_BINDING;
+  const frozen = internalBinding ? { ...request, endpoint_binding: JSON.parse(internalBinding) } : await freezeEndpointRequest(root, request);
+  let normalized = await validateRunRequest(frozen);
   const trainingIdentity = trainingHarborIdentity(process.env, runId, normalized.model, normalized.harness_ref);
   if (trainingIdentity) normalized.model_identity = { provider: "slime-training", requested_id: normalized.model, effective_id: trainingIdentity.policy_version, identity_resolved: true };
-  const usesManagedLocalInference = Boolean(normalized.local_inference);
-  normalized = bindManagedModelProxy(normalized, managedModelProxy, process.env);
-  const managedProxyRuntime = managedModelProxy ? managedHarborModelRuntime(process.env, runId, managedModelProxy) : undefined;
   validateCandidateDeadline(normalized, candidateDeadlineNs);
-  const credentialValues = credentialValuesFromEnv(normalized.credential_names, process.env);
-  if (managedProxyRuntime) credentialValues.push(managedProxyRuntime.model_endpoint.base_url, managedProxyRuntime.model_endpoint_credential);
-  if (normalized.local_inference && !inferenceCoordinator) {
-    throw new HitchError("local model execution requires the managed inference coordinator", {
-      code: "inference_runtime_unavailable", exitCode: 3,
-    });
-  }
+  let endpointRuntime: Awaited<ReturnType<typeof runEndpointRuntime>> = { runtime: {}, close: async () => {}, credentials: [] };
+  const endpointCredentials = await endpointPrivateCredentials(root, normalized.endpoint_binding);
+  const credentialValues = [...credentialValuesFromEnv(normalized.credential_names, process.env), ...endpointCredentials];
   workspacePlan ||= await planWorkspace({ runId, sourceCwd: normalized.cwd, mode: normalized.workspace_mode, root });
   const runDirectory = path.join(runsRoot, runId);
   const priorManifest = await readJSON<Record<string, unknown> | null>(path.join(runDirectory, "manifest.json"), null);
@@ -91,10 +84,9 @@ export async function executeRun({
   let timedOut = false;
   let cancelled = false;
   let finalMessage: string | undefined;
-  let observedEffectiveModel: string | undefined;
+  let observedEffectiveModel: string | undefined, endpointModelMismatch: string | undefined;
   let abortHandler: (() => void) | undefined, processCleanup: (() => Promise<void>) | undefined;
   let result: Record<string, unknown> | undefined;
-  let inferenceLease: ManagedInferenceLeaseV1 | undefined;
   let stage = "event_setup";
   let resolution: ResolvedRevision | undefined = resolvedRevision;
   let artifact: PreparedArtifact | undefined;
@@ -115,21 +107,7 @@ export async function executeRun({
     sink = new EventSink(runDirectory, runId, onEvent);
     await sink.open();
     sinkOpened = true;
-    if (normalized.local_inference) {
-      stage = "inference_preflight";
-      const acquired = await acquireRunInference({
-        coordinator: inferenceCoordinator as NonNullable<typeof inferenceCoordinator>,
-        request: normalized as typeof normalized & { local_inference: NonNullable<typeof normalized.local_inference> },
-        runId,
-        ...(signal ? { signal } : {}),
-        manifest,
-        manifestPath,
-        onEvent: (event) => sink?.emit(event),
-      });
-      inferenceLease = acquired.lease;
-      manifest = acquired.manifest;
-      credentialValues.push(inferenceLease.credential);
-    }
+    endpointRuntime = await runEndpointRuntime(root, runId, normalized.endpoint_binding);
     providerCapture = await ProviderCaptureWriter.open({ runDirectory, structured: Boolean(adapter.translate), credentialValues });
     stage = "resolution";
     resolution ||= await resolveHarness(reference, { root });
@@ -199,11 +177,7 @@ export async function executeRun({
     const adapterState: Record<string, unknown> = {};
     const executionRequest = { ...normalized, cwd: workspaceLease.execution_workspace };
     const specification = await prepareAdapterProcess(adapter, executionRequest, artifact, resolution, runDirectory, runtimeHome,
-      inferenceLease ? {
-        model_endpoint: inferenceLease.binding,
-        model_endpoint_credential: inferenceLease.credential,
-        model_endpoint_max_output_tokens: inferenceLease.lock.generation.max_output_tokens,
-      } : managedProxyRuntime ?? {});
+      endpointRuntime.runtime);
     processCleanup = specification.cleanup;
     if (signal?.aborted) {
       result = failureResult(runId, startedAt, "cancelled", "agent run cancelled before launch", 9);
@@ -212,7 +186,7 @@ export async function executeRun({
       stage = "launch";
       workspaceLease = await markWorkspaceRunning(workspaceLease, { recordPath: workspacePath });
       const childEnvironment = harnessChildEnvironment({ parent: process.env, ...(specification.env ? { adapter: specification.env } : {}),
-        cwd: workspaceLease.execution_workspace, managedLocal: usesManagedLocalInference || Boolean(trainingIdentity) });
+        cwd: workspaceLease.execution_workspace, privateCredentials: endpointRuntime.credentials, managedLocal: Boolean(normalized.endpoint_binding) || Boolean(trainingIdentity) });
       const invocation = prepareSpawnCommand(specification.executable, specification.args);
       const remainingMs = candidateDeadlineNs === undefined ? normalized.timeout_ms
         : Number((candidateDeadlineNs - process.hrtime.bigint()) / 1_000_000n);
@@ -267,7 +241,9 @@ export async function executeRun({
         const record = typeof safeNative === "object" && safeNative !== null && !Array.isArray(safeNative)
           ? safeNative as Record<string, unknown>
           : { raw: safeNative };
-        observedEffectiveModel ||= providerModelId(record);
+        const observed = providerModelId(record);
+        if (observed && normalized.endpoint_binding && observed !== normalized.endpoint_binding.wire_model) endpointModelMismatch = observed;
+        observedEffectiveModel = endpointModelMismatch ?? observedEffectiveModel ?? observed;
         if (adapter.translate) {
           for (const event of adapter.translate(record, adapterState)) {
             if (event.type === "message.delta" && event.text) {
@@ -313,6 +289,9 @@ export async function executeRun({
       } else if (cancelled) {
         result = failureResult(runId, startedAt, "cancelled", "agent run cancelled", 9, exit);
         sink.emit({ type: "run.failed", status: "cancelled", error: (result.error as { code: string; message: string }) });
+      } else if (endpointModelMismatch) {
+        result = failureResult(runId, startedAt, "endpoint_model_mismatch", "upstream reported a model different from the frozen endpoint", 12, exit);
+        sink.emit({ type: "run.failed", status: "failed", error: result.error });
       } else if (exit.code !== 0) {
         const message = `agent exited with code ${exit.code ?? "null"}${exit.signal ? ` (${exit.signal})` : ""}`;
         result = failureResult(runId, startedAt, "agent_failed", message, 7, exit);
@@ -348,7 +327,7 @@ export async function executeRun({
     if (abortHandler) signal?.removeEventListener("abort", abortHandler);
     onProcess?.(null);
     await processCleanup?.().catch((error) => { result = failureResult(runId, startedAt, "adapter_cleanup_failed", redactProviderText((error as Error)?.message || String(error), new Map(), credentialValues), 12); });
-    await inferenceLease?.release().catch(() => {});
+    await endpointRuntime.close().catch(error => { result = failureResult(runId, startedAt, (error as { code?: string }).code ?? "endpoint_evidence_failed", "endpoint request evidence could not be finalized", 12); });
   }
   if (workspaceLease) {
     try {
@@ -490,8 +469,8 @@ export async function executeRun({
       error_code: ((result as { error?: { code?: string } }).error?.code) || "resolution_unavailable",
     });
   }
-  manifest = applyEffectiveModelIdentity({ manifest, requested: normalized.model_identity, result, ...(managedModelProxy ? { managedModelProxy } : {}),
-    ...(inferenceLease ? { inferenceLease } : {}), ...(observedEffectiveModel ? { observed: observedEffectiveModel } : {}) });
+  manifest = applyEffectiveModelIdentity({ manifest, requested: normalized.model_identity, result, ...(observedEffectiveModel ? { observed: observedEffectiveModel } : {}) });
+  if (normalized.endpoint_binding) { result.endpoint_binding = normalized.endpoint_binding; result.usage = await aggregateModelUsage(root, [runId]); }
   await atomicWriteJSON(resultPath, result);
   const terminalManifest = completedRunManifest(manifest, result as Record<string, unknown>, normalized);
   await atomicWriteJSON(manifestPath, terminalManifest);

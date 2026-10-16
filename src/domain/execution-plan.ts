@@ -124,6 +124,7 @@ export interface EvalExecutionPlanV1 {
   };
   provider: string;
   model_capture?: ModelCapturePlanV1;
+  endpoint_binding?: import("./endpoints.js").ExternalEndpointBindingV1;
   training_binding?: TrainingExternalBindingV1;
   max_parallelism: number;
   default_trial_resources: ResourceVectorV1;

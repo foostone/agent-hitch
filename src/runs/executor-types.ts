@@ -1,5 +1,5 @@
 import type { PreparedArtifact, ResolvedRevision } from "../artifacts/index.js";
-import type { ManagedInferenceCoordinator, RunId, Sha256 } from "../domain/index.js";
+import type { RunId, Sha256 } from "../domain/index.js";
 import type { VerifiedLocalGitSource } from "../revisions/index.js";
 import type { WorkspacePlan } from "../workspaces/index.js";
 import type { RunRequestInput } from "./request.js";
@@ -18,7 +18,4 @@ export interface ExecuteRunOptions {
   signal?: AbortSignal;
   /** Process-local monotonic deadline supplied by the managed benchmark CLI. */
   candidateDeadlineNs?: bigint;
-  inferenceCoordinator?: ManagedInferenceCoordinator;
-  /** Harbor-only: the controller has already bound this run through its authenticated model proxy. */
-  managedModelProxy?: { inference_id: Sha256; model_id: Sha256; model_node?: import("../domain/index.js").ModelNodeBindingV2 };
 }

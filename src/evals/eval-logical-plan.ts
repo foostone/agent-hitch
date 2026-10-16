@@ -67,6 +67,7 @@ export async function readEvalLogicalPlan(
     || request.local_inference?.inference_id && candidate?.inference_id !== request.local_inference.inference_id) {
     throw new TypeError("managed model node or inference lock differs from the frozen logical plan");
   }
+  if (sha256JSON(plan.endpoint_binding ?? null) !== sha256JSON(request.endpoint_binding ?? null) || sha256JSON(candidate?.endpoint_binding ?? null) !== sha256JSON(request.endpoint_binding ?? null)) throw new TypeError("endpoint binding differs from the frozen logical plan");
   if (sha256JSON(plan.training_binding ?? null) !== sha256JSON(request.training_binding ?? null)) throw new TypeError("training binding differs from the frozen logical plan");
   return plan as unknown as EvalLogicalPlanV1;
 }

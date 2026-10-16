@@ -392,6 +392,9 @@ const runtime_platform = task.endsWith("/two") ? "linux/arm64" : "linux/amd64";
 process.stdout.write(JSON.stringify({schema_version:"1",runtime_platform,task:{},verifier:{separate:false},compose_services:[{name:"main",replicas:1}],provider_sidecars:{main_egress:false,verifier_egress:false},environment_images:[],environment_image_fallbacks:[],environment_builds:[]}));
 `, { mode: 0o755 });
   const contracts: HarborTrialRuntimeContract[] = [];
+  const pins = ["linux-arm64", "linux-x64"].map(platform => ({ platform,
+    artifact_id: `sha256:${(platform === "linux-x64" ? "a" : "b").repeat(64)}`,
+    artifact_integrity: `sha256:${"c".repeat(64)}`, entrypoint_integrity: `sha256:${"d".repeat(64)}` }));
   const result = await runEvalProduction({
     root,
     harborExecutable: fakeHarbor,
@@ -406,6 +409,8 @@ process.stdout.write(JSON.stringify({schema_version:"1",runtime_platform,task:{}
         artifact: {
           ...prepared.artifact,
           artifact_id: `sha256:${digit.repeat(64)}`,
+          artifact_integrity: `sha256:${"c".repeat(64)}`,
+          entrypoint_integrity: `sha256:${"d".repeat(64)}`,
           platform: input.runtimeContract.artifactPlatform,
           node_version: input.runtimeContract.nodeVersion,
         },
@@ -415,6 +420,7 @@ process.stdout.write(JSON.stringify({schema_version:"1",runtime_platform,task:{}
       dataset,
       harness_ref: "pi@version:1.2.3",
       model: "openai/test-model",
+      artifact_pins: pins,
       attempts: 1,
       max_concurrent: 2,
       timeout_ms: 5_000,
@@ -425,6 +431,7 @@ process.stdout.write(JSON.stringify({schema_version:"1",runtime_platform,task:{}
     { dockerPlatform: "linux/arm64", artifactPlatform: "linux-arm64", nodeVersion: "v22.23.0" },
   ]);
   const evalDirectory = path.join(root, "evals", result.eval_id);
+  assert.deepEqual((await readJSON<{ artifact_pins: unknown }>(path.join(evalDirectory, "request.json"))).artifact_pins, pins);
   const plan = await readJSON<Record<string, unknown>>(path.join(evalDirectory, "plan.json"));
   assert.equal(plan.prepared_artifact, undefined);
   assert.deepEqual((plan.prepared_artifacts as Array<Record<string, unknown>>).map((entry) => ({
@@ -472,71 +479,6 @@ test("Harbor eval enables native permission bypass for Codex and OpenCode", asyn
 
   const pi = await validateEvalRequest(evalRequest({ agent_args: ["--extra-flag"] }));
   assert.deepEqual(pi.agent_args, ["--extra-flag"]);
-});
-
-test("local eval acquires one managed inference lease and seals the Harbor proxy identity", async (t) => {
-  const root = await mkdtemp(path.join(tmpdir(), "hitch-local-eval-"));
-  t.after(() => forceRemove(root));
-  const fakeNpm = await writeFakeNpm(root, { version: "0.92.0", packageName: "@openai/codex", binName: "codex" });
-  const fakeHarbor = await writeFakeHarbor(root);
-  const evalId = newEvalId();
-  const inferenceId = `sha256:${"8".repeat(64)}` as const;
-  const modelId = `sha256:${"9".repeat(64)}` as const;
-  let acquired: Record<string, unknown> | undefined;
-  let released = 0;
-  const result = await runEvalProduction({
-    evalId,
-    root,
-    harborExecutable: fakeHarbor,
-    env: {
-      ...process.env,
-      HITCH_NPM_PATH: fakeNpm,
-      HITCH_MODEL_PROXY_BIND_HOST: "127.0.0.1",
-      HITCH_MODEL_PROXY_ADVERTISED_HOST: "127.0.0.1",
-    },
-    harborArtifactBuilder: prepareHostHarborArtifactForTest,
-    inferenceCoordinator: {
-      acquire: async (input) => {
-        acquired = input as unknown as Record<string, unknown>;
-        return {
-          binding: {
-            kind: "managed-local", inference_id: inferenceId, api: "responses",
-            base_url: "http://127.0.0.1:65534/runs/run_00000000000000000000000000000000/v1/",
-            wire_model: "hitch-wire-model", credential_env_name: "HITCH_LOCAL_MODEL_TOKEN",
-            capabilities: { streaming: true, tool_calls: true, parallel_tool_calls: false, input_modalities: ["text"] },
-          },
-          credential: "a".repeat(64),
-          lock: { inference_id: inferenceId, model_id: modelId } as never,
-          service_id: `inference_${"a".repeat(32)}`,
-          service_epoch: 1,
-          release: async () => { released += 1; },
-        };
-      },
-    },
-    request: {
-      dataset: "demo@1.0",
-      harness_ref: "codex@version:0.92.0",
-      model: "local/coder",
-      attempts: 1,
-      max_concurrent: 1,
-      timeout_ms: 5_000,
-      local_inference: { device: "cuda", profile: "baseline", offline: true },
-    },
-  });
-  assert.equal(result.status, "failed", "fake Harbor exports intentionally incomplete run evidence");
-  assert.equal((result.error as { code?: string } | undefined)?.code, "eval_has_invalid_tasks", JSON.stringify(result));
-  assert.equal(released, 1);
-  assert.equal((acquired?.selection as { model?: string }).model, "local/coder");
-  assert.deepEqual(acquired?.evidence_owner, { kind: "eval", eval_id: evalId });
-  const evalDirectory = path.join(root, "evals", evalId);
-  const logical = await readJSON<{ candidate: { inference_id?: string } }>(path.join(evalDirectory, "logical-plan.json"));
-  assert.equal(logical.candidate.inference_id, inferenceId);
-  const config = await readJSON<Record<string, unknown>>(path.join(evalDirectory, "harbor", "job.json"));
-  const kwargs = ((config.agents as Record<string, unknown>[])[0]!.kwargs) as Record<string, unknown>;
-  assert.deepEqual(kwargs.managed_local_inference, { inference_id: inferenceId, model_id: modelId });
-  assert.deepEqual((kwargs.model_capture as { managed_inference?: unknown }).managed_inference, {
-    inference_id: inferenceId, model_id: modelId,
-  });
 });
 
 test("Harbor eval writes a custom Hitch agent job and normalizes rewards", async (t) => {
@@ -1484,7 +1426,9 @@ test("Harbor importer uses lock task id when result task_name is display-qualifi
 
 test("Harbor eval publishes a completed trial before the aggregate benchmark result", async (t) => {
   const root = await mkdtemp(path.join(tmpdir(), "hitch-eval-incremental-"));
-  t.after(() => forceRemove(root));
+  const release = path.join(root, "release-incremental-result");
+  let published!: () => void;
+  const progressPublished = new Promise<void>(resolve => { published = resolve; });
   const evalId = newEvalId();
   const dataset = path.join(root, "dataset");
   for (const taskId of ["task-one", "task-two"]) {
@@ -1522,12 +1466,19 @@ test("Harbor eval publishes a completed trial before the aggregate benchmark res
     root,
     harborExecutable: harbor,
     env: { ...process.env, HITCH_NPM_PATH: npm },
+    signal: t.signal,
+    onEvent: event => { if (event.type === "eval.trial.published" && event.run_id === first.runId) published(); },
     request: {
       dataset,
       harness_ref: "pi@version:1.2.3",
       model: "openai/test-model",
       timeout_ms: 5_000,
     },
+  });
+  t.after(async () => {
+    await writeFile(release, "release");
+    await running.catch(() => {});
+    await forceRemove(root);
   });
 
   const evalDirectory = path.join(root, "evals", evalId);
@@ -1538,12 +1489,8 @@ test("Harbor eval publishes a completed trial before the aggregate benchmark res
     planned_trials: number | null;
     trials: Array<{ run_id: string }>;
   };
-  let observed: ObservedProgress | null = null;
-  for (let index = 0; index < 200; index += 1) {
-    observed = await readJSON<ObservedProgress | null>(path.join(evalDirectory, "progress.json"), null).catch(() => null);
-    if (observed?.trials.length === 1) break;
-    await new Promise<void>((resolve) => setTimeout(resolve, 25));
-  }
+  await Promise.race([progressPublished, running.then(() => { throw new Error("eval completed before publishing progress"); })]);
+  const observed = await readJSON<ObservedProgress>(path.join(evalDirectory, "progress.json"));
   assert.equal(observed?.status, "running");
   assert.equal(observed?.generation, 1);
   assert.equal(observed?.planned_tasks, 2);
@@ -1551,6 +1498,7 @@ test("Harbor eval publishes a completed trial before the aggregate benchmark res
   assert.deepEqual(observed?.trials.map((trial) => trial.run_id), [first.runId]);
   await assert.rejects(stat(path.join(evalDirectory, "result.json")), (error: NodeJS.ErrnoException) => error.code === "ENOENT");
 
+  await writeFile(release, "release");
   const result = await running;
   assert.equal(result.status, "succeeded");
   const finalProgress = await readJSON<ObservedProgress>(path.join(evalDirectory, "progress.json"));
@@ -1696,7 +1644,9 @@ test("exhausted verifier-only retries fail explicitly without starting another c
 
 test("Harbor eval publishes a diagnostic trial after the bundle readiness grace", async (t) => {
   const root = await mkdtemp(path.join(tmpdir(), "hitch-eval-diagnostic-progress-"));
-  t.after(() => forceRemove(root));
+  const release = path.join(root, "release-missing-bundle");
+  let published!: () => void;
+  const progressPublished = new Promise<void>(resolve => { published = resolve; });
   const evalId = newEvalId();
   const dataset = path.join(root, "dataset");
   await mkdir(path.join(dataset, "task-timeout"), { recursive: true });
@@ -1708,6 +1658,8 @@ test("Harbor eval publishes a diagnostic trial after the bundle readiness grace"
     root,
     harborExecutable: harbor,
     env: { ...process.env, HITCH_NPM_PATH: npm },
+    signal: t.signal,
+    onEvent: event => { if (event.type === "eval.trial.published") published(); },
     trialBundleGraceMs: 100,
     request: {
       dataset,
@@ -1717,6 +1669,11 @@ test("Harbor eval publishes a diagnostic trial after the bundle readiness grace"
       infrastructure_retries: 0,
     },
   });
+  t.after(async () => {
+    await writeFile(release, "release");
+    await running.catch(() => {});
+    await forceRemove(root);
+  });
 
   const evalDirectory = path.join(root, "evals", evalId);
   type DiagnosticProgress = {
@@ -1724,12 +1681,8 @@ test("Harbor eval publishes a diagnostic trial after the bundle readiness grace"
     planned_trials: number | null;
     trials: Array<{ task_id: string; observation_status: string; invalid_reason?: string }>;
   };
-  let observed: DiagnosticProgress | null = null;
-  for (let index = 0; index < 200; index += 1) {
-    observed = await readJSON<DiagnosticProgress | null>(path.join(evalDirectory, "progress.json"), null).catch(() => null);
-    if (observed?.trials.length === 1) break;
-    await new Promise<void>((resolve) => setTimeout(resolve, 25));
-  }
+  await Promise.race([progressPublished, running.then(() => { throw new Error("eval completed before publishing progress"); })]);
+  const observed = await readJSON<DiagnosticProgress>(path.join(evalDirectory, "progress.json"));
   assert.equal(observed?.planned_tasks, 1);
   assert.equal(observed?.planned_trials, 1);
   assert.deepEqual(observed?.trials.map(({ task_id, observation_status, invalid_reason }) => ({
@@ -1743,6 +1696,7 @@ test("Harbor eval publishes a diagnostic trial after the bundle readiness grace"
   }]);
   await assert.rejects(stat(path.join(evalDirectory, "result.json")), (error: NodeJS.ErrnoException) => error.code === "ENOENT");
 
+  await writeFile(release, "release");
   const result = await running;
   assert.equal(result.status, "failed");
   assert.equal((result.trials as Array<{ observation_status: string }>)[0]?.observation_status, "invalid");
@@ -1800,6 +1754,10 @@ test("eval rerun executes only invalid tasks and preserves valid rewards", async
     ? { ...trial, invalid_reason: "verifier_infrastructure_failure" }
     : trial);
   await atomicWriteJSON(progressPath, verifierInvalidProgress);
+  // Simulate the same classified failure in both durable projections.
+  const resultPath = path.join(root, "evals", evalId, "result.json");
+  const verifierInvalidResult = await readJSON<Record<string, unknown>>(resultPath);
+  await atomicWriteJSON(resultPath, { ...verifierInvalidResult, trials: verifierInvalidProgress.trials });
 
   const rerun = await rerunEval({
     evalId,
@@ -1885,7 +1843,8 @@ test("eval rerun restores frozen local transport after interruption without re-e
   await atomicWriteJSON(path.join(evalDirectory, "execution-plan.json"), {});
   await atomicWriteJSON(path.join(evalDirectory, "progress.json"), progress);
 
-  for (const previousResult of [null, { status: "succeeded", trials: progress.trials }]) {
+  for (const previousResult of [null, { schema_version: "1", eval_id: evalId, benchmark_id: request.benchmark_id,
+    benchmark_revision: request.benchmark_revision, status: "succeeded", trials: progress.trials, started_at: progress.started_at, completed_at: progress.updated_at }]) {
     if (previousResult) await atomicWriteJSON(path.join(evalDirectory, "result.json"), previousResult);
     const rerun = await rerunEval({
       root, evalId, selector: { mode: "invalid" },
@@ -2128,7 +2087,7 @@ test("eval preparation restart stays failed when preparation fails again", async
   });
   const rerunId = "rerun_34343434343434343434343434343434";
   const evalDirectory = path.join(root, "evals", first.eval_id);
-  let previousTerminalVisible = false;
+  let previousTerminalArchived = false;
 
   await assert.rejects(rerunEval({
     evalId: first.eval_id,
@@ -2138,13 +2097,14 @@ test("eval preparation restart stays failed when preparation fails again", async
     harborExecutable: harbor,
     env: { ...process.env, HITCH_NPM_PATH: npm },
     harborArtifactBuilder: async () => {
-      const terminal = await readJSON<{ error: { code: string } }>(path.join(evalDirectory, "result.json"));
-      previousTerminalVisible = terminal.error.code === "first_preparation_failed";
+      const terminal = await readJSON<{ eval_id: string; error: { code: string } }>(path.join(evalDirectory, "reruns", rerunId, "previous-attempt", "result.json"));
+      previousTerminalArchived = terminal.eval_id === first.eval_id && terminal.error.code === "first_preparation_failed";
+      assert.equal(await readJSON(path.join(evalDirectory, "result.json"), null), null, "a new preparation attempt cannot retain the old terminal projection");
       throw new HitchError("second preparation failed", { code: "second_preparation_failed", exitCode: 12 });
     },
   }), (error: unknown) => (error as { code?: string }).code === "second_preparation_failed");
 
-  assert.equal(previousTerminalVisible, true);
+  assert.equal(previousTerminalArchived, true);
   const current = await readJSON<{ status: string; error: { code: string }; failure_stage: string }>(path.join(evalDirectory, "result.json"));
   assert.equal(current.status, "failed");
   assert.equal(current.error.code, "second_preparation_failed");
@@ -2501,14 +2461,19 @@ function publish(trial, reward) {
 const first = ${JSON.stringify(options.first)};
 const second = ${JSON.stringify(options.second)};
 publish(first, 1);
-setTimeout(() => {
+const release = ${JSON.stringify(path.join(directory, "release-incremental-result"))};
+const watcher = fs.watch(path.dirname(release), finish);
+function finish() {
+  if (!fs.existsSync(release)) return;
+  watcher.close();
   publish(second, 0.5);
   fs.writeFileSync(path.join(output, "result.json"), JSON.stringify({
     n_total_trials: 2,
     stats: {n_completed_trials:2,n_errored_trials:0,n_cancelled_trials:0}
   }));
   process.stdout.write("Results written\\n");
-}, 1000);
+}
+finish();
 `;
   await writeFile(executable, source, { mode: 0o755 });
   return executable;
@@ -2664,13 +2629,18 @@ fs.writeFileSync(path.join(trialDirectory, "result.json"), JSON.stringify({
   exception_info: {exception_type:"AgentTimeoutError"},
   verifier_result: {rewards:{reward:0}}
 }));
-setTimeout(() => {
+const release = ${JSON.stringify(path.join(directory, "release-missing-bundle"))};
+const watcher = fs.watch(path.dirname(release), finish);
+function finish() {
+  if (!fs.existsSync(release)) return;
+  watcher.close();
   fs.writeFileSync(path.join(output, "result.json"), JSON.stringify({
     n_total_trials: 1,
     stats: {n_completed_trials:0,n_errored_trials:1,n_cancelled_trials:0}
   }));
   process.stdout.write("Results written\\n");
-}, 1000);
+}
+finish();
 `;
   await writeFile(executable, source, { mode: 0o755 });
   return executable;

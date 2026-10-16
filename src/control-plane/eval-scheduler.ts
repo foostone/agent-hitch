@@ -1,8 +1,9 @@
+import { freezeEndpointSubmission } from "../model-access/index.js";
 import { rm } from "node:fs/promises";
 import path from "node:path";
-import type { EvalControlV1, EvalExecutionPolicyV1, EvalId, EvalRequest, EvalSubmissionV1, ExecutionLeaseV1, ExecutionProviderStatusV1, ExecutionWorkerV1, ManagedInferenceCoordinator, ModelCapturePlanV1, ResourceVectorV1 } from "../domain/index.js";
+import type { EvalControlV1, EvalExecutionPolicyV1, EvalId, EvalRequest, EvalSubmissionV1, ExecutionLeaseV1, ExecutionProviderStatusV1, ExecutionWorkerV1, ModelCapturePlanV1, ResourceVectorV1 } from "../domain/index.js";
 import { HitchError, SCHEMA_VERSION, atomicWriteJSON, credentialValuesFromEnv, ensureDir, hitchRootId, readJSON, safeDiagnosticMessage, sha256Bytes, sha256JSON, statePaths, withFileLock } from "../foundation/index.js";
-import { parseEvalExecutionPlan, readExecutionLeases, reapOwnedDockerResources, resolveLocalDatasetTaskIds, runEval, validateEvalId } from "../evals/index.js";
+import { assertEvalEnvironmentBinding, prepareEvaluationBinding, parseEvalExecutionPlan, readEvalState, readExecutionLeases, reapOwnedDockerResources, resolveLocalDatasetTaskIds, runEval, validateEvalId } from "../evals/index.js";
 import type { EvalDockerResourceReaper, EvalEnvironmentImageBuilder, EvalEnvironmentImageResolver, EvalRequestInput, EvalResult, RunEvalOptions } from "../evals/index.js";
 import { ResourceLedger, scaleResources, type ResourceLease } from "./resources.js";
 import { CollisionLockManager, type CollisionLease } from "./collisions.js";
@@ -52,7 +53,6 @@ export interface EvalSchedulerOptions {
   remoteWorkers?: RemoteWorkerRegistry;
   remoteWorkerProtocol?: RemoteWorkerProtocol;
   credentialEnv?: NodeJS.ProcessEnv;
-  inferenceCoordinator?: ManagedInferenceCoordinator;
 }
 
 export interface SubmitEvalOptions {
@@ -94,14 +94,13 @@ export class EvalScheduler {
   private readonly environmentImages: EvalImageServices;
   readonly remoteWork: RemoteWorkCoordinator | undefined;
   private readonly credentialEnv: NodeJS.ProcessEnv;
-  private readonly inferenceCoordinator: ManagedInferenceCoordinator | undefined;
   private queue: QueuedEval[] = [];
   private active = new Map<EvalId, ActiveEval>();
   private completions = new Map<EvalId, Promise<void>>();
   private accepting = true;
   private draining = false;
 
-  constructor({ root, resources, trialResources, executor = runEval, onEvent = () => {}, collisions = new CollisionLockManager(), workerId, provider = "local-docker", collisionDomainId, dockerResourceReaper = reapOwnedDockerResources, environmentImageResolver, environmentImageBuilder, remoteWorkers, remoteWorkerProtocol, credentialEnv = process.env, inferenceCoordinator }: EvalSchedulerOptions) {
+  constructor({ root, resources, trialResources, executor = runEval, onEvent = () => {}, collisions = new CollisionLockManager(), workerId, provider = "local-docker", collisionDomainId, dockerResourceReaper = reapOwnedDockerResources, environmentImageResolver, environmentImageBuilder, remoteWorkers, remoteWorkerProtocol, credentialEnv = process.env }: EvalSchedulerOptions) {
     this.root = root;
     this.evalsRoot = statePaths(root).evals;
     this.resources = resources;
@@ -116,7 +115,6 @@ export class EvalScheduler {
     this.workItems = new WorkItemDispatcher({ resources, collisions });
     this.dockerResourceReaper = dockerResourceReaper;
     this.credentialEnv = credentialEnv;
-    this.inferenceCoordinator = inferenceCoordinator;
     this.environmentImages = new EvalImageServices({ root, provider, resources, onEvent: this.onEvent, ...(environmentImageResolver ? { resolver: environmentImageResolver } : {}), ...(environmentImageBuilder ? { builder: environmentImageBuilder } : {}) });
     this.remoteWork = remoteWorkers && remoteWorkerProtocol
       ? new RemoteWorkCoordinator({ root, registry: remoteWorkers, protocol: remoteWorkerProtocol, collisions })
@@ -141,7 +139,7 @@ export class EvalScheduler {
 
   async submit(input: EvalSubmissionInputV1 | EvalRequestInput, options: SubmitEvalOptions = {}): Promise<EvalId> {
     if (!this.accepting) throw new HitchError("daemon is shutting down", { code: "daemon_shutting_down", exitCode: 12 });
-    const normalized = await normalizeEvalSubmissionInput(input, { provider: this.provider, trialResources: this.trialResources });
+    const normalized = await normalizeEvalSubmissionInput(await freezeEndpointSubmission(this.root, input, this.credentialEnv), { provider: this.provider, trialResources: this.trialResources });
     const remote = normalized.execution.provider !== this.provider;
     assertExecutionPolicySupported(normalized.execution, remote ? normalized.execution.provider : this.provider);
     if (remote && !this.remoteWork) throw new HitchError(`execution provider is unavailable: ${normalized.execution.provider}`, { code: "execution_provider_unavailable", exitCode: 10 });
@@ -192,6 +190,9 @@ export class EvalScheduler {
   }
 
   private async persistSubmission(normalized: EvalRequest, execution: EvalExecutionPolicyV1, modelCapturePlan: ModelCapturePlanV1, submissionDigest: `sha256:${string}`, keyHash?: `sha256:${string}`, reservedEvalId?: EvalId): Promise<QueuedEval> {
+    if (normalized.artifact_pins && execution.provider !== "local-docker") throw new HitchError("artifact pins require local-docker execution", { code: "eval_artifact_pin_unsupported", exitCode: 12 });
+    if (normalized.environment_binding && (execution.provider !== this.provider || ["proxy", "hybrid"].includes(modelCapturePlan.effective_mode))) throw new HitchError("environment bindings require local execution without a model proxy", { code: "evaluation_binding_unsupported", exitCode: 12 });
+    await assertEvalEnvironmentBinding(normalized, this.root, this.credentialEnv);
     const { evalId, directory } = await persistEvalSubmission({ evalsRoot: this.evalsRoot, request: normalized, execution, modelCapturePlan, submissionDigest,
       ...(keyHash ? { keyHash } : {}), ...(reservedEvalId ? { reservedEvalId } : {}), emit: (directory, id, event) => this.emitPersisted(directory, id, event) });
     return this.queuedEval(evalId, normalized, execution, modelCapturePlan, directory);
@@ -211,9 +212,9 @@ export class EvalScheduler {
     const controlValue = await readJSON<unknown | null>(path.join(directory, "control.json"), null);
     if (!request || !controlValue) return null;
     const control = parseEvalControl(controlValue);
-    const persistedResult = await readJSON<Record<string, unknown> | null>(path.join(directory, "result.json"), null);
+    const { result: persistedResult, progress: observedProgress } = await readEvalState(directory);
     const result = isTerminalControl(control.state) ? persistedResult : null;
-    const progress = await readJSON<Record<string, unknown> | null>(path.join(directory, "progress.json"), null);
+    const progress = observedProgress === null ? null : { ...observedProgress };
     const active = this.active.get(evalId);
     const workItems = this.workItems.evalSnapshot(evalId);
     const admitted = active?.fineGrained ? workItems?.active ?? 0 : control.admitted_parallelism;
@@ -363,6 +364,11 @@ export class EvalScheduler {
     this.completions.set(entry.evalId, completion);
   }
 
+  async prepareEnvironmentBinding(input: { model: string; passEnv: string[]; minimumValidityMs: number; signal?: AbortSignal }) {
+    if (this.provider !== "local-docker") throw new HitchError("environment bindings require the local Docker executor", { code: "evaluation_binding_unsupported", exitCode: 12 });
+    return prepareEvaluationBinding({ ...input, root: this.root, env: this.credentialEnv });
+  }
+
   private async execute(entry: QueuedEval, parallelism: number, fineGrained: boolean, lease: ResourceLease | undefined, controller: AbortController): Promise<void> {
     const remote = entry.execution.provider !== this.provider;
     const queuedControl = parseEvalControl(await readJSON(path.join(entry.directory, "control.json")));
@@ -400,7 +406,6 @@ export class EvalScheduler {
         workItemAdmission: workItemAdmission({ dispatcher: this.workItems, request: entry.request, collisionDomainId: this.collisionDomainId }),
       } : {}),
       ...(remote && this.remoteWork ? { remoteWorkExecutor: this.remoteWork.execute } : {}),
-      ...(this.inferenceCoordinator ? { inferenceCoordinator: this.inferenceCoordinator } : {}),
       precreated: true,
       resumeExisting: entry.resumeExisting,
       root: this.root,
