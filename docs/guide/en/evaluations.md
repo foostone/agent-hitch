@@ -30,7 +30,7 @@ Local interactive login does not automatically make credentials available to Doc
 
 If you started a daemon in [Quick Start](quickstart.md), use `hitch eval run --daemon` in the example below. Direct evaluations are rejected while a daemon owns the same root. The daemon must have `CODEX_API_KEY` in its own environment: if it was started before you configured the key, finish or cancel its active work, then stop it and restart from the configured shell with the same resource settings. See [daemon setup](daemon.md#start-one-coordinator).
 
-For managed models, follow the [local SGLang evaluation](model-inference.md#run-managed-sglang-locally) or [remote model node](model-inference.md#use-a-managed-remote-model-node) instructions. For external services, see [container access](model-inference.md#reach-the-model-from-a-docker-evaluation).
+For registered endpoints, follow [model inference](model-inference.md), including the Harbor proxy and credential environment.
 
 ## Run one example task
 

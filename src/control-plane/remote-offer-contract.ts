@@ -36,8 +36,8 @@ export async function validateRemoteOfferContract(offer: RemoteWorkOfferV1, feat
   }
   if (target) {
     const binding = remoteModelBinding(target);
-    const feature = binding.kind === "training-external" ? "training_external_binding" : "managed_model_node";
-    if (features[feature] !== "2" || !features.model_proxy) throw rejected(`remote worker lacks ${feature} v2`);
+    const feature = binding.kind === "training-external" ? "training_external_binding" : "external_endpoint_binding";
+    if (features[feature] !== (binding.kind === "training-external" ? "2" : "1") || !features.model_proxy) throw rejected(`remote worker lacks ${feature} v2`);
     if (!["2", "3"].includes(String(spec.schema_version)) || sha256JSON(spec.model_binding) !== sha256JSON(binding)) throw rejected("remote model target differs from the sealed work spec");
   } else if (spec.model_binding !== undefined) throw rejected("remote model work has no controller-owned target");
 }

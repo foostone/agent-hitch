@@ -36,10 +36,6 @@ export type RemoteModelBindingV2 = {
   training: TrainingExternalBindingV1;
 } | {
   schema_version: "2";
-  kind: "managed-inference";
-  inference_id: Sha256;
-  model_id: Sha256;
-  model_node: import("./inference.js").ModelNodeBindingV2;
-  api: "chat-completions" | "responses";
-  max_output_tokens: number;
+  kind: "external-endpoint";
+  endpoint: import("./endpoints.js").ExternalEndpointBindingV1;
 };

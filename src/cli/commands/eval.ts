@@ -1,3 +1,6 @@
+import { freezeEndpointRequest } from "../../model-access/index.js";
+import { readJSON } from "../../foundation/index.js";
+import { parseEndpointEvaluationAttempt } from "../../evals/index.js";
 import { evalBindingCommand } from "./eval-binding.js";
 import { DEFAULT_HARBOR_VERSION, doctorHarbor, setupHarbor } from "../../backends/index.js";
 import { readOrderedEvalIntent as readControl } from "../../control-plane/index.js";
@@ -7,7 +10,6 @@ import { daemonClient, PREPARATION_STREAM_TYPE, probeDaemonHealth } from "../../
 import { HitchError, SCHEMA_VERSION, invalidInput, positiveInteger } from "../../foundation/index.js";
 import { assertNoArgs, parseEvalRequest, takeFlag, takeOption, takeRepeatedOption } from "../arguments.js";
 import { waitForDaemonEval, waitForDaemonEvalRerun } from "../output.js";
-import { ensureLocalInferenceDaemon } from "./daemon.js";
 
 export async function evalCommand(args: string[], root: string): Promise<void> {
   const action = args.shift();
@@ -39,6 +41,16 @@ async function evalRerunCommand(args: string[], root: string): Promise<void> {
   const taskNames = takeRepeatedOption(args, "--task");
   const rerunType = parseEvalRerunType(takeOption(args, "--type") || "candidate-restart");
   const verifierRuntimeId = takeOption(args, "--verifier-runtime");
+  const attemptFile = takeOption(args, "--endpoint-attempt-file");
+  let endpointAttempt: import("../../evals/index.js").EndpointEvaluationAttemptV1 | undefined;
+  if (attemptFile) {
+    const input = await readJSON<Record<string, unknown>>(attemptFile);
+    const ready = input.endpoint_binding as Record<string, unknown>;
+    const source = await inspectEval(evalId, { root });
+    const frozen = await freezeEndpointRequest<Record<string, unknown>>(root, { model: ready?.endpoint_ref, harness_ref: source.request?.harness_ref, model_binding: ready });
+    endpointAttempt = parseEndpointEvaluationAttempt({ ...input, endpoint_binding: frozen.endpoint_binding });
+    if (!useDaemon || rerunType !== "candidate-restart" || !invalid) throw invalidInput("endpoint attempt requires --daemon --invalid --type candidate-restart");
+  }
   if (verifierRuntimeId !== undefined && (rerunType !== "verifier-only" || !/^sha256:[a-f0-9]{64}$/.test(verifierRuntimeId))) throw invalidInput("--verifier-runtime requires verifier-only and an exact runtime digest");
   const rerunId = takeOption(args, "--rerun-id");
   if (rerunId !== undefined && !/^rerun_[a-f0-9]{32}$/.test(rerunId)) throw invalidInput("eval rerun id is invalid");
@@ -62,6 +74,7 @@ async function evalRerunCommand(args: string[], root: string): Promise<void> {
     const input = {
       ...(rerunId === undefined ? {} : { rerun_id: rerunId }), rerun_type: rerunType,
       ...(verifierRuntimeId ? { verifier_runtime_id: verifierRuntimeId } : {}),
+      ...(endpointAttempt ? { endpoint_attempt: endpointAttempt } : {}),
       selector: invalid ? { mode: "invalid" } : { mode: "tasks", task_names: taskNames },
     };
     const accepted = await client.request(controlFile ? "/v1/eval-controls" : `/v1/evals/${evalId}/reruns`, {
@@ -157,16 +170,6 @@ async function evalRunCommand(args: string[], root: string): Promise<void> {
   const request = parseEvalRequest(args, Boolean(benchmark || benchmarkLock));
   assertNoArgs(args);
   if (!new Set(["json", "jsonl"]).has(output)) throw invalidInput("--output must be json or jsonl");
-  if (String(request.model || "").startsWith("local/")) {
-    if (benchmark || benchmarkLock) {
-      throw new HitchError("local inference is currently supported for dataset evals, not benchmark packages", {
-        code: "local_inference_topology_unsupported",
-        exitCode: 2,
-      });
-    }
-    await ensureLocalInferenceDaemon(root);
-    useDaemon = true;
-  }
   if (useDaemon) {
     if (benchmark || benchmarkLock) throw invalidInput("standard package runs currently require a local root without --daemon");
     if (requestedEvalId !== undefined) throw invalidInput("--eval-id is unavailable with --daemon; submission IDs are server-assigned");

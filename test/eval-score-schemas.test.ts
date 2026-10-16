@@ -64,6 +64,29 @@ test("published progress schema accepts terminal status projections", async () =
   assert.equal(ajv.validate(`${schemaBase}eval-progress.schema.json`, { ...progress, status: "unknown" }), false);
 });
 
+test("published endpoint schemas separate public evidence from private ready inputs", async () => {
+  const ajv = await schemaValidator(), capabilities = { streaming: true, tool_calls: true, parallel_tool_calls: false, input_modalities: ["text"] };
+  const connection = { base_url: "http://127.0.0.1:30000/tenant/v1", auth: { kind: "env", name: "HITCH_TEST_KEY" } };
+  const binding = { schema_version: "1", kind: "external-endpoint", endpoint_ref: "endpoint/coder", endpoint_revision: `sha256:${"a".repeat(64)}`,
+    api: "responses", wire_model: "candidate-v1", capabilities, generation: { max_output_tokens: 4096, temperature: 0 } };
+  const valid = (name: string, document: unknown) => assert.equal(ajv.validate(`${schemaBase}${name}.schema.json`, document), true, ajv.errorsText());
+  const invalid = (name: string, document: unknown) => assert.equal(ajv.validate(`${schemaBase}${name}.schema.json`, document), false, `${name} accepted ${JSON.stringify(document)}`);
+  valid("external-endpoint-binding", binding);
+  valid("ready-endpoint-binding", { ...binding, connection });
+  valid("external-endpoint-config", { schema_version: "1", ...connection, api: binding.api, wire_model: binding.wire_model, capabilities });
+  const result = documentsWithTrial(trialFixture).find(([name]) => name === "eval-result.schema.json")![1] as Record<string, unknown>;
+  valid("eval-result", { ...result, endpoint_binding: binding, usage: { source: "model-interactions-v1", completeness: "partial" }, task_completed: true });
+  invalid("eval-result", { ...result, endpoint_binding: { ...binding, connection } });
+  for (const document of [
+    { ...binding, connection }, { ...binding, auth: connection.auth },
+    { ...binding, endpoint_ref: "endpoint/Uppercase" }, { ...binding, endpoint_revision: "sha256:invalid" },
+    { ...binding, capabilities: { ...capabilities, parallel_tool_calls: true } },
+    { ...binding, generation: { max_output_tokens: 4096, stop: ["hidden budget override"] } },
+  ]) invalid("external-endpoint-binding", document);
+  invalid("ready-endpoint-binding", binding);
+  invalid("ready-endpoint-binding", { ...binding, connection: { ...connection, auth: { kind: "env", name: "HITCH_TEST_KEY", value: "inline-secret" } } });
+});
+
 const trialFixture = {
   trial_id: "task-one__1", run_id: `run_${"a".repeat(32)}`, task_id: "task-one",
   attempt: 1, observation_status: "valid" as const, reward: 0, verifier_result_ref: "verifier/result.json",
@@ -89,7 +112,7 @@ function documentsWithTrial(trial: unknown): Array<[typeof scoreSchemas[number],
 
 async function schemaValidator(): Promise<Ajv2020> {
   const ajv = new Ajv2020({ strict: false, strictNumbers: true, validateFormats: false, allErrors: true });
-  for (const name of [...scoreSchemas, "verifier-evidence.schema.json", "regrade-assessment-reference.schema.json"]) {
+  for (const name of [...scoreSchemas, "verifier-evidence.schema.json", "regrade-assessment-reference.schema.json", "external-endpoint-binding.schema.json", "external-endpoint-config.schema.json", "ready-endpoint-binding.schema.json"]) {
     const schema: unknown = JSON.parse(await readFile(new URL(`../../docs/schemas/${name}`, import.meta.url), "utf8"));
     ajv.addSchema(schema as object, `${schemaBase}${name}`);
   }

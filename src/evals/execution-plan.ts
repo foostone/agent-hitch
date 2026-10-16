@@ -1,20 +1,17 @@
 import type { BackendWorkItemV1, EnvironmentImageFallbackV1, EnvironmentImageUseV1, EvalExecutionPlanV1, EvalId, EvalRequest, ModelCapturePlanV1, ResourceVectorV1, SchedulingHintV1, Sha256, TaskResourceRequirementV1, TrialSlotV1 } from "../domain/index.js";
 import { sha256JSON } from "../foundation/index.js";
-import { parseTrainingBinding } from "../model-access/index.js";
+import { parseTrainingBinding, parseEndpointBinding } from "../model-access/index.js";
 import { artifactPinFields, opaqueWorkId, parseArtifactAssignments, parseRuntimeContract, workItemId } from "./execution-plan-artifacts.js";
 import type { EvalArtifactAssignmentInputV1, ParsedArtifactAssignment } from "./execution-plan-artifacts.js";
 import { imagesForTasks, parseEnvironmentImageFallbacks, parseEnvironmentImageUses } from "./execution-plan-images.js";
 import { parseTaskResourceRequirements, reservationForTasks } from "./execution-plan-resources.js";
-
 export type { EvalArtifactAssignmentInputV1 } from "./execution-plan-artifacts.js";
-
 export const DEFAULT_EVAL_TRIAL_RESOURCES: ResourceVectorV1 = {
   cpu_millis: 1_000,
   memory_bytes: 1024 * 1024 * 1024,
   container_slots: 1,
   build_slots: 0,
 };
-
 export interface BuildEvalExecutionPlanOptions {
   evalId: EvalId;
   request: EvalRequest;
@@ -36,7 +33,6 @@ export interface BuildEvalExecutionPlanOptions {
   workItemMode?: "attempt-shards" | "task-slots";
   taskScheduling?: Readonly<Record<string, SchedulingHintV1>>;
 }
-
 export function buildEvalExecutionPlan(options: BuildEvalExecutionPlanOptions): EvalExecutionPlanV1 {
   const resources = parseResourceVector(options.trialResources || DEFAULT_EVAL_TRIAL_RESOURCES, "default trial resources");
   if (!isSha256(options.candidate.revisionIdentity) || !isSha256(options.candidate.artifactId)) {
@@ -67,6 +63,7 @@ export function buildEvalExecutionPlan(options: BuildEvalExecutionPlanOptions): 
       ? artifactAssignments.map((entry) => ({ task_ids: entry.taskIds, artifact_id: entry.artifactId, runtime_contract: entry.runtimeContract }))
       : [{ task_ids: tasks ?? [], artifact_id: options.candidate.artifactId }],
     requested_model: options.request.model,
+    ...(options.request.endpoint_binding ? { endpoint_binding: options.request.endpoint_binding } : {}),
     ...(options.request.training_binding ? { training_binding: options.request.training_binding } : {}),
     ...(options.candidate.inferenceId ? { inference_id: options.candidate.inferenceId } : {}),
     ...(options.request.local_inference?.model_node ? { model_node: options.request.local_inference.model_node } : {}),
@@ -100,6 +97,7 @@ export function buildEvalExecutionPlan(options: BuildEvalExecutionPlanOptions): 
     },
     provider,
     ...(modelCapture ? { model_capture: modelCapture } : {}),
+    ...(options.request.endpoint_binding ? { endpoint_binding: options.request.endpoint_binding } : {}),
     ...(options.request.training_binding ? { training_binding: options.request.training_binding } : {}),
     max_parallelism: options.maxParallelism,
     default_trial_resources: resources,
@@ -121,7 +119,7 @@ export function parseEvalExecutionPlan(value: unknown): EvalExecutionPlanV1 {
   if (!isRecord(value)) throw new TypeError("eval execution plan must be an object");
   const plan = value;
   assertOnlyKeys(plan, [
-    "schema_version", "planner", "eval_id", "membership", "candidate_identity", "benchmark", "provider", "model_capture", "training_binding",
+    "schema_version", "planner", "eval_id", "membership", "candidate_identity", "benchmark", "provider", "model_capture", "training_binding", "endpoint_binding",
     "max_parallelism", "default_trial_resources", "task_resources", "image_fallbacks", "slots", "work_items", "retry_policy", "created_at",
   ], "eval execution plan");
   if (plan.schema_version !== "1" || plan.planner !== "hitch-local-v1" || !isEvalId(plan.eval_id)
@@ -133,6 +131,7 @@ export function parseEvalExecutionPlan(value: unknown): EvalExecutionPlanV1 {
   }
   const benchmark = parseBenchmark(plan.benchmark);
   const modelCapture = plan.model_capture === undefined ? undefined : parseModelCapturePlan(plan.model_capture);
+  const endpointBinding = plan.endpoint_binding === undefined ? undefined : parseEndpointBinding(plan.endpoint_binding);
   const trainingBinding = plan.training_binding === undefined ? undefined : parseTrainingBinding(plan.training_binding);
   if (trainingBinding && (!modelCapture?.required || modelCapture.effective_mode !== "proxy"
     || modelCapture.topology !== (plan.provider === "local-docker" ? "host-side" : "in-sandbox"))) throw new TypeError("training plan requires a mandatory generation proxy on its execution provider");
@@ -160,6 +159,7 @@ export function parseEvalExecutionPlan(value: unknown): EvalExecutionPlanV1 {
     benchmark,
     provider: plan.provider,
     ...(modelCapture ? { model_capture: modelCapture } : {}),
+    ...(endpointBinding ? { endpoint_binding: endpointBinding } : {}),
     ...(trainingBinding ? { training_binding: trainingBinding } : {}),
     max_parallelism: plan.max_parallelism as number,
     default_trial_resources: resources,

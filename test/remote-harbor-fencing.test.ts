@@ -63,14 +63,14 @@ test(`worker credential ${action} stops the original candidate and a new generat
   const capacity = { cpu_millis: 1_000, memory_bytes: 1024 ** 3, container_slots: 1, build_slots: 0 };
   const registration = { schema_version: "1" as const, worker_id: "worker_live_candidate", provider: "remote-docker",
     collision_domain_id: "docker-engine:live-fixture", platforms: [`${process.platform}-${process.arch}`], backends: [{ id: "harbor", version: "0.21.0" }],
-    features: { docker: true, buildkit: true, model_proxy: true, isolated_same_task_attempts: false, managed_model_node: "2" as const }, task_membership: ["known" as const],
+    features: { docker: true, buildkit: true, model_proxy: true, isolated_same_task_attempts: false, external_endpoint_binding: "1" as const }, task_membership: ["known" as const],
     capacity: { total: capacity, allocatable: capacity, reserved_for_system: { cpu_millis: 0, memory_bytes: 0, container_slots: 0, build_slots: 0 } } };
   const credential = await RemoteWorkerHttpClient.register({ baseUrl, adminToken: (await readFile(statePaths(root).token, "utf8")).trim(), registration });
   const registrationFile = path.join(temporary, "worker-registration.json"), credentialFile = path.join(temporary, "worker-credential.json");
   await atomicWriteJSON(registrationFile, registration); await atomicWriteJSON(credentialFile, credential);
   const submitted = await admin.request("/v1/evals", { method: "POST", body: JSON.stringify({
-    request: { dataset, harness_ref: "codex@version:0.145.0", model: "local/test", max_concurrent: 1, infrastructure_retries: 0,
-      local_inference: { inference_id: node.prepared.lock.inference_id, model_node: node.binding } },
+    request: { dataset, harness_ref: "codex@version:0.145.0", model: "endpoint/test", max_concurrent: 1, infrastructure_retries: 0,
+      model_binding: node.ready },
     execution: { provider: "remote-docker", max_parallelism: 1, resources: { default_trial: capacity }, build: { mode: "backend" }, model_capture: { mode: "proxy", required: true } },
   }) });
   const evalId = submitted.eval_id as string, directory = path.join(root, "evals", evalId), trialId = "one__random-1";
@@ -78,7 +78,7 @@ test(`worker credential ${action} stops the original candidate and a new generat
   const request = await readJSON<{ benchmark_id: string; benchmark_revision: string }>(path.join(directory, "request.json"));
   await writeExportedBundle({ bundle: path.join(root, "capture-bundles", evalId), runId, evalId, trialId, taskId: "one",
     benchmarkId: request.benchmark_id, benchmarkRevision: request.benchmark_revision, harnessRef: "codex@version:0.145.0",
-    managed: { inference_id: node.prepared.lock.inference_id, model_id: node.model.model_id, model_node: node.binding } });
+    external: node.binding });
   const worker = launch([fileURLToPath(new URL("../bin/hitch.js", import.meta.url)), "--root", workerRoot, "worker", "run", "--server", baseUrl,
     "--registration", registrationFile, "--credential-file", credentialFile, "--harbor", harbor, "--docker", docker, "--once", "--poll-interval", "50", "--heartbeat-interval", "50"]);
   const workerExit = once(worker, "exit");
@@ -118,9 +118,7 @@ test(`worker credential ${action} stops the original candidate and a new generat
   assert.ok(["terminal", "identity-mismatch"].includes(await inspectProcessIdentity(candidateIdentity)));
   assert.equal((await readJSON<typeof ownership>(ownershipFile)).phase, "released");
   assert.equal(await readFile(path.join(root, "capture-harbor-count"), "utf8"), "1");
-  assert.equal(node.requests.filter(request => request.body.input !== "Reply with one word.").length, 1);
-  const calls = (await readFile(node.calls, "utf8")).trim().split("\n");
-  assert.equal(calls.filter(call => call === "inference.start").length, 1);
+  assert.equal(node.requests.filter(request => typeof request.body.input === "string").length, 1);
   const lost = await eventually(async () => {
     const values = await readExecutionLeases(directory); return values[0]?.state === "lost" ? values : undefined;
   }, () => output.join(""));
@@ -149,7 +147,7 @@ test(`worker credential ${action} stops the original candidate and a new generat
   assert.deepEqual(await readJSON(path.join(statePaths(root).workerProtocol, "workers", offer.worker_id, "offers", `${offer.offer_id}.json`)), finalOffer);
   assert.deepEqual(await readJSON(admissionFile), admission);
   assert.equal(await readFile(path.join(root, "capture-harbor-count"), "utf8"), "1");
-  assert.equal(node.requests.filter(request => request.body.input !== "Reply with one word.").length, 1);
+  assert.equal(node.requests.filter(request => typeof request.body.input === "string").length, 1);
   assert.equal(output.join("").includes(node.access.engineToken), false); assert.equal(output.join("").includes(credential.token), false);
 });
 }

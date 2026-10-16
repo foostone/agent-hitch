@@ -161,6 +161,9 @@
         "inference_id": {
           "type": "string",
           "pattern": "^sha256:[a-f0-9]{64}$"
+        },
+        "endpoint_binding": {
+          "$ref": "external-endpoint-binding.schema.json"
         }
       }
     },
@@ -238,6 +241,9 @@
     "completed_at": {
       "type": "string",
       "format": "date-time"
+    },
+    "endpoint_binding": {
+      "$ref": "external-endpoint-binding.schema.json"
     }
   },
   "$defs": {

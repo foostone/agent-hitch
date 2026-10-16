@@ -3,11 +3,13 @@ import assert from "node:assert/strict";
 import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { setImmediate } from "node:timers/promises";
 import { RemoteWorkerHttpClient, RemoteWorkerRunner } from "../src/control-plane/index.js";
+import type { RemoteWorkerExecutionResult, RemoteWorkerExecutor } from "../src/control-plane/index.js";
 import { DaemonServer, daemonClient } from "../src/daemon/index.js";
 import { runEval as runEvalProduction } from "../src/evals/index.js";
 import type { RunEvalOptions } from "../src/evals/index.js";
-import { statePaths } from "../src/foundation/index.js";
+import { HitchError, statePaths } from "../src/foundation/index.js";
 import { releaseRemoteHarborOffer, remoteHarborWorker } from "../src/workers/index.js";
 import { prepareHostHarborArtifactForTest, writeFakeHarbor, writeFakeNpm } from "../test-support/helpers.js";
 import { writeResourceInspector, writeEmptyDocker } from "../test-support/remote-harbor-model.js";
@@ -19,7 +21,11 @@ const ZERO = { cpu_millis: 0, memory_bytes: 0, container_slots: 0, build_slots: 
 const TRIAL = { cpu_millis: 1_000, memory_bytes: 1024 ** 3, container_slots: 1, build_slots: 0 };
 const runEval = (options: RunEvalOptions) => runEvalProduction({ ...options, harborArtifactBuilder: prepareHostHarborArtifactForTest });
 
-for (const resourceAware of [false, true]) test(`packaged worker executes a staged ${resourceAware ? "resource v3" : "legacy"} remote eval through Harbor and returns a verifiable result bundle`, async (t) => {
+for (const resourceAware of [false, true]) test(`packaged worker executes a staged ${resourceAware ? "resource v3" : "legacy"} remote eval through Harbor and returns a verifiable result bundle`, t => verifyRemoteHarbor(t, resourceAware));
+
+test("remote Harbor observes event publication rejection before its running backend settles and retains the failure", t => verifyRemoteHarbor(t, false, true));
+
+async function verifyRemoteHarbor(t: test.TestContext, resourceAware: boolean, rejectPublication = false): Promise<void> {
   const directory = await mkdtemp(path.join(tmpdir(), "hitch-remote-controller-"));
   const fixture = resourceAware ? await resourceFixture(directory, 1, ["one"]) : undefined;
   const controllerRoot = fixture?.store.root ?? directory;
@@ -33,6 +39,12 @@ for (const resourceAware of [false, true]) test(`packaged worker executes a stag
   const secret = "controller-only-short-ttl-secret";
   const npm = await writeFakeNpm(controllerRoot);
   const harbor = await writeFakeHarbor(controllerRoot, { leakEnvName: "CUSTOM_REMOTE_SECRET" });
+  const backendStarted = path.join(workerRoot, "backend-started"), backendResume = path.join(workerRoot, "backend-resume");
+  if (rejectPublication) {
+    const barrier = `fs.writeFileSync(${JSON.stringify(backendStarted)}, "running");
+  if (!fs.existsSync(${JSON.stringify(backendResume)})) { setTimeout(runCandidate, 10); return; }`;
+    await writeFile(harbor, (await readFile(harbor, "utf8")).replace('const runCandidate = () => {', `const runCandidate = () => {\n  ${barrier}`));
+  }
   const inspector = await writeResourceInspector(controllerRoot);
   const docker = await writeEmptyDocker(controllerRoot);
   if (resourceAware) {
@@ -75,8 +87,22 @@ fs.writeFileSync(${JSON.stringify(path.join(workerRoot, "materialization-observe
   const credential = await RemoteWorkerHttpClient.register({ baseUrl, adminToken, registration });
   const client = new RemoteWorkerHttpClient({ baseUrl, credential });
   const execution = { root: workerRoot, env: workerEnv, harborExecutable: harbor, dockerExecutable: docker, trialBundleGraceMs: 0 };
+  const executor = remoteHarborWorker(execution);
+  let publicationRejected!: () => void;
+  const rejection = new Promise<void>(resolve => { publicationRejected = resolve; });
+  let executionResult: RemoteWorkerExecutionResult | undefined;
+  const execute: RemoteWorkerExecutor = rejectPublication ? async input => {
+    executionResult = await executor({ ...input, emit: async (type, payload) => {
+      if (type !== "eval.backend.started") return input.emit(type, payload);
+      await waitFor(async () => await readFile(backendStarted, "utf8").catch(() => undefined), t.signal);
+      publicationRejected();
+      throw new HitchError("fixture event publication failed", { code: "fixture_event_publication_failed", exitCode: 10 });
+    } });
+    return executionResult;
+  } : executor;
+  execute.prepare = executor.prepare!;
   const runner = new RemoteWorkerRunner({
-    client, capacity: TRIAL, execute: remoteHarborWorker(execution), once: true,
+    client, capacity: TRIAL, execute, once: true,
     releaseUnknown: (offer) => releaseRemoteHarborOffer(execution, offer),
     pollIntervalMs: 50, heartbeatIntervalMs: 50, retryIntervalMs: 50,
     signal: AbortSignal.any([workerController.signal, t.signal]),
@@ -99,6 +125,14 @@ fs.writeFileSync(${JSON.stringify(path.join(workerRoot, "materialization-observe
     }),
   });
   const evalId = submitted.eval_id as string;
+  if (rejectPublication) {
+    await rejection;
+    // Let Node finish a turn while the backend remains held. A deferred
+    // rejection handler would already produce an unhandled rejection here.
+    await setImmediate(); await setImmediate();
+    assert.equal(executionResult, undefined, "the backend must still be running when event publication fails");
+    await writeFile(backendResume, "continue");
+  }
   let status: Record<string, unknown>;
   try {
     status = await waitFor(async () => {
@@ -111,6 +145,13 @@ fs.writeFileSync(${JSON.stringify(path.join(workerRoot, "materialization-observe
   }
   await worker;
   assert.equal((status.result as { status: string }).status, "failed", JSON.stringify(status.result));
+  if (rejectPublication) {
+    assert.equal(executionResult?.status, "failed", "observing a rejection must not turn event publication failure into success");
+    assert.equal(JSON.parse(executionResult!.artifacts![0]!.body.toString()).code, "fixture_event_publication_failed");
+    assert.equal((status.result as { error: { code: string } }).error.code, "harbor_failed");
+    assert.equal((await client.listOffers()).length, 0, "publication failure must still finish the cleanup and release lifecycle");
+    return;
+  }
   assert.equal(((status.result as { error?: { code?: string } }).error?.code), "eval_has_infrastructure_failures");
   const trials = (status.result as { trials: Array<{ run_id: string; task_id: string; observation_status: string }> }).trials;
   assert.equal(trials.length, 1);
@@ -139,4 +180,4 @@ fs.writeFileSync(${JSON.stringify(path.join(workerRoot, "materialization-observe
       assert.equal((await readFile(file)).includes(Buffer.from(secret)), false, `remote credential leaked into ${path.relative(root, file)}`);
     }
   }
-});
+}

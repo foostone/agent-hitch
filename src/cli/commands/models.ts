@@ -1,57 +1,41 @@
 import { invalidInput, readJSON } from "../../foundation/index.js";
-import { addLocalModel, addModelFromNode, gcLocalModels, readModelNodeBinding, resolveLocalModel, verifyLocalModel, verifyModelOnNode } from "../../inference/index.js";
+import { addLocalModel, gcLocalModels, resolveLocalModel, verifyLocalModel } from "../../inference/index.js";
+import { connectEndpoint, resolveEndpoint, publicEndpointBinding, verifyEndpoint, saveEndpointVerification, persistEndpointCredential } from "../../model-access/index.js";
 import { assertNoArgs, takeFlag, takeOption } from "../arguments.js";
 
 export async function modelsCommand(args: string[], root: string): Promise<void> {
   const action = args.shift();
-  if (action === "add-node") {
-    const snapshotFile = args.shift();
-    const nodeFile = takeOption(args, "--model-node-file"), name = takeOption(args, "--name");
-    const force = takeFlag(args, "--force"); takeFlag(args, "--json"); assertNoArgs(args);
-    if (!snapshotFile || !nodeFile || !name) throw invalidInput("models add-node requires SNAPSHOT_REF.json --model-node-file BINDING.json --name NAME");
-    const manifest = await addModelFromNode(root, name, await readJSON(snapshotFile), await readModelNodeBinding(nodeFile), force);
-    process.stdout.write(`${JSON.stringify(manifest, null, 2)}\n`);
-    return;
+  if (action === "connect") {
+    const name = takeOption(args, "--name"), file = takeOption(args, "--file"), persistCredential = takeFlag(args, "--persist-credential"); takeFlag(args, "--json"); assertNoArgs(args);
+    if (!name || !file) throw invalidInput("models connect requires --name NAME --file ENDPOINT.json");
+    const connected = await connectEndpoint(root, name, await readJSON(file));
+    if (persistCredential) await persistEndpointCredential(root, await resolveEndpoint(root, `endpoint/${name}@${connected.endpoint_revision}`));
+    process.stdout.write(`${JSON.stringify(connected, null, 2)}\n`); return;
   }
   if (action === "add") {
-    const directory = args.shift();
-    const name = takeOption(args, "--name");
-    const force = takeFlag(args, "--force");
-    const json = takeFlag(args, "--json");
-    assertNoArgs(args);
-    if (!directory) throw invalidInput("models add requires a checkpoint directory");
-    if (!name) throw invalidInput("models add requires --name");
+    const directory = args.shift(), name = takeOption(args, "--name"), force = takeFlag(args, "--force"), json = takeFlag(args, "--json"); assertNoArgs(args);
+    if (!directory || !name) throw invalidInput("models add requires a checkpoint directory and --name");
     const manifest = await addLocalModel({ root, directory, name, force });
-    if (json) process.stdout.write(`${JSON.stringify(manifest, null, 2)}\n`);
-    else process.stdout.write(`Added local model local/${name} (${manifest.model_id})\n`);
-    return;
+    process.stdout.write(json ? `${JSON.stringify(manifest, null, 2)}\n` : `Added model artifact local/${name} (${manifest.model_id})\n`); return;
   }
   if (action === "inspect") {
-    const reference = args.shift();
-    const json = takeFlag(args, "--json");
-    const verify = takeFlag(args, "--verify");
-    const nodeFile = takeOption(args, "--model-node-file");
-    assertNoArgs(args);
-    if (!reference) throw invalidInput("models inspect requires local/<name> or local/sha256:<digest>");
-    const manifest = await resolveLocalModel(root, reference);
-    if (verify) {
-      if (nodeFile) await verifyModelOnNode(root, manifest, await readModelNodeBinding(nodeFile));
-      else await verifyLocalModel(root, manifest);
+    const reference = args.shift(), json = takeFlag(args, "--json"), verify = takeFlag(args, "--verify"); assertNoArgs(args);
+    if (!reference) throw invalidInput("models inspect requires endpoint/<name> or local/<name>");
+    if (reference.startsWith("endpoint/")) {
+      const ready = await resolveEndpoint(root, reference);
+      const verification = verify ? await verifyEndpoint(ready) : undefined;
+      if (verification) await saveEndpointVerification(root, verification);
+      const result = { ...publicEndpointBinding(ready), identity_verified: false, ...(verification ? { verification } : {}) };
+      process.stdout.write(json ? `${JSON.stringify(result, null, 2)}\n` : `${reference} (${ready.endpoint_revision}) ${ready.api} ${ready.wire_model}\n`); return;
     }
-    if (json) process.stdout.write(`${JSON.stringify({ ...manifest, verified: verify }, null, 2)}\n`);
-    else process.stdout.write(`${reference}\n  id       ${manifest.model_id}\n  type     ${manifest.model_type}\n  dtype    ${manifest.dtype}\n  files    ${manifest.files.length}\n  verified ${verify ? "yes" : "not requested"}\n`);
-    return;
+    const manifest = await resolveLocalModel(root, reference);
+    if (verify) await verifyLocalModel(root, manifest);
+    process.stdout.write(json ? `${JSON.stringify({ ...manifest, verified: verify }, null, 2)}\n` : `${reference} (${manifest.model_id})\n`); return;
   }
   if (action === "gc") {
-    const apply = takeFlag(args, "--apply");
-    const dryRun = takeFlag(args, "--dry-run");
-    const json = takeFlag(args, "--json");
-    assertNoArgs(args);
+    const apply = takeFlag(args, "--apply"), dryRun = takeFlag(args, "--dry-run"); takeFlag(args, "--json"); assertNoArgs(args);
     if (apply && dryRun) throw invalidInput("models gc accepts only one of --apply and --dry-run");
-    const result = await gcLocalModels(root, apply);
-    if (json) process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
-    else process.stdout.write(`${apply ? "Removed" : "Would remove"} ${result.models.length} model(s), ${result.files.length} file(s), ${result.reclaimed_bytes} byte(s)\n`);
-    return;
+    process.stdout.write(`${JSON.stringify(await gcLocalModels(root, apply), null, 2)}\n`); return;
   }
-  throw invalidInput("models requires add, add-node, inspect, or gc");
+  throw invalidInput("models requires connect, add, inspect, or gc");
 }

@@ -1,3 +1,4 @@
+import { loadFrozenEndpoint } from "../model-access/index.js";
 import path from "node:path";
 import type { ResolvedRevision } from "../artifacts/index.js";
 import { readHarborRawResult } from "../backends/index.js";
@@ -247,6 +248,7 @@ async function restoreModelCaptureForRecovery(input: {
     throw ambiguous("recoverable model proxy has no persisted endpoint identity");
   }
   const runtime = await startEvalModelCaptureRuntime({ plan, evalId: input.evalId, evalDirectory: input.evalDirectory, env: input.env ?? process.env,
+    ...(request.endpoint_binding ? { externalEndpoint: await loadFrozenEndpoint(path.resolve(input.evalDirectory, "../.."), request.endpoint_binding) } : {}),
     ...(request.training_binding ? { trainingBinding: request.training_binding } : {}) });
   if (!runtime.route || !runtime.exporter) {
     await runtime.close().catch(() => undefined);

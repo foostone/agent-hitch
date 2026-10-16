@@ -16,11 +16,10 @@ export function modelCapturePlanForEval(
     adapter: getAdapter(harnessId).requirements,
     provider,
   });
-  if (request.local_inference || request.training_binding) {
+  if (request.endpoint_binding || request.training_binding) {
     const remote = execution.provider !== "local-docker";
-    const feature = request.training_binding ? "training_external_binding" : "managed_model_node";
-    if (remote && (!provider.features.model_proxy || provider.features[feature] !== "2"
-      || request.local_inference && (!request.local_inference.model_node || !request.local_inference.inference_id))) {
+    const feature = request.training_binding ? "training_external_binding" : "external_endpoint_binding";
+    if (remote && (!provider.features.model_proxy || provider.features[feature] !== (request.training_binding ? "2" : "1"))) {
       throw new HitchError(`remote provider requires ${feature}=2 and an immutable model route`, {
         code: "remote_model_binding_unsupported", exitCode: 10,
       });

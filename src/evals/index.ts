@@ -47,6 +47,8 @@ export { captureVerifierScoreEvidence } from "./verifier-score-artifacts.js";
 export { MAX_VERIFIER_FEEDBACK_BYTES, MAX_VERIFIER_PROCESS_BYTES } from "../domain/index.js";
 export type { CapturedVerifierScoreEvidenceV1 } from "./verifier-score-artifacts.js";
 export { createEvalProgress, evalTrialKey, mergeEvalProgressTrial, parseEvalTrialRef, readEvalProgress, readEvalState, replaceInvalidEvalProgressTrial, writeEvalProgress } from "./progress.js";
+export { endpointEvaluationAttemptId, parseEndpointEvaluationAttempt, readEndpointEvaluationAttempts, admitEndpointEvaluationAttempt, endpointAttemptRequest } from "./endpoint-attempts.js";
+export type { EndpointEvaluationAttemptV1 } from "./endpoint-attempts.js";
 export { rerunEval, selectRerunTasks, selectRerunTrialSlots } from "./rerun.js";
 export type { EvalTrialSlot, RerunSelector } from "./rerun.js";
 export { EVAL_RERUN_TYPES, assertEvalRerunTypeSupported, evalRerunSemantics, parseEvalRerunType } from "./rerun-types.js";

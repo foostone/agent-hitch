@@ -103,7 +103,7 @@ export class RemoteWorkCoordinator {
     const modelTarget: RemoteModelTargetV2 | undefined = verifier ? undefined : input.request.training_binding
       ? { kind: "training-external", endpoint: await resolveTrainingEndpoint(input.root, input.request.training_binding) }
       : input.modelTarget;
-    if (!verifier && input.request.local_inference && !modelTarget) throw new HitchError("remote work has no controller-owned model route", { code: "remote_model_binding_unsupported", exitCode: 12 });
+    if (!verifier && input.request.endpoint_binding && !modelTarget) throw new HitchError("remote work has no controller-owned model route", { code: "remote_model_binding_unsupported", exitCode: 12 });
     const modelBinding = modelTarget ? remoteModelBinding(modelTarget) : undefined;
     if (modelBinding && input.request.pass_env.length) throw new HitchError("remote bound models do not accept credential overrides", { code: "remote_model_binding_unsupported", exitCode: 12 });
     const credentialNames = modelBinding || verifier ? [] : this.protocol.credentialNamesFor(input.request.pass_env);
@@ -209,7 +209,7 @@ export class RemoteWorkCoordinator {
         && (!needsResources || worker.provider_status.features.benchmark_resources === "1")
         && (!input.physicalExecution || worker.provider_status.features.physical_work === "2")
         && (!input.verifierOnly || worker.provider_status.features.verifier_only === "2")
-        && (!modelTarget || worker.provider_status.features[modelTarget.kind === "training-external" ? "training_external_binding" : "managed_model_node"] === "2"));
+        && (!modelTarget || worker.provider_status.features[modelTarget.kind === "training-external" ? "training_external_binding" : "external_endpoint_binding"] === (modelTarget.kind === "training-external" ? "2" : "1")));
       if (registered.length > 0 && capable.length === 0) {
         throw new HitchError(`no remote worker supports ${input.workItem.backend} on ${input.preparedArtifact.platform}`, {
           code: "execution_provider_unavailable", exitCode: 10,

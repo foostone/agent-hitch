@@ -12,6 +12,7 @@ export const trainingToolAdapter: AdapterDefinition = {
     if (request.agent_args.length) throw invalidInput("training-tool does not accept harness overrides");
     const approved = sha256Bytes(await readFile(path.join(packageRoot(), "integrations/training-tool/cli.js")));
     if (runtime.entrypoint_integrity !== approved) throw invalidInput("training-tool runner differs from this Hitch runtime's tested implementation");
+    if (runtime.model_endpoint && runtime.model_endpoint.api !== "chat-completions") throw invalidInput("training-tool requires Chat Completions");
     return { executable, args: ["--model", request.model], input: request.prompt,
       ...(runtime.model_endpoint ? { env: { OPENAI_BASE_URL: runtime.model_endpoint.base_url,
         OPENAI_API_KEY: runtime.model_endpoint_credential as string,

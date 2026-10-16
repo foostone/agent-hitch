@@ -1,0 +1,15 @@
+# Apply only with compose.single.yaml. Requires Docker Compose >= 2.24.4.
+services:
+  engine:
+    shm_size: 16gb
+    environment:
+      TP_SIZE: "2"
+    deploy:
+      resources:
+        reservations:
+          devices: !override
+            - driver: nvidia
+              device_ids:
+                - "${INFERENCE_GPU_0:?Set the first inference GPU UUID}"
+                - "${INFERENCE_GPU_1:?Set the second inference GPU UUID}"
+              capabilities: [gpu]

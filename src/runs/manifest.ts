@@ -66,6 +66,7 @@ export function buildManifest(runId: RunId, request: ValidatedRunRequest, worksp
       ...(argsDigest ? { agent_args_sha256: argsDigest } : {}),
     },
     model: request.model_identity,
+    ...(request.endpoint_binding ? { endpoint_binding: request.endpoint_binding } : {}),
     protocol: {
       timeout_ms: request.timeout_ms,
       workspace_mode: request.workspace_mode,

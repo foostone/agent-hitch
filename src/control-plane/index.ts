@@ -31,9 +31,6 @@ export { encodeRemoteVerifierResultEnvelope, parseRemoteVerifierResultEnvelope }
 export { importRemoteVerifierResultEnvelope } from "./remote-verifier-import.js";
 export { RemoteWorkCoordinator } from "./remote-work-coordinator.js";
 export type { RemoteWorkCoordinatorOptions } from "./remote-work-coordinator.js";
-export { LocalInferenceManager } from "./inference-manager.js";
-export type { LocalInferenceManagerOptions } from "./inference-manager.js";
-export { ManagedServiceRecovery } from "./managed-service-recovery.js";
 export { DEFAULT_REMOTE_WORKER_RECONNECT_TIMEOUT_MS, recoverRemoteWorkerEvalLeases } from "./remote-work-recovery.js";
 export { RemoteWorkInputStore, materializeRemoteTreeEnvelope, parseRemoteTreeEnvelope, prepareRemoteWorkInputs } from "./remote-work-inputs.js";
 export type { RemoteTreeEnvelopeV1 } from "./remote-work-inputs.js";

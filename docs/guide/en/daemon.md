@@ -81,7 +81,7 @@ For datasets with known task membership, the dispatcher rotates between evaluati
 
 Docker trials receive CPU and memory limits. Ordinary host-run reservations are scheduling accounting, not operating-system limits on those processes. If capacity flags are omitted, Hitch attempts Docker capacity detection and uses conservative fallback values; check `hitch daemon status --json` before increasing parallelism.
 
-Managed local SGLang reserves service resources in this ledger; remote model nodes own their GPUs. External model servers need a separate inference budget. See [model inference capacity](model-inference.md#account-for-daemon-and-inference-capacity) for concurrency and service recovery.
+External model resources and request queues belong to the deployment owner. See [model inference](model-inference.md) for task concurrency, frozen endpoints and cancellation.
 
 ## What makes evaluation recovery possible
 

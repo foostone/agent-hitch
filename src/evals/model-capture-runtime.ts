@@ -4,7 +4,7 @@ import type { InteractionCaptureRefV1, ModelCapturePlanV1, ModelEndpointBindingV
 import { HitchError, runCommand } from "../foundation/index.js";
 import { HostModelProxy } from "../model-access/index.js";
 import { readModelProxyRuntimeState, writeModelProxyRuntimeState } from "./model-proxy-runtime-state.js";
-import { resolveTrainingEndpoint } from "../model-access/index.js";
+import { resolveTrainingEndpoint, endpointCredential, publicEndpointBinding } from "../model-access/index.js";
 import type { TrainingExternalBindingV1 } from "../domain/index.js";
 
 export interface EvalModelCaptureRuntime {
@@ -28,7 +28,7 @@ export async function startEvalModelCaptureRuntime(input: {
   runtimeTopology?: "host-side" | "in-sandbox";
   /** A sealed remote plan cannot be rewritten after dispatch when optional proxy startup fails. */
   preservePlanOnOptionalFailure?: boolean;
-  managedInference?: { binding: ModelEndpointBindingV1; credential: string; modelId: import("../domain/index.js").Sha256 };
+  externalEndpoint?: import("../domain/index.js").ReadyEndpointBindingV1;
   trainingBinding?: TrainingExternalBindingV1;
   remoteRelay?: { binding: import("../domain/index.js").RemoteModelBindingV2; baseUrl: string; credential: string; bindRun(runId: string): Promise<void> };
 }): Promise<EvalModelCaptureRuntime> {
@@ -41,7 +41,8 @@ export async function startEvalModelCaptureRuntime(input: {
   }
   let proxy: HostModelProxy | undefined;
   try {
-    if (Number(!!input.trainingBinding) + Number(!!input.managedInference) + Number(!!input.remoteRelay) > 1) throw new TypeError("model route bindings are exclusive");
+    if (Number(!!input.trainingBinding) + Number(!!input.externalEndpoint) + Number(!!input.remoteRelay) > 1) throw new TypeError("model route bindings are exclusive");
+    const externalCredential = input.externalEndpoint ? endpointCredential(input.externalEndpoint, input.env) : undefined;
     const training = input.trainingBinding ? await resolveTrainingEndpoint(path.resolve(input.evalDirectory, "../.."), input.trainingBinding) : undefined;
     const persisted = await readModelProxyRuntimeState(input.evalDirectory, input.evalId, input.plan);
     const binding = await resolveModelProxyBinding(input.env);
@@ -58,22 +59,17 @@ export async function startEvalModelCaptureRuntime(input: {
         upstreams: { openai: input.remoteRelay.baseUrl }, upstreamAuthorizations: { openai: `Bearer ${input.remoteRelay.credential}` },
         credentialValues: [input.remoteRelay.credential], onRun: input.remoteRelay.bindRun,
         ...(input.remoteRelay.binding.kind === "training-external" ? { trainingBinding: input.remoteRelay.binding.training } : {
-          managedInferenceIdentity: { inference_id: input.remoteRelay.binding.inference_id, model_id: input.remoteRelay.binding.model_id, model_node: input.remoteRelay.binding.model_node },
+          externalEndpointBinding: input.remoteRelay.binding.endpoint,
         }),
       } : {}),
       ...(training ? { trainingEndpoint: training, upstreams: { openai: training.base_url },
         upstreamAuthorizations: { openai: `Bearer ${training.credential}` }, upstreamWireModels: { openai: training.binding.expectedPolicyVersion },
         credentialValues: [training.credential] } : {}),
-      ...(input.managedInference ? {
-        upstreams: { openai: input.managedInference.binding.base_url },
-        upstreamAuthorizations: { openai: `Bearer ${input.managedInference.credential}` },
-        upstreamWireModels: { openai: input.managedInference.binding.wire_model },
-        credentialValues: [input.managedInference.credential],
-        managedInferenceIdentity: {
-          inference_id: input.managedInference.binding.inference_id,
-          model_id: input.managedInference.modelId,
-          ...(input.managedInference.binding.model_node ? { model_node: input.managedInference.binding.model_node } : {}),
-        },
+      ...(input.externalEndpoint ? {
+        upstreams: { openai: input.externalEndpoint.connection.base_url },
+        upstreamAuthorizations: { openai: externalCredential ? `Bearer ${externalCredential}` : "" },
+        upstreamWireModels: { openai: input.externalEndpoint.wire_model }, credentialValues: [input.externalEndpoint.connection.base_url, ...(externalCredential ? [externalCredential] : [])],
+        externalEndpointBinding: publicEndpointBinding(input.externalEndpoint),
       } : {}),
       ...(persisted ? {
         listenPort: persisted.listen_port,

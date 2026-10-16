@@ -214,7 +214,7 @@ async function collectRemoteResult(input: Parameters<typeof recoverRemoteWorkerE
     work, lease: lease.epoch === offer.lease.epoch ? lease : offer.lease,
     artifactPath: input.protocol.artifactPath(offer.worker_id, lease.lease_id, artifact.digest),
     verifierSourceExpected: await verifierSourceRequested(input.root, offer),
-    ...(request.training_binding || request.local_inference ? { modelProof: await input.protocol.modelRoutes.boundRun(offer) } : {}),
+    ...(request.training_binding || request.endpoint_binding ? { modelProof: await input.protocol.modelRoutes.boundRun(offer) } : {}),
     ...(dynamic || journal ? { publicationMode: "replace-invalid" as const } : {}),
     ...(typeof runtime?.runtime_id === "string" ? { runtimeId: runtime.runtime_id } : {}),
     ...(environmentImages ? { environmentImages } : {}),

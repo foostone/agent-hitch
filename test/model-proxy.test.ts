@@ -177,7 +177,7 @@ test("eval model capture runtime persists and restores the exact Harbor route", 
   assert.deepEqual(restored.route, originalRoute);
 });
 
-test("eval proxy hides a managed inference credential and rewrites only the upstream model alias", async (t) => {
+test("eval proxy hides an external endpoint credential and rewrites only the upstream model alias", async (t) => {
   const root = await mkdtemp(path.join(tmpdir(), "hitch-model-runtime-managed-"));
   t.after(() => rm(root, { recursive: true, force: true }));
   const credential = "c".repeat(64);
@@ -200,19 +200,12 @@ test("eval proxy hides a managed inference credential and rewrites only the upst
     plan: { requested_mode: "native", effective_mode: "proxy", required: true, topology: "host-side" },
     evalId,
     evalDirectory: root,
-    env: LOOPBACK_PROXY_ENV,
-    managedInference: {
-      binding: {
-        kind: "managed-local",
-        inference_id: `sha256:${"a".repeat(64)}`,
-        api: "responses",
-        base_url: `${upstreamUrl}/runs/${runId}/v1/`,
-        wire_model: "hitch-wire-model",
-        credential_env_name: "HITCH_LOCAL_MODEL_TOKEN",
-        capabilities: { streaming: true, tool_calls: true, parallel_tool_calls: false, input_modalities: ["text"] },
-      },
-      credential,
-      modelId: `sha256:${"b".repeat(64)}`,
+    env: { ...LOOPBACK_PROXY_ENV, HITCH_TEST_PROXY_CREDENTIAL: credential },
+    externalEndpoint: {
+      schema_version: "1", kind: "external-endpoint", endpoint_ref: "endpoint/coder", endpoint_revision: `sha256:${"a".repeat(64)}`,
+      api: "responses", wire_model: "hitch-wire-model", generation: {},
+      connection: { base_url: `${upstreamUrl}/runs/${runId}/v1/`, auth: { kind: "env", name: "HITCH_TEST_PROXY_CREDENTIAL" } },
+      capabilities: { streaming: true, tool_calls: true, parallel_tool_calls: false, input_modalities: ["text"] },
     },
   });
   t.after(() => runtime.close());

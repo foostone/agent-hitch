@@ -45,7 +45,7 @@ export class RemoteWorkerProtocol {
     const paths = statePaths(input.root);
     this.root = input.root;
     this.generationCleanup = new RemoteWorkerGenerationCleanup(input.root, input.registry, (workerId, offerId) => this.getOffer(workerId, offerId));
-    this.modelRoutes = new RemoteModelRoutes(input.root);
+    this.modelRoutes = new RemoteModelRoutes(input.root, input.credentialEnv);
     this.registry = input.registry;
     this.directory = paths.workerProtocol;
     this.locks = paths.workerProtocolLocks;

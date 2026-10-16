@@ -1,3 +1,6 @@
+import { admitEndpointEvaluationAttempt, endpointAttemptRequest, readEndpointEvaluationAttempts } from "./endpoint-attempts.js";
+import { cumulativeEndpointUsage } from "./endpoint-usage.js";
+import { loadFrozenEndpoint } from "../model-access/index.js";
 import { persistTerminalEvalResult } from "./eval-state.js";
 import { randomUUID } from "node:crypto";
 import path from "node:path";
@@ -70,7 +73,9 @@ async function rerunEvalLocked(options: RerunEvalOptions & { rerunId: string; re
   await ensureDir(rerunDirectory);
   const requestValue = await readJSON<unknown | null>(path.join(options.evalDirectory, "request.json"), null);
   if (requestValue === null) throw new HitchError(`eval not found: ${options.evalId}`, { code: "eval_not_found", exitCode: 3 });
-  const request = await loadPersistedRerunRequest(requestValue, options.evalDirectory);
+  const originalRequest = await loadPersistedRerunRequest(requestValue, options.evalDirectory);
+  if (options.endpointAttempt) await admitEndpointEvaluationAttempt(options.root, options.evalDirectory, originalRequest, options.endpointAttempt, rerunId);
+  const request = endpointAttemptRequest(originalRequest, options.endpointAttempt);
   if (request.training_binding) throw new HitchError("training slots are repaired by the frozen Gear batch coordinator, not eval rerun", { code: "training_rerun_fenced", exitCode: 12 });
   const submission = await readJSON<{ execution?: { provider?: string } } | null>(path.join(options.evalDirectory, "submission.json"), null);
   if (options.resumeRemoteRerun && (!["candidate-restart", "verifier-only"].includes(options.rerunType) || !submission?.execution?.provider
@@ -93,7 +98,7 @@ async function rerunEvalLocked(options: RerunEvalOptions & { rerunId: string; re
   let progress: EvalProgressV1 = initialProgress;
   validateProgressPlan(progress, plan, request, options.evalId);
   const previousResult = await readJSON<Record<string, unknown> | null>(path.join(options.evalDirectory, "result.json"), null);
-  if (previousResult?.status === "cancelled") throw new HitchError("cancelled eval cannot be rerun", { code: "eval_rerun_cancelled", exitCode: 2 });
+  if (previousResult?.status === "cancelled" && !options.endpointAttempt) throw new HitchError("cancelled eval cannot be rerun", { code: "eval_rerun_cancelled", exitCode: 2 });
   const restored = options.resumeRemoteRerun ? await restoreRemoteRerunSelection({ directory: rerunDirectory,
     evalId: options.evalId, rerunId, selector: options.selector, tasks: plan.tasks, attempts: plan.attempts, progress,
     rerunType: options.rerunType, ...(options.verifierRuntimeId ? { verifierRuntimeId: options.verifierRuntimeId } : {}) }) : undefined;
@@ -109,6 +114,7 @@ async function rerunEvalLocked(options: RerunEvalOptions & { rerunId: string; re
     eval_id: options.evalId,
     rerun_type: options.rerunType,
     ...(options.verifierRuntimeId ? { verifier_runtime_id: options.verifierRuntimeId } : {}),
+    ...(options.endpointAttempt ? { endpoint_attempt: options.endpointAttempt } : {}),
     semantics: evalRerunSemantics(options.rerunType),
     mode: options.selector.mode,
     tasks: selectedTasks,
@@ -131,7 +137,7 @@ async function rerunEvalLocked(options: RerunEvalOptions & { rerunId: string; re
   const repaired = new Map<string, EvalTrialSlot>();
   const backendRuns: Array<{ attempt: number; run: HarborBackendResult }> = [];
   let captureRuntime: EvalModelCaptureRuntime | undefined;
-  let inferenceLease: Awaited<ReturnType<import("../domain/index.js").ManagedInferenceCoordinator["acquire"]>> | undefined;
+  const externalEndpoint = request.endpoint_binding ? await loadFrozenEndpoint(options.root, request.endpoint_binding) : undefined;
   try {
     if (options.rerunType === "verifier-only") {
       const execute = submission?.execution?.provider && submission.execution.provider !== "local-docker" ? remoteVerifierOnlyEvalRerun : verifierOnlyEvalRerun;
@@ -145,29 +151,12 @@ async function rerunEvalLocked(options: RerunEvalOptions & { rerunId: string; re
       if (remote && (!options.remoteWorkExecutor || options.executionWorker?.provider !== executionPlan.provider)) throw unavailable("remote rerun has no executor for its frozen provider");
       const needsExecution = !remote || await remoteRerunNeedsExecution({ evalDirectory: options.evalDirectory, directory: rerunDirectory,
         rerunId, plan: executionPlan, request, slots: selectedTrials });
-      if (request.local_inference && needsExecution) {
-        if (!options.inferenceCoordinator) throw new HitchError("local eval rerun inference requires the Hitch daemon", { code: "inference_route_unavailable", exitCode: 12 });
-        const inferenceId = plan.candidate.inference_id;
-        if (typeof inferenceId !== "string" || !/^sha256:[a-f0-9]{64}$/.test(inferenceId)) {
-          throw new HitchError("source eval has no valid local inference identity", { code: "inference_lock_mismatch", exitCode: 12 });
-        }
-        inferenceLease = await options.inferenceCoordinator.acquire({
-          run_id: `run_${rerunId.slice("rerun_".length)}`,
-          harness_ref: request.harness_ref,
-          selection: { ...request.local_inference, inference_id: inferenceId as import("../domain/index.js").Sha256 },
-          cache_scope_owner: `${options.evalId}:${rerunId}`,
-          evidence_owner: { kind: "eval", eval_id: options.evalId, rerun_id: rerunId },
-          ...(options.signal ? { signal: options.signal } : {}),
-        });
-      }
       if (needsExecution) captureRuntime = await startEvalModelCaptureRuntime({
         plan: executionPlan.model_capture ?? defaultModelCapturePlan(),
         evalId: options.evalId,
         evalDirectory: rerunDirectory,
         env: options.env ?? process.env,
-        ...(inferenceLease ? { managedInference: {
-          binding: inferenceLease.binding, credential: inferenceLease.credential, modelId: inferenceLease.lock.model_id,
-        } } : {}),
+        ...(externalEndpoint ? { externalEndpoint } : {}),
       });
       const activeCaptureRuntime = captureRuntime!;
       const resolvedRevision = await loadRerunResolvedRevision(options.evalDirectory, plan);
@@ -228,7 +217,7 @@ async function rerunEvalLocked(options: RerunEvalOptions & { rerunId: string; re
             request, plan: executionPlan, slots, resolvedRevision,
             artifact: preparedArtifacts.get(artifactId) ?? (() => { throw unavailable(`rerun artifact is unavailable: ${artifactId}`); })(),
             runtimeDirectory: runtime.directory, runtimeId: runtime.runtime_id, executor: options.remoteWorkExecutor!,
-            ...(inferenceLease ? { inferenceLease } : {}), ...(options.signal ? { signal: options.signal } : {}), publish,
+            ...(externalEndpoint ? { externalEndpoint } : {}), ...(options.signal ? { signal: options.signal } : {}), publish,
           }));
           continue;
         }
@@ -305,7 +294,7 @@ async function rerunEvalLocked(options: RerunEvalOptions & { rerunId: string; re
       }
     }
 
-    const result = await finalizeRerun(options.evalDirectory, request, plan, progress, previousResult, backendRuns);
+    const result = await finalizeRerun(options.evalDirectory, originalRequest, plan, progress, previousResult, backendRuns);
     const remainingTrials = invalidTrialSlots(plan.tasks, plan.attempts, progress);
     const remaining = uniqueTasks(remainingTrials);
     const repairedTrials = sortSlots([...repaired.values()]);
@@ -352,7 +341,7 @@ async function rerunEvalLocked(options: RerunEvalOptions & { rerunId: string; re
       progress = await readEvalProgress(options.evalDirectory) ?? progress;
       for (const slot of selectedTrials) if (progress.trials.some(ref => ref.task_id === slot.task_id && ref.attempt === slot.attempt && ref.assessment && ref.observation_status === "valid")) repaired.set(slotKey(slot), slot);
     }
-    await finalizeRerun(options.evalDirectory, request, plan, progress, previousResult, backendRuns).catch(() => {});
+    await finalizeRerun(options.evalDirectory, originalRequest, plan, progress, previousResult, backendRuns).catch(() => {});
     await writeRerunState(statePath, {
       rerunId,
       evalId: options.evalId,
@@ -369,7 +358,6 @@ async function rerunEvalLocked(options: RerunEvalOptions & { rerunId: string; re
     throw error;
   } finally {
     await captureRuntime?.close().catch(() => undefined);
-    await inferenceLease?.release().catch(() => undefined);
   }
 }
 function defaultModelCapturePlan(): ModelCapturePlanV1 {
@@ -448,6 +436,8 @@ async function finalizeRerun(
     started_at: typeof previousResult?.started_at === "string" ? previousResult.started_at : progress.started_at,
     completed_at: completedAt,
   };
+  if (request.endpoint_binding) { result.endpoint_binding = request.endpoint_binding; result.endpoint_attempts = await readEndpointEvaluationAttempts(evalDirectory, request); result.task_completed = true;
+    result.usage = await cumulativeEndpointUsage(path.resolve(evalDirectory, "../.."), progress.eval_id, progress.trials.flatMap(ref => ref.run_id ? [ref.run_id] : [])); }
   if (succeeded) delete result.error;
   await persistTerminalEvalResult(evalDirectory, result);
   return result;

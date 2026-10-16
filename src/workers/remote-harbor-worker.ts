@@ -94,6 +94,9 @@ export function remoteHarborWorker(options: RemoteHarborWorkerOptions): RemoteWo
     let eventTail = Promise.resolve();
     const publishEvent = (event: Record<string, unknown>): void => {
       eventTail = eventTail.then(() => emit(String(event.type ?? "harbor.event"), event));
+      // Publication can fail while Harbor is still running. Observe each tail
+      // immediately, keeping its rejection for the await after backend settlement.
+      void eventTail.catch(() => undefined);
     };
     try {
       const run = await runHarborBackend({

@@ -1,0 +1,93 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agent-hitch.local/schemas/external-endpoint-config.schema.json",
+  "title": "External model API connection (private)",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "base_url",
+    "wire_model",
+    "api",
+    "auth",
+    "capabilities"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "1"
+    },
+    "base_url": {
+      "type": "string",
+      "pattern": "^https?://"
+    },
+    "wire_model": {
+      "type": "string",
+      "minLength": 1
+    },
+    "api": {
+      "enum": [
+        "responses",
+        "chat-completions"
+      ]
+    },
+    "auth": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind"
+          ],
+          "properties": {
+            "kind": {
+              "const": "none"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "name"
+          ],
+          "properties": {
+            "kind": {
+              "const": "env"
+            },
+            "name": {
+              "type": "string",
+              "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"
+            }
+          }
+        }
+      ]
+    },
+    "capabilities": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "streaming",
+        "tool_calls",
+        "parallel_tool_calls",
+        "input_modalities"
+      ],
+      "properties": {
+        "streaming": {
+          "type": "boolean"
+        },
+        "tool_calls": {
+          "type": "boolean"
+        },
+        "parallel_tool_calls": {
+          "const": false
+        },
+        "input_modalities": {
+          "const": [
+            "text"
+          ]
+        }
+      }
+    }
+  }
+}

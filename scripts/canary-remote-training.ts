@@ -12,13 +12,15 @@ import { pathToFileURL } from "node:url";
 import { DaemonServer, daemonClient } from "../src/daemon/index.js";
 import { readExecutionLeases, reapOwnedDockerResources, runEval, validateEvalId } from "../src/evals/index.js";
 import { parseTrainingBinding } from "../src/model-access/index.js";
-import { atomicWriteJSON, runCommand, sha256JSON, statePaths } from "../src/foundation/index.js";
+import { atomicWriteJSON, resolveExecutable, runCommand, sha256JSON, statePaths } from "../src/foundation/index.js";
 
 // Real Harbor/Docker and public worker CLI, with a deterministic model fixture.
 // This cannot certify native token facts, Slime training, or a GPU runtime.
 const python = process.env.HITCH_HARBOR_TEST_PYTHON;
 const image = process.env.HITCH_TRAINING_CANARY_IMAGE;
 assert.ok(python && image, "Set HITCH_HARBOR_TEST_PYTHON and HITCH_TRAINING_CANARY_IMAGE (local bash-capable image)");
+const docker = await resolveExecutable(process.env.HITCH_DOCKER_PATH?.trim() || "docker", process.env.PATH || "");
+assert.ok(docker, "Set HITCH_DOCKER_PATH to an executable Docker CLI or put docker on PATH");
 const harbor = path.join(path.dirname(python), "harbor");
 const cli = path.resolve("dist/bin/hitch.js");
 const root = await mkdtemp(path.join(tmpdir(), "hitch-real-remote-training-"));
@@ -27,15 +29,15 @@ const privateRoot = path.join(root, "private"), dataset = path.join(root, "datas
 await mkdir(privateRoot, { recursive: true, mode: 0o700 });
 const resource = { cpu_millis: 1000, memory_bytes: 1024 ** 3, container_slots: 1, build_slots: 0 };
 const zero = { cpu_millis: 0, memory_bytes: 0, container_slots: 0, build_slots: 0 };
-const env: NodeJS.ProcessEnv = { ...process.env, HITCH_HARBOR_PYTHON_PATH: python };
+const env: NodeJS.ProcessEnv = { ...process.env, HITCH_HARBOR_PYTHON_PATH: python, HITCH_DOCKER_PATH: docker };
 delete env.HITCH_TEST_HOST_ARTIFACT_BUILDER;
-const imageInfo = await runCommand("docker", ["image", "inspect", image, "--format", "{{json .}}"], { timeoutMs: 10_000 });
+const imageInfo = await runCommand(docker, ["image", "inspect", image, "--format", "{{json .}}"], { timeoutMs: 10_000 });
 const inspected = JSON.parse(imageInfo.stdout) as { Id: string; Os: string; Architecture: string };
 assert.match(inspected.Id, /^sha256:[a-f0-9]{64}$/);
 assert.equal(`${inspected.Os}/${inspected.Architecture}`, "linux/amd64");
 const version = (await runCommand(python, ["-c", 'import importlib.metadata; print(importlib.metadata.version("harbor"))'], { timeoutMs: 10_000 })).stdout.trim();
 assert.equal(version, "0.21.0");
-const localEngine = (await runCommand("docker", ["info", "--format", "{{.ID}}"], { timeoutMs: 10_000 })).stdout.trim();
+const localEngine = (await runCommand(docker, ["info", "--format", "{{.ID}}"], { timeoutMs: 10_000 })).stdout.trim();
 const remoteWorker = await remoteCanaryWorker(root, workerRoot);
 const workerObservation = await remoteWorker?.observe(inspected.Id, localEngine);
 const engine = workerObservation?.engine ?? localEngine;
@@ -102,7 +104,7 @@ try {
   await server.start();
   const registration = { schema_version: "1", worker_id: "worker_real_training", provider: "remote-docker",
     collision_domain_id: `docker-engine:${engine}`, platforms: ["linux-x64"], backends: [{ id: "harbor", version }],
-    features: { docker: true, buildkit: true, model_proxy: true, isolated_same_task_attempts: false, training_external_binding: "2" },
+    features: { docker: true, buildkit: true, model_proxy: true, isolated_same_task_attempts: false, physical_work: "2", training_external_binding: "2" },
     task_membership: ["known"], capacity: { total: resource, reserved_for_system: zero, allocatable: resource } };
   const registrationFile = path.join(privateRoot, "registration.json"), credentialFile = path.join(privateRoot, "worker-credential.json");
   const bindingFile = path.join(privateRoot, "binding.json");
@@ -113,7 +115,7 @@ try {
   await runCommand(process.execPath, [cli, "worker", "register", "--server", baseUrl, "--registration", registrationFile,
     "--admin-token-file", statePaths(controllerRoot).token, "--credential-file", credentialFile], { env, timeoutMs: 10_000 });
   worker = remoteWorker ? await remoteWorker.start(server.port, registrationFile, credentialFile) : spawn(process.execPath, [cli, "--root", workerRoot, "worker", "run", "--server", baseUrl, "--registration", registrationFile,
-    "--credential-file", credentialFile, "--harbor", harbor, "--docker", "/usr/local/bin/docker", "--once", "--poll-interval", "100ms", "--heartbeat-interval", "1s"], { env, stdio: ["ignore", "pipe", "pipe"] });
+    "--credential-file", credentialFile, "--harbor", harbor, "--docker", docker, "--once", "--poll-interval", "100ms", "--heartbeat-interval", "1s"], { env, stdio: ["ignore", "pipe", "pipe"] });
   worker.stdout!.pipe(workerLog, { end: false }); worker.stderr!.pipe(workerLog, { end: false });
   workerDone = new Promise((resolve, reject) => { worker!.once("error", reject); worker!.once("exit", code => resolve(code)); });
   void workerDone.catch(() => {});

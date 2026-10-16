@@ -103,46 +103,7 @@ test("local model GC is dry-run by default and preserves every referenced model 
   await verifyLocalModel(root, await resolveLocalModel(root, "local/coder"));
 });
 
-test("run and eval local inference inputs default safely and reject conflicting controls", async () => {
-  const run = await validateRunRequest({
-    harness_ref: "codex@installed",
-    model: "local/coder",
-    cwd: process.cwd(),
-    prompt: "hello",
-  });
-  assert.deepEqual(run.local_inference, {
-    model: "local/coder",
-    device: "auto",
-    profile: "baseline",
-    offline: false,
-  });
-
-  await assert.rejects(validateRunRequest({
-    harness_ref: "codex@installed",
-    model: "openai/cloud",
-    cwd: process.cwd(),
-    prompt: "hello",
-    local_inference: { device: "cpu" },
-  }), /require a local/);
-  await assert.rejects(validateRunRequest({
-    harness_ref: "codex@installed",
-    model: "local/coder",
-    cwd: process.cwd(),
-    prompt: "hello",
-    local_inference: { inference_id: `sha256:${"a".repeat(64)}`, device: "cuda" },
-  }), /cannot be combined/);
-
-  const evaluation = await validateEvalRequest({
-    backend: "harbor",
-    dataset: "demo@1.0",
-    harness_ref: "codex@version:1.2.3",
-    model: "local/coder",
-    local_inference: { device: "cuda", profile: "throughput", offline: true },
-  });
-  assert.deepEqual(evaluation.local_inference, {
-    model: "local/coder",
-    device: "cuda",
-    profile: "throughput",
-    offline: true,
-  });
+test("retired managed local execution cannot silently recover against a new endpoint", async () => {
+  await assert.rejects(validateRunRequest({ harness_ref: "codex@installed", model: "local/coder", cwd: process.cwd(), prompt: "hello" }), /managed local inference has been removed/);
+  await assert.rejects(validateEvalRequest({ dataset: "demo@1.0", harness_ref: "codex@version:1.2.3", model: "local/coder" }), /managed local inference has been removed/);
 });

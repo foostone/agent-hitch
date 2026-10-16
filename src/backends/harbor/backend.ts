@@ -387,7 +387,6 @@ export async function buildHarborJobConfig({
       agent_args: request.agent_args,
       credential_names: credentialNames,
       ...(modelProxy ? { model_capture: parseHarborModelProxyRoute(modelProxy) } : {}),
-      ...(modelProxy?.managed_inference ? { managed_local_inference: modelProxy.managed_inference } : {}),
     },
     env: credentialEnvironment(credentialNames),
     include_logs: ["hitch-*"],

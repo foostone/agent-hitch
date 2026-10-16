@@ -79,7 +79,6 @@ export async function restartIncompleteEval(
       ...(options.environmentBuildMode ? { environmentBuildMode: options.environmentBuildMode } : {}),
       modelCapturePlan,
       ...(options.harborArtifactBuilder ? { harborArtifactBuilder: options.harborArtifactBuilder } : {}),
-      ...(options.inferenceCoordinator ? { inferenceCoordinator: options.inferenceCoordinator, inferenceRerunId: options.rerunId } : {}),
       ...(options.remoteWorkExecutor ? { remoteWorkExecutor: options.remoteWorkExecutor } : {}),
       ...(options.executionWorker ? { executionWorker: options.executionWorker } : {}),
     });

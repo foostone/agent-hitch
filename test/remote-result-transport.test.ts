@@ -81,23 +81,25 @@ test("remote result import fences execution evidence to the assigned lease", asy
     (error: unknown) => (error as NodeJS.ErrnoException).code === "ENOENT");
 });
 
-test("remote result rejects substituted canonical run, training policy and managed node before publishing", async t => {
+test("remote result rejects substituted canonical run, training policy and external endpoint before publishing", async t => {
   const f = await transportFixture(t), runId = `run_${"d".repeat(32)}`, hash = `sha256:${"a".repeat(64)}` as const;
   const training = parseTrainingBinding({ kind: "training-external", bindingId: "binding_result", trainingRunId: "train_result",
     policyLeaseRef: { uri: `cas:${hash}`, digest: hash, mediaType: "application/json" }, expectedPolicyVersion: "runtime-1/update-1",
     fencingToken: "fence", expiresAt: new Date(Date.now() + 60_000).toISOString(), endpointRef: "hitch-training:binding_result",
     credentialRef: "hitch-training:binding_result", generationContractDigest: hash, requiredCapture: "exact-policy-tokens-v1",
     api: "chat-completions", maxOutputTokens: 16, maxEpisodeSteps: 4 });
-  const modelNode = { schema_version: "2" as const, node_id: "node", generation: "one", runtime_digest: hash, launcher: "process" as const };
-  const managed = { schema_version: "2" as const, kind: "managed-inference" as const, inference_id: hash, model_id: hash, model_node: modelNode, api: "responses" as const, max_output_tokens: 16 };
-  const managedRequest = { local_inference: { model: "local/test", device: "auto", profile: "baseline", offline: true, inference_id: hash, model_node: modelNode } } as EvalRequest;
+  const endpoint = { schema_version: "1" as const, kind: "external-endpoint" as const, endpoint_ref: "endpoint/test", endpoint_revision: hash,
+    api: "responses" as const, wire_model: "candidate-v1", generation: { max_output_tokens: 1024 },
+    capabilities: { streaming: true, tool_calls: true, parallel_tool_calls: false, input_modalities: ["text"] as ["text"] } };
+  const managed = { schema_version: "2" as const, kind: "external-endpoint" as const, endpoint };
+  const managedRequest = { endpoint_binding: endpoint } as unknown as EvalRequest;
   const cases = [
     { manifest: { run_id: `run_${"f".repeat(32)}`, training_external: trainingProxyIdentity(training) },
       request: { training_binding: training } as EvalRequest, proof: { runId, binding: { schema_version: "2" as const, kind: "training-external" as const, training } }, error: /canonical run differs/ },
     { manifest: { run_id: runId, training_external: { ...trainingProxyIdentity(training), policy_version: "stale" } },
       request: { training_binding: training } as EvalRequest, proof: { runId, binding: { schema_version: "2" as const, kind: "training-external" as const, training } }, error: /training identity differs/ },
-    { manifest: { run_id: runId, model: { effective_id: hash, inference_id: hash, identity_resolved: true, model_node: { ...modelNode, generation: "other" } } },
-      request: managedRequest, proof: { runId, binding: managed }, error: /managed model identity differs/ },
+    { manifest: { run_id: runId, model: { effective_id: endpoint.wire_model, identity_resolved: false, endpoint_binding: { ...endpoint, wire_model: "changed" } } },
+      request: managedRequest, proof: { runId, binding: managed }, error: /external endpoint identity differs/ },
   ];
   for (const entry of cases) {
     await writeFile(f.artifact, JSON.stringify(envelope([{ path: "manifest.json", content: Buffer.from(JSON.stringify(entry.manifest)) }])));

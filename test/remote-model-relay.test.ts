@@ -40,7 +40,7 @@ async function fixture(t: TestContext, target: RemoteModelTargetV2, capable = tr
     schema_version: "1", worker_id: "worker_model", provider: "remote-docker", collision_domain_id: "docker-engine:model-test",
     platforms: ["linux/amd64"], backends: [{ id: "harbor", version: "test" }],
     features: { docker: true, buildkit: false, model_proxy: true, isolated_same_task_attempts: false,
-      ...(capable ? { training_external_binding: "2", managed_model_node: "2" } : {}) },
+      ...(capable ? { training_external_binding: "2", external_endpoint_binding: "1" } : {}) },
     task_membership: ["known"], capacity: { total: resources, allocatable: resources, reserved_for_system: zero },
   };
   const registered = await registry.register(registration);
@@ -173,20 +173,19 @@ test("old workers cannot receive a model-bound work spec", async t => {
   assert.deepEqual(await f.client.listOffers(), []);
 });
 
-test("managed model streams stop when the controller execution lease expires", async t => {
+test("external endpoint streams stop when the controller execution lease expires", async t => {
   let generations = 0;
   const upstream = http.createServer(async (req, res) => {
     let body = ""; for await (const chunk of req) body += chunk;
     assert.equal(req.url, "/v1/responses"); assert.equal(JSON.parse(body).model, "hitch-wire-model");
-    assert.equal(req.headers.authorization, `Bearer ${"m".repeat(48)}`); generations++;
+    assert.equal(req.headers.authorization, undefined); generations++;
     res.writeHead(200, { "content-type": "text/event-stream" }); res.write('data: {"type":"response.created"}\n\n');
   });
   const url = await listen(t, upstream);
-  const target: RemoteModelTargetV2 = { kind: "managed-inference", binding: { kind: "managed-node", inference_id: hash,
-    model_node: { schema_version: "2", node_id: "test-node", generation: "generation-1", runtime_digest: hash, launcher: "process" },
-    base_url: `${url}/v1`, credential_env_name: "HITCH_LOCAL_MODEL_TOKEN", wire_model: "hitch-wire-model", api: "responses",
-    capabilities: { streaming: true, tool_calls: true, parallel_tool_calls: false, input_modalities: ["text"] } },
-    credential: "m".repeat(48), modelId: hash, maxOutputTokens: 16 };
+  const target: RemoteModelTargetV2 = { kind: "external-endpoint", endpoint: {
+    schema_version: "1", kind: "external-endpoint", endpoint_ref: "endpoint/test", endpoint_revision: hash,
+    connection: { base_url: `${url}/v1`, auth: { kind: "none" } }, wire_model: "hitch-wire-model", api: "responses", generation: { max_output_tokens: 1024 },
+    capabilities: { streaming: true, tool_calls: true, parallel_tool_calls: false, input_modalities: ["text"] } } };
   const f = await fixture(t, target), offer = await f.client.accept(await f.create());
   await f.lease.accept(); await f.lease.markRunning();
   const signal = AbortSignal.timeout(10_000);

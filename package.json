@@ -75,7 +75,8 @@
     "benchmark-packages/shared-tree/",
     "benchmark-packages/automationbench/resources.mjs",
     "benchmark-packages/automationbench/RESOURCES.md",
-    "test-contracts/hitch-resources-v1.json"
+    "test-contracts/hitch-resources-v1.json",
+    "examples/external-inference/"
   ],
   "scripts": {
     "docs:check": "node scripts/check-guide.mjs",
@@ -93,7 +94,8 @@
     "canary:gpu-hardware": "npm run build && node dist/scripts/canary-gpu-hardware.js",
     "check:architecture": "node dist/scripts/check-architecture.js",
     "check": "npm run typecheck && npm run build && npm run check:architecture && node dist/scripts/check-syntax.js && npm test",
-    "prepublishOnly": "npm run check"
+    "prepublishOnly": "npm run check",
+    "canary:external-endpoint": "npm run build && node dist/scripts/canary-external-endpoint.js"
   },
   "engines": {
     "node": ">=22"
