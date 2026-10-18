@@ -55,19 +55,26 @@ export async function writeTrialEnvironmentImageEvidence(
 export function verifyTrialEnvironmentImageExecution(
   execution: ExecutionEvidenceV1,
   evidence?: TrialEnvironmentImagesV1,
+  trial?: Record<string, unknown>,
 ): ExecutionEvidenceV1 {
   if (!evidence) return execution;
+  // Harbor explicitly records null executions when setup failed before Target
+  // or verifier started. Missing containers must not hide that upstream error.
+  const unstartedFailure = trialFailedBeforeExecution(trial);
   const manifests = new Map(evidence.manifests.map((manifest) => [manifest.image_id, manifest]));
   for (const use of evidence.uses) {
     const manifest = manifests.get(use.image_id);
     if (!manifest) throw imageMismatch();
     const expectedConfig = manifest.output.config_digest;
-    const observed = execution.observed.containers.filter((container) => expectedConfig
-      ? container.image_config_digest !== undefined
-      : container.image_reference !== undefined);
-    if (observed.length === 0) throw new HitchError("immutable trial container image evidence is unavailable", {
-      code: "environment_image_evidence_unavailable", exitCode: 12,
-    });
+    const boundService = use.service ?? (use.resolution === "prebuilt" && execution.observed.containers.some((container) => container.service !== undefined) ? "main" : undefined);
+    const observed = execution.observed.containers.filter((container) => (!boundService || container.service === boundService)
+      && (expectedConfig ? container.image_config_digest !== undefined : container.image_reference !== undefined));
+    if (observed.length === 0) {
+      if (unstartedFailure) continue;
+      throw new HitchError("immutable trial container image evidence is unavailable", {
+        code: "environment_image_evidence_unavailable", exitCode: 12,
+      });
+    }
     const matched = observed.some((container) => expectedConfig
       ? container.image_config_digest === expectedConfig
       : container.image_reference === use.reference);
@@ -76,25 +83,53 @@ export function verifyTrialEnvironmentImageExecution(
   return execution;
 }
 
+export function trialFailedBeforeExecution(trial?: Record<string, unknown>): boolean {
+  if (trial?.agent_execution !== null || trial?.verifier !== null || !trial.exception_info || typeof trial.exception_info !== "object") return false;
+  const type = (trial.exception_info as Record<string, unknown>).exception_type;
+  return typeof type === "string" && /^[a-zA-Z_][a-zA-Z0-9_]{0,127}$/.test(type);
+}
+
 /** Keep unverified observations in the work directory even when image validation rejects the trial. */
 export async function recordTrialEnvironmentImageExecution(
   directory: string,
   execution: ExecutionEvidenceV1,
   evidence?: TrialEnvironmentImagesV1,
 ): Promise<ExecutionEvidenceV1> {
+  await persistTrialEnvironmentImageExecution(directory, execution, evidence);
+  return verifyTrialEnvironmentImageExecution(execution, evidence);
+}
+
+/** Persist before per-trial validation can decide whether setup ever finished. */
+export async function persistTrialEnvironmentImageExecution(
+  directory: string,
+  execution: ExecutionEvidenceV1,
+  evidence?: TrialEnvironmentImagesV1,
+): Promise<ExecutionEvidenceV1> {
   await writeTrialExecutionEvidence(directory, execution, { evalId: execution.eval_id, taskId: execution.task_id });
   await writeTrialEnvironmentImageEvidence(directory, execution.task_id, evidence);
-  return verifyTrialEnvironmentImageExecution(execution, evidence);
+  return execution;
 }
 
 export function prebuiltTaskImage(evidence?: TrialEnvironmentImagesV1): string | undefined {
   if (!evidence) return undefined;
-  const uses = evidence.uses.filter((use) => use.resolution === "prebuilt");
+  const uses = evidence.uses.filter((use) => use.resolution === "prebuilt" && use.service === undefined);
   if (uses.length === 0) return undefined;
   if (uses.length !== 1) throw new TypeError("one trial cannot use multiple prebuilt task images");
   const manifest = evidence.manifests.find((entry) => entry.image_id === uses[0]?.image_id);
   if (!manifest?.output.config_digest) throw new HitchError("prebuilt task image has no immutable local config digest", { code: "environment_image_manifest_unavailable", exitCode: 12 });
   return manifest.output.config_digest;
+}
+
+export function prebuiltServiceImages(evidence?: TrialEnvironmentImagesV1): Record<string, string> {
+  const result: Record<string, string> = Object.create(null) as Record<string, string>;
+  for (const use of evidence?.uses ?? []) {
+    if (use.resolution !== "prebuilt" || use.service === undefined) continue;
+    const manifest = evidence?.manifests.find((entry) => entry.image_id === use.image_id);
+    if (!manifest?.output.config_digest) throw new HitchError("prebuilt service image has no immutable local config digest", { code: "environment_image_manifest_unavailable", exitCode: 12 });
+    if (result[use.service] !== undefined && result[use.service] !== manifest.output.config_digest) throw new TypeError("one trial cannot bind a service to multiple prebuilt images");
+    result[use.service] = manifest.output.config_digest;
+  }
+  return result;
 }
 
 function validatePair(taskId: string, use: EnvironmentImageUseV1, manifest: EnvironmentImageManifestV1): void {
@@ -103,7 +138,8 @@ function validatePair(taskId: string, use: EnvironmentImageUseV1, manifest: Envi
     : manifest.output.reference === use.reference;
   if (!use.task_ids.includes(taskId) || manifest.schema_version !== "1" || manifest.image_id !== use.image_id
     || !referenceMatches || manifest.output.manifest_digest !== use.manifest_digest
-    || manifest.platform !== use.platform || manifest.source.task_id !== undefined && manifest.source.task_id !== taskId) {
+    || manifest.platform !== use.platform || manifest.source.task_id !== undefined && manifest.source.task_id !== taskId
+    || use.service !== undefined && (use.resolution !== "prebuilt" || manifest.source.kind !== "compose-build")) {
     throw new TypeError("environment image manifest does not match the planned trial image");
   }
 }

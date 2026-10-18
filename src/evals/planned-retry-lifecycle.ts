@@ -8,7 +8,7 @@ import type { InfrastructureRetryLifecycle } from "./infrastructure-retry.js";
 import { recordLocalDockerProcessExit, recordLocalDockerProcessStart, releaseLocalDockerProcessRecord } from "./local-docker-provider.js";
 import type { ExecutePlannedHarborOptions } from "./planned-execution.js";
 import { resolvedImageMapping } from "./environment-image-planning.js";
-import { prebuiltTaskImage, recordTrialEnvironmentImageExecution } from "./trial-environment-evidence.js";
+import { prebuiltTaskImage, prebuiltServiceImages, persistTrialEnvironmentImageExecution } from "./trial-environment-evidence.js";
 import { writeTrialExecutionEvidence } from "./trial-execution-evidence.js";
 import type { TrialEnvironmentImagesV1 } from "./trial-environment-evidence.js";
 import { physicalRetryWorkItem } from "./physical-retry-work.js";
@@ -131,7 +131,7 @@ function retryLifecycle(
     ...(input.environmentImages ? { environmentImages: input.environmentImages } : {}),
     captureExecutionEvidence: async () => {
       if (heartbeatFailure !== undefined) throw heartbeatFailure;
-      return recordTrialEnvironmentImageExecution(input.backendDirectory, await observer.capture(), input.environmentImages);
+      return persistTrialEnvironmentImageExecution(input.backendDirectory, await observer.capture(), input.environmentImages);
     },
     backend: {
       executionResources: resourceRequirementForTask(options.plan, taskId)?.main_limits ?? options.plan.default_trial_resources,
@@ -139,6 +139,7 @@ function retryLifecycle(
       dockerOwnership: ownership,
       resolvedImages: resolvedImageMapping(item.image_refs ?? []),
       ...(prebuiltImage ? { prebuiltTaskImage: prebuiltImage } : {}),
+      prebuiltServiceImages: prebuiltServiceImages(input.environmentImages),
       ...(options.worker.provider === "local-docker" && process.platform !== "win32" ? {
         recoverableProcess: true,
         onProcessStarted: (pid: number) => recordLocalDockerProcessStart({

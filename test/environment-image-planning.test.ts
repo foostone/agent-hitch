@@ -69,6 +69,29 @@ test("backend build policy does not invoke the registry resolver", async () => {
   assert.equal(result.fallbacks[0]?.code, "policy-backend");
 });
 
+test("main and simulator builds complete during planning and retain service identity and platform", async () => {
+  const calls: Array<{ dockerfile: string; platform: string; sourceKind?: string }> = [];
+  const result = await planEnvironmentImages({
+    tasks: [task({ environment_images: [], environment_builds: [
+      { source: "task", service: "main", context: "environment", context_directory: "/task/environment", dockerfile: "Dockerfile" },
+      { source: "compose", service: "simulator", context: "environment", context_directory: "/task/environment", dockerfile: "Dockerfile.simulator", platform: "linux/arm64" },
+    ] })], mode: "prebuild-required", benchmarkId: "demo", benchmarkRevision: "1",
+    builder: async (input) => {
+      calls.push(input);
+      const requested = `hitch-environment:${input.dockerfile === "Dockerfile" ? "main" : "simulator"}`;
+      return { image_id: imageId, requested_reference: requested, reference: `${requested}@${digest}`,
+        manifest_digest: digest, platform: input.platform, cache_hit: false };
+    },
+  });
+  assert.deepEqual(calls.map(({ dockerfile, platform, sourceKind }) => ({ dockerfile, platform, sourceKind })), [
+    { dockerfile: "Dockerfile", platform: "linux/amd64", sourceKind: undefined },
+    { dockerfile: "Dockerfile.simulator", platform: "linux/arm64", sourceKind: "compose-build" },
+  ]);
+  assert.deepEqual(result.uses.map((entry) => entry.service), [undefined, "simulator"]);
+  assert.deepEqual(result.fallbacks, []);
+  assert.deepEqual(resolvedImageMapping(result.uses), {});
+});
+
 test("task Dockerfile planning records an immutable prebuilt image without registry overlay mapping", async () => {
   const requested = "hitch-environment:0123456789abcdef0123456789abcdef";
   const result = await planEnvironmentImages({

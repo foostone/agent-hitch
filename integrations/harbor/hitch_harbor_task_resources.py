@@ -62,11 +62,16 @@ def inspect_task(task_dir: Path) -> dict[str, Any]:
         images.extend(verifier_images)
         fallbacks.extend(verifier_fallbacks)
         builds.extend(verifier_builds)
-    compose_images, compose_fallbacks = _compose_images(
+    compose_images, compose_fallbacks, compose_builds = _compose_images(
         task_dir / "environment" / "docker-compose.yaml"
     )
     images.extend(compose_images)
     fallbacks.extend(compose_fallbacks)
+    if any(entry["service"] == "main" and entry["code"] == "backend-build" for entry in compose_fallbacks):
+        # The native main definition may contain args, aliases or another
+        # context. A default Dockerfile prebuild must not override that choice.
+        builds = [entry for entry in builds if entry["source"] != "task"]
+    builds.extend(compose_builds)
     return {
         "schema_version": "1",
         **({"runtime_platform": runtime_platform} if runtime_platform is not None else {}),
@@ -141,28 +146,87 @@ def _environment_images(
 
 def _compose_images(
     compose_file: Path,
-) -> tuple[list[dict[str, str]], list[dict[str, str]]]:
+) -> tuple[list[dict[str, str]], list[dict[str, str]], list[dict[str, str]]]:
     if not compose_file.exists():
-        return [], []
+        return [], [], []
     document = yaml.safe_load(compose_file.read_text(encoding="utf-8"))
     if document is None or not isinstance(document, dict):
-        return [], []
+        return [], [], []
     raw_services = document.get("services")
     if not isinstance(raw_services, dict):
-        return [], []
+        return [], [], []
     images: list[dict[str, str]] = []
     fallbacks: list[dict[str, str]] = []
+    builds = None if "include" in document or "extends" in document else _independent_compose_builds(raw_services, compose_file.parent)
     for name, raw in raw_services.items():
         if not isinstance(name, str) or not isinstance(raw, dict):
             continue
         reference = raw.get("image")
         if raw.get("build") is not None:
-            fallbacks.append({"source": "compose", "service": name, "code": "backend-build"})
+            if builds is None:
+                fallbacks.append({"source": "compose", "service": name, "code": "backend-build"})
         elif isinstance(reference, str) and reference and "$" not in reference:
             images.append({"source": "compose", "service": name, "reference": reference})
         elif reference is not None:
             fallbacks.append({"source": "compose", "service": name, "code": "dynamic-image"})
-    return images, fallbacks
+    return images, fallbacks, builds or []
+
+
+def _independent_compose_builds(services, environment):
+    """Only prebuild the plain unnamed topology; other Compose inputs stay native.
+
+    Named images can consume another service's generated project tag. Reject
+    the whole composition rather than infer aliases before Compose resolves it.
+    Main must be the same Dockerfile already handled by task image planning.
+    """
+    builds = []
+    try:
+        for name, service in services.items():
+            if not isinstance(name, str) or not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9_.-]{0,254}", name):
+                return None
+            if not isinstance(service, dict) or service.get("image") or "extends" in service or "profiles" in service:
+                return None
+            for mount in service.get("volumes") or []:
+                if isinstance(mount, dict) and mount.get("type") == "image":
+                    return None
+            build = service.get("build")
+            if build is None:
+                continue
+            if service.get("pull_policy") is not None:
+                return None
+            if isinstance(build, str):
+                build = {"context": build}
+            if not isinstance(build, dict) or set(build) - {"context", "dockerfile"}:
+                return None
+            context = build.get("context", ".")
+            dockerfile = build.get("dockerfile", "Dockerfile")
+            if any(not isinstance(value, str) or not value or any(c in value for c in ("$", "\\", "\0"))
+                   or Path(value).is_absolute() or ".." in Path(value).parts for value in (context, dockerfile)):
+                return None
+            if any(part in ("", ".", "..") for part in dockerfile.split("/")):
+                return None
+            directory = environment / context
+            if directory.resolve() != directory.absolute() or not directory.is_dir():
+                return None
+            source = directory / dockerfile
+            if source.resolve() != source.absolute() or not source.is_file():
+                return None
+            platform = service.get("platform")
+            if platform not in ("linux/amd64", "linux/arm64"):
+                # A project .env can change Docker's default platform. Only an
+                # explicit service platform is independent of those defaults.
+                return None
+            relative_context = directory.relative_to(environment).as_posix()
+            if name == "main":
+                if relative_context != "." or dockerfile != "Dockerfile":
+                    return None
+                continue
+            builds.append({"source": "compose", "service": name,
+                           "context": str(Path("environment") / relative_context), "dockerfile": dockerfile,
+                           **({"platform": platform} if platform else {})})
+    except (OSError, ValueError):
+        return None
+    return builds
 
 
 def _compose_services(compose_file: Path) -> list[dict[str, Any]]:

@@ -76,6 +76,11 @@ test("task resource declaration parser rejects unknown evidence", () => {
   }), /fields are invalid/);
 });
 
+test("Harbor discovers bounded independent Compose sidecar builds before trial startup", () => {
+  const result = spawnSync("python3", ["test-support/harbor_compose_images_smoke.py"], { encoding: "utf8", timeout: 30_000 });
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+});
+
 test("task resource declaration accepts only the supported main Dockerfile build", () => {
   const declaration = parseHarborTaskResourceDeclaration({
     schema_version: "1", task: {}, verifier: { separate: false }, compose_services: [{ name: "main", replicas: 1 }],

@@ -27,6 +27,7 @@ export interface DockerResourceObserver {
 interface MutableContainer {
   container_id: string;
   name?: string;
+  service?: string;
   image_reference?: string;
   image_config_digest?: Sha256;
   first_observed_at: string;
@@ -171,6 +172,8 @@ async function observeContainer(
   const previous = containers.get(item.Id);
   const observed: MutableContainer = previous ?? { container_id: item.Id, first_observed_at: now, last_observed_at: now };
   observed.last_observed_at = now;
+  const service = rawLabels["com.docker.compose.service"];
+  if (typeof service === "string" && /^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,254}$/.test(service)) observed.service = service;
   if (typeof item.Name === "string" && item.Name.replace(/^\//, "")) observed.name = item.Name.replace(/^\//, "").replace(/[\0\r\n]/g, " ").slice(0, 256);
   if (typeof config.Image === "string" && config.Image && config.Image.length <= 1_024 && !/[\0\r\n]/.test(config.Image)) observed.image_reference = config.Image;
   if (typeof item.Image === "string" && /^sha256:[a-f0-9]{64}$/.test(item.Image)) observed.image_config_digest = item.Image as Sha256;

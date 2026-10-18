@@ -34,6 +34,7 @@ export function harborEnvironmentConfig(
   privateExecEnvironment = false,
   sharedRuntime?: { runtime_directory: string; artifact_directory: string },
   preparation: HarborPreparationOptions = {},
+  prebuiltServiceImages: Record<string, string> = {},
 ): Record<string, unknown> {
   const environment: Record<string, unknown> = { type: "docker", delete: true };
   let gpuCount = 0;
@@ -51,11 +52,14 @@ export function harborEnvironmentConfig(
   }
   if (serviceLimits && !ownership) throw invalidInput("Harbor sidecar limits require Docker ownership");
   const images = resolvedImages ? parseResolvedImages(resolvedImages) : {};
+  for (const [service, image] of Object.entries(prebuiltServiceImages)) {
+    if (!/^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,254}$/.test(service) || service === "main" || !/^sha256:[a-f0-9]{64}$/.test(image)) throw invalidInput("Harbor prebuilt service image is invalid");
+  }
   if (prebuiltTaskImage !== undefined && !/^sha256:[a-f0-9]{64}$/.test(prebuiltTaskImage)) throw invalidInput("Harbor prebuilt task image is invalid");
   if (preparation.cacheDirectory !== undefined && (!path.isAbsolute(preparation.cacheDirectory) || /[\0\r\n]/.test(preparation.cacheDirectory))) throw invalidInput("Hitch image cache directory must be absolute");
   if (preparation.buildSlots !== undefined && (!Number.isSafeInteger(preparation.buildSlots) || preparation.buildSlots < 1 || preparation.buildSlots > 64 || !preparation.cacheDirectory)) throw invalidInput("Hitch image build slots require a cache directory and a value between 1 and 64");
   if (preparation.managedKeepalive !== undefined && typeof preparation.managedKeepalive !== "boolean") throw invalidInput("Hitch managed keepalive flag is invalid");
-  if (ownership || Object.keys(images).length > 0 || prebuiltTaskImage || modelProxyHostGateway || gpuCount > 0 || privateExecEnvironment || sharedRuntime || preparation.cacheDirectory || preparation.managedKeepalive) Object.assign(environment, {
+  if (ownership || Object.keys(images).length > 0 || prebuiltTaskImage || Object.keys(prebuiltServiceImages).length > 0 || modelProxyHostGateway || gpuCount > 0 || privateExecEnvironment || sharedRuntime || preparation.cacheDirectory || preparation.managedKeepalive) Object.assign(environment, {
     import_path: HITCH_DOCKER_ENVIRONMENT,
     kwargs: {
       ...(preparation.cacheDirectory ? { hitch_image_cache_dir: preparation.cacheDirectory, hitch_image_build_slots: preparation.buildSlots ?? 2 } : {}),
@@ -65,6 +69,7 @@ export function harborEnvironmentConfig(
       ...(serviceLimits && Object.keys(serviceLimits).length > 0 ? { hitch_service_resource_limits: parseServiceLimits(serviceLimits) } : {}),
       ...(Object.keys(images).length > 0 ? { hitch_resolved_images: images } : {}),
       ...(prebuiltTaskImage ? { hitch_prebuilt_task_image: prebuiltTaskImage } : {}),
+      ...(Object.keys(prebuiltServiceImages).length > 0 ? { hitch_prebuilt_service_images: prebuiltServiceImages } : {}),
       ...(modelProxyHostGateway ? { hitch_model_proxy_host_gateway: true } : {}),
       ...(gpuCount > 0 ? { hitch_main_gpu_count: gpuCount } : {}),
     },

@@ -8,6 +8,24 @@ contexts are prebuilt when every Dockerfile base is digest-pinned. The Harbor
 overlay injects the resulting immutable local config digest and uses Compose's
 `!reset` merge tag to remove the original main-service build stanza.
 
+Plain, independent Compose sidecar builds are also prepared during eval
+planning, before Harbor starts a trial. This supported form uses unnamed
+images, an explicit `linux/amd64` or `linux/arm64` platform, a literal local
+context inside the task's `environment/` directory, and a Dockerfile with
+digest-pinned bases. The build may specify only `context` and `dockerfile`.
+The main Compose build must match `environment/Dockerfile`. Named image
+producers or consumers, image mounts, build arguments, targets, secrets,
+additional contexts, pull overrides, and other unsupported inputs retain the
+native backend path. A context or Dockerfile that escapes the environment or
+uses a symlink is not prebuilt.
+
+The execution plan gives each prepared sidecar an explicit service binding.
+Harbor receives its immutable local config digest with `build: !reset null`
+and `pull_policy: never`; dependencies and health checks retain their original
+Compose definitions. Separate verifier sessions do not inherit the candidate's
+prepared main or sidecar images. Historical prebuilt image uses without a
+service binding still identify the main image.
+
 The service hashes every regular context file (path, content digest, executable
 bit), the Dockerfile, non-secret build arguments, platform, target, immutable
 base-image digests, and secret names. Secret values are passed to BuildKit only
@@ -31,6 +49,13 @@ stored separately under `store/build-records/sha256/`.
 used by evals while keeping `container_slots` independent. The default build
 reservation is one build slot and no trial container slot. Operators can pass a
 larger CPU/memory build vector when their builder needs it.
+
+Preparation uses the existing 30-minute Docker command deadline and the eval's
+cancellation signal; Harbor's task `environment.build_timeout_sec` remains the
+independent trial startup limit. Build events and persisted build records expose
+queued, started, completed, and failed phases. A failed record retains at most
+16,384 characters of redacted diagnostic text, including available BuildKit output.
+Historical slow-build causes remain undetermined unless supported by those logs.
 
 `DockerBuildKitBuilder` uses `docker buildx build --load`, a metadata file for
 the output manifest/config digests, and `docker image inspect` for platform and
@@ -68,6 +93,33 @@ Owned Harbor environments retain containers until the fenced Hitch reaper runs.
 The resource observer records Docker's configured image reference and config
 digest, and a planned immutable image is accepted only when that config digest
 was actually observed during the trial.
+
+The Docker observer records Compose service labels with image identities, so a
+prepared sidecar must be observed under its planned service. If Harbor reports
+an explicit setup exception with both Target and verifier executions null,
+missing containers preserve that upstream diagnostic. An observed conflicting
+image still fails verification, and successful trials require image evidence.
+
+Owned trial cleanup omits Compose's `--rmi local` operation. That operation
+enumerates image metadata and can fail before pending network and volume
+removal. Container, network, and volume cleanup remains owner-scoped. Prepared
+images remain subject to `hitch images gc`; images built by native fallback
+paths are retained because they lack Hitch's immutable image ownership proof.
+Those unregistered fallback images may require explicit operator cleanup.
+No host-wide image prune is performed.
+
+The manual cleanup canary uses the installed Compose binary against a local
+fake Engine that rejects image enumeration. It verifies that the original
+`--rmi local` path fails and leaves network/volume cleanup pending, while the
+updated command removes project resources without an image API request:
+
+```sh
+python3 test-support/compose_cleanup_engine_canary.py /tmp/hitch-compose-cleanup-canary
+```
+
+Pass `--compose-binary /path/to/docker-compose` when the binary is not on PATH.
+This proves the installed Compose command boundary; it does not reproduce a
+large containerd image store or certify a particular deployed Compose version.
 
 `npm run canary:docker-images` starts three ownership-labeled containers with
 distinct main, sidecar, and separate-Verifier config digests. It runs the real

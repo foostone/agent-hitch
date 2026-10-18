@@ -7,7 +7,7 @@ import { HitchError, atomicWriteJSON, detectVersion, ensureDir, fingerprintExecu
 import type { DockerResourceOwnershipV1, EvalRequest, ModelProxyRouteV1, ResolvedRevision, ResourceVectorV1 } from "../../domain/index.js";
 import { harborDatasetConfig } from "./dataset-config.js";
 import { harborAgentTimeoutOverride } from "./agent-budget.js";
-import { DEFAULT_HARBOR_VERSION, HARBOR_CREDENTIAL_ENV, locateHarbor } from "./tools.js";
+import { DEFAULT_HARBOR_VERSION, HARBOR_CREDENTIAL_ENV, discoverHarbor } from "./tools.js";
 import { harborVerifierConfig } from "./verifier-config.js";
 import { invokeHarbor } from "./process.js";
 import { harborEnvironmentConfig, harborPreparationOptions } from "./environment-config.js";
@@ -48,6 +48,7 @@ export interface RunHarborBackendOptions {
   dockerServiceLimits?: HarborDockerServiceLimitsV1;
   resolvedImages?: Record<string, string>;
   prebuiltTaskImage?: string;
+  prebuiltServiceImages?: Record<string, string>;
   modelProxy?: ModelProxyRouteV1;
 }
 
@@ -114,6 +115,7 @@ async function executeHarborBackend({
   dockerServiceLimits,
   resolvedImages,
   prebuiltTaskImage,
+  prebuiltServiceImages,
   modelProxy,
 }: RunHarborBackendOptions): Promise<HarborBackendResult> {
   assertHarborArtifactPin(request.artifact_pins, preparedArtifact);
@@ -160,6 +162,7 @@ async function executeHarborBackend({
     ...(dockerServiceLimits ? { dockerServiceLimits } : {}),
     ...(resolvedImages ? { resolvedImages } : {}),
     ...(prebuiltTaskImage ? { prebuiltTaskImage } : {}),
+    ...(prebuiltServiceImages ? { prebuiltServiceImages } : {}),
     ...(modelProxy ? { modelProxy } : {}),
   });
   await atomicWriteJSON(configPath, config);
@@ -314,6 +317,7 @@ export interface BuildHarborJobConfigOptions {
   dockerServiceLimits?: HarborDockerServiceLimitsV1;
   resolvedImages?: Record<string, string>;
   prebuiltTaskImage?: string;
+  prebuiltServiceImages?: Record<string, string>;
   modelProxy?: ModelProxyRouteV1;
 }
 
@@ -334,6 +338,7 @@ export async function buildHarborJobConfig({
   dockerServiceLimits,
   resolvedImages,
   prebuiltTaskImage,
+  prebuiltServiceImages,
   modelProxy,
 }: BuildHarborJobConfigOptions): Promise<Record<string, unknown>> {
   if (logicalAttempt !== undefined && (!Number.isSafeInteger(logicalAttempt) || logicalAttempt < 1)) {
@@ -409,6 +414,7 @@ export async function buildHarborJobConfig({
       hostCredentialHelper !== null,
       preparedArtifact.sharedRuntime,
       harborPreparationOptions(env),
+      prebuiltServiceImages,
     ),
     verifier: harborVerifierConfig(request),
     agents: [agent],
@@ -465,17 +471,6 @@ export function normalizeHarborResult(raw: Record<string, unknown>): Record<stri
     rewards,
     trials: normalizedTrials,
   };
-}
-
-async function discoverHarbor(explicit: string | undefined, root: string, env: NodeJS.ProcessEnv): Promise<string> {
-  const located = await locateHarbor({ root, explicit, env });
-  if (!located.executable) {
-    throw new HitchError(`Harbor executable not found: ${located.requested}`, {
-      code: "harbor_unavailable",
-      exitCode: 3,
-    });
-  }
-  return located.executable;
 }
 
 function credentialEnvironmentNames(explicitNames: string[], env: NodeJS.ProcessEnv, helperNames: readonly string[] = []): string[] {

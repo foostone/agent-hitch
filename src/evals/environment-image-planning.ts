@@ -71,11 +71,13 @@ export async function planEnvironmentImages(input: {
           contextDirectory: entry.contextDirectory,
           dockerfile: entry.dockerfile,
           platform: entry.platform,
+          ...(entry.sourceKind ? { sourceKind: entry.sourceKind } : {}),
           ...(input.signal ? { signal: input.signal } : {}),
         });
         if (!validBuiltImage(entry.platform, built)) throw new TypeError("environment image builder output is invalid");
         uses.push({
           task_ids: [entry.taskId],
+          ...(entry.service ? { service: entry.service } : {}),
           image_id: built.image_id,
           requested_reference: built.requested_reference,
           reference: built.reference,
@@ -105,15 +107,18 @@ function canonicalBuilds(tasks: readonly LocalTaskPlanningInputV1[], defaultPlat
   platform: string;
   contextDirectory: string;
   dockerfile: string;
-  bindings: Array<{ source: "task"; service: "main" }>;
+  service?: string;
+  sourceKind?: "compose-build";
+  bindings: Array<{ source: "task" | "compose"; service: string }>;
 }> {
   return tasks.flatMap((task) => task.environment_builds.map((entry) => ({
     taskId: task.task_id,
-    platform: task.runtime_platform ?? defaultPlatform,
+    platform: entry.platform ?? task.runtime_platform ?? defaultPlatform,
     contextDirectory: entry.context_directory,
     dockerfile: entry.dockerfile,
+    ...(entry.source === "compose" ? { service: entry.service, sourceKind: "compose-build" as const } : {}),
     bindings: [{ source: entry.source, service: entry.service }],
-  }))).sort((left, right) => compare(`${left.taskId}\0${left.contextDirectory}\0${left.dockerfile}`, `${right.taskId}\0${right.contextDirectory}\0${right.dockerfile}`));
+  }))).sort((left, right) => compare(`${left.taskId}\0${left.contextDirectory}\0${left.dockerfile}\0${left.service ?? ""}`, `${right.taskId}\0${right.contextDirectory}\0${right.dockerfile}\0${right.service ?? ""}`));
 }
 
 export function resolvedImageMapping(images: readonly EnvironmentImageUseV1[]): Record<string, string> {
@@ -187,7 +192,7 @@ function repositoryOf(reference: string): string {
 }
 
 function canonicalUses(value: EnvironmentImageUseV1[]): EnvironmentImageUseV1[] {
-  return [...value].sort((left, right) => compare(`${left.task_ids[0]}\0${left.requested_reference}`, `${right.task_ids[0]}\0${right.requested_reference}`));
+  return [...value].sort((left, right) => compare(`${left.task_ids[0]}\0${left.requested_reference}\0${left.service ?? ""}`, `${right.task_ids[0]}\0${right.requested_reference}\0${right.service ?? ""}`));
 }
 
 function canonicalFallbacks(value: EnvironmentImageFallbackV1[]): EnvironmentImageFallbackV1[] {

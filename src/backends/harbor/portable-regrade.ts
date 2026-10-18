@@ -60,7 +60,7 @@ function portableEnvironment(value: unknown): Record<string, unknown> {
   const env = exact(value, ENV_FIELDS);
   if (env.import_path !== "hitch_harbor_environment:HitchHarborDockerEnvironment" || env.type !== "docker"
     || nonempty(env.mounts) || nonempty(env.extra_docker_compose) || nonempty(env.env) || env.override_tpu != null) throw invalid("source environment requires unavailable host mounts, credentials or runtime");
-  const kwargs = exact(env.kwargs ?? {}, ["hitch_ownership_labels", "hitch_service_resource_limits", "hitch_resolved_images", "hitch_prebuilt_task_image", "hitch_model_proxy_host_gateway", "hitch_main_gpu_count", "hitch_shared_runtime", "hitch_image_cache_dir", "hitch_image_build_slots", "hitch_managed_keepalive"]);
+  const kwargs = exact(env.kwargs ?? {}, ["hitch_ownership_labels", "hitch_service_resource_limits", "hitch_resolved_images", "hitch_prebuilt_task_image", "hitch_prebuilt_service_images", "hitch_model_proxy_host_gateway", "hitch_main_gpu_count", "hitch_shared_runtime", "hitch_image_cache_dir", "hitch_image_build_slots", "hitch_managed_keepalive"]);
   // Host installation/cache paths cannot travel to another regrade worker.
   // They are transport optimizations, never task or verifier inputs.
   if (kwargs.hitch_image_cache_dir !== undefined && !path.isAbsolute(text(kwargs.hitch_image_cache_dir))) throw invalid("source image cache directory is invalid");
@@ -83,6 +83,9 @@ function portableEnvironment(value: unknown): Record<string, unknown> {
     || portableKwargs.hitch_main_gpu_count !== undefined && !positiveInteger(portableKwargs.hitch_main_gpu_count)
     || portableKwargs.hitch_model_proxy_host_gateway !== undefined && typeof portableKwargs.hitch_model_proxy_host_gateway !== "boolean"
     || portableKwargs.hitch_managed_keepalive !== undefined && typeof portableKwargs.hitch_managed_keepalive !== "boolean") throw invalid("source environment settings are invalid");
+  if (portableKwargs.hitch_prebuilt_service_images !== undefined) for (const [service, image] of Object.entries(object(portableKwargs.hitch_prebuilt_service_images))) {
+    if (!/^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,254}$/.test(service) || service === "main" || !digest(image)) throw invalid("source service image identity is invalid");
+  }
   const result: Record<string, unknown> = { type: "docker", import_path: env.import_path, delete: false, kwargs: portableKwargs };
   for (const field of ["force_build", "suppress_override_warnings"]) if (env[field] !== undefined) {
     if (typeof env[field] !== "boolean") throw invalid("source environment flag is invalid"); result[field] = env[field];

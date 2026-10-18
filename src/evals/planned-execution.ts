@@ -21,7 +21,7 @@ import { executeRemotePlannedWorkItem } from "./planned-remote-execution.js";
 import { runtimeResourcesForTask } from "./execution-plan-resources.js";
 import { startDockerResourceObserver } from "./docker-resource-observer.js";
 import { resolvedImageMapping } from "./environment-image-planning.js";
-import { loadTrialEnvironmentImages, prebuiltTaskImage, recordTrialEnvironmentImageExecution, writeTrialEnvironmentImageEvidence } from "./trial-environment-evidence.js";
+import { loadTrialEnvironmentImages, prebuiltTaskImage, prebuiltServiceImages, persistTrialEnvironmentImageExecution, writeTrialEnvironmentImageEvidence } from "./trial-environment-evidence.js";
 import { writeTrialExecutionEvidence } from "./trial-execution-evidence.js";
 import type { TrialEnvironmentImagesV1 } from "./trial-environment-evidence.js";
 import { PrioritySemaphore, assertTaskSlotPlan, workOrder, workSchedulingPriority } from "./planned-execution-support.js";
@@ -411,6 +411,7 @@ async function executeLeasedWorkItem(
     dockerOwnership: ownership,
     resolvedImages: resolvedImageMapping(item.image_refs ?? []),
     ...(prebuiltImage ? { prebuiltTaskImage: prebuiltImage } : {}),
+    prebuiltServiceImages: prebuiltServiceImages(environmentImages),
     env: options.env,
     ...(options.harborExecutable !== undefined ? { harborExecutable: options.harborExecutable } : {}),
     ...(options.signal ? { signal: options.signal } : {}),
@@ -452,7 +453,7 @@ async function executeLeasedWorkItem(
           ...(options.interactionCaptureExporter ? {
             interactionCaptureExporter: options.interactionCaptureExporter,
           } : {}),
-          executionEvidence: await recordTrialEnvironmentImageExecution(backendDirectory, await resourceObserver.capture(), environmentImages),
+          executionEvidence: await persistTrialEnvironmentImageExecution(backendDirectory, await resourceObserver.capture(), environmentImages),
           ...(environmentImages ? { environmentImages } : {}),
           requireCompleteMarker: true,
           allowMissingBundleDiagnostic: context.bundleWaitExpired,
@@ -487,7 +488,7 @@ async function executeLeasedWorkItem(
     ...(options.interactionCaptureExporter ? {
       interactionCaptureExporter: options.interactionCaptureExporter,
     } : {}),
-    executionEvidence: await recordTrialEnvironmentImageExecution(backendDirectory, await resourceObserver.capture(), environmentImages),
+    executionEvidence: await persistTrialEnvironmentImageExecution(backendDirectory, await resourceObserver.capture(), environmentImages),
     ...(environmentImages ? { environmentImages } : {}),
     rawResult: run.rawResult,
   }, refs);

@@ -348,7 +348,7 @@ test("a persisted planned retry resumes without repeating the initial candidate"
   assert.equal(terminal?.decisions[0]?.state, "exhausted");
 });
 
-for (const imageObservation of ["matching", "missing", "mismatched"] as const) test(`planned images preserve identity and observation evidence before validation: ${imageObservation}`, async (t) => {
+for (const imageObservation of ["matching", "missing", "mismatched", "unstarted-timeout", "unstarted-sidecar-only"] as const) test(`planned images preserve identity and observation evidence before validation: ${imageObservation}`, async (t) => {
   const root = await mkdtemp(path.join(tmpdir(), "hitch-planned-prebuilt-image-"));
   t.after(() => forceRemove(root));
   const dataset = path.join(root, "dataset");
@@ -356,12 +356,17 @@ for (const imageObservation of ["matching", "missing", "mismatched"] as const) t
   await mkdir(environment, { recursive: true });
   await writeFile(path.join(dataset, "one", "task.toml"), "name = \"one\"\n");
   await writeFile(path.join(environment, "Dockerfile"), "FROM scratch\n");
-  const harbor = await writeFakeHarbor(root);
+  const useSidecar = imageObservation === "matching" || imageObservation === "unstarted-sidecar-only";
+  const unstarted = imageObservation.startsWith("unstarted");
+  if (useSidecar) await writeFile(path.join(environment, "Dockerfile.simulator"), "FROM scratch\n");
+  const harbor = unstarted ? await writeInfrastructureFailureHarbor(root, true) : await writeFakeHarbor(root);
   const npm = await writeFakeNpm(root);
-  const inspector = await writeBuildInspector(root);
+  const inspector = await writeBuildInspector(root, useSidecar);
   const manifestDigest = `sha256:${"7".repeat(64)}` as const;
   const configDigest = `sha256:${"8".repeat(64)}` as const;
-  const docker = await writeObservedImageDocker(root, imageObservation === "missing" ? null : imageObservation === "mismatched" ? `sha256:${"9".repeat(64)}` : configDigest);
+  const sidecarDigest = `sha256:${"6".repeat(64)}` as const;
+  const docker = await writeObservedImageDocker(root, imageObservation === "missing" || unstarted ? null : imageObservation === "mismatched" ? `sha256:${"9".repeat(64)}` : configDigest,
+    useSidecar ? { ...(unstarted ? {} : { main: configDigest }), simulator: sidecarDigest } : undefined);
   let builds = 0;
   let buildSlots = 0;
   const built = new Map<string, typeof manifestDigest>();
@@ -370,8 +375,10 @@ for (const imageObservation of ["matching", "missing", "mismatched"] as const) t
     probe: async (reference, digest) => built.get(reference.split("@", 1)[0] as string) === digest,
     build: async (input) => {
       builds += 1;
-      built.set(input.outputReference, manifestDigest);
-      return { reference: input.outputReference, manifest_digest: manifestDigest, config_digest: configDigest, platform: input.platform };
+      const simulator = input.dockerfile === "Dockerfile.simulator";
+      const manifest = simulator ? `sha256:${"5".repeat(64)}` as const : manifestDigest;
+      built.set(input.outputReference, manifest);
+      return { reference: input.outputReference, manifest_digest: manifest, config_digest: simulator ? sidecarDigest : configDigest, platform: input.platform };
     },
   };
   const imageBuilder = localEnvironmentImageBuild(root, async () => {
@@ -391,22 +398,22 @@ for (const imageObservation of ["matching", "missing", "mismatched"] as const) t
     env: { ...process.env, HITCH_NPM_PATH: npm, HITCH_HARBOR_PYTHON_PATH: inspector, HITCH_DOCKER_PATH: docker },
     request: { dataset, harness_ref: "pi@version:1.2.3", attempts: 1, max_concurrent: 1, infrastructure_retries: 0 },
   });
-  assert.equal(builds, 1, JSON.stringify(result));
+  assert.equal(builds, useSidecar ? 2 : 1, JSON.stringify(result));
   assert.equal(buildSlots, 0);
   const evalDirectory = path.join(root, "evals", result.eval_id as string);
   const plan = parseEvalExecutionPlan(await readJSON<unknown>(path.join(evalDirectory, "execution-plan.json")));
-  const image = plan.work_items[0]?.image_refs?.[0];
+  const image = plan.work_items[0]?.image_refs?.find((entry) => entry.service === undefined);
   assert.equal(image?.resolution, "prebuilt");
   assert.equal(image?.manifest_digest, manifestDigest);
   const provisional = await readEvalEnvironmentImageReferences(evalDirectory, result.eval_id as string);
-  assert.deepEqual(provisional && { state: provisional.state, image_ids: provisional.image_ids }, {
-    state: "planned", image_ids: [image?.image_id],
-  });
+  assert.equal(provisional?.state, "planned");
+  assert.deepEqual(new Set(provisional?.image_ids), new Set(plan.work_items[0]?.image_refs?.map((entry) => entry.image_id)));
   const config = await readJSON<Record<string, unknown>>(path.join(evalDirectory, "harbor", "work-items", plan.work_items[0]!.work_id, "epoch-000001", "job.json"));
   const kwargs = (config.environment as Record<string, Record<string, unknown>>).kwargs;
   assert.ok(kwargs);
   assert.equal(kwargs.hitch_prebuilt_task_image, configDigest);
   assert.equal(kwargs.hitch_resolved_images, undefined);
+  assert.deepEqual(kwargs.hitch_prebuilt_service_images, useSidecar ? { simulator: sidecarDigest } : undefined);
   const workDirectory = path.join(evalDirectory, "harbor", "work-items", plan.work_items[0]!.work_id, "epoch-000001");
   const snapshot = await readJSON<{ observed: { sample_count: number; containers: unknown[]; issues: string[] } }>(path.join(workDirectory, "execution.json"));
   assert.ok(Array.isArray(snapshot.observed.issues));
@@ -421,6 +428,14 @@ for (const imageObservation of ["matching", "missing", "mismatched"] as const) t
     assert.equal(result.failure_stage, undefined);
     assert.equal((result.trials as unknown[]).length, 1);
     assert.ok(snapshot.observed.sample_count > 0);
+  } else if (unstarted) {
+    const trials = result.trials as Array<{ run_id: string; invalid_reason: string }>;
+    assert.equal(trials.length, 1, JSON.stringify(result));
+    assert.equal(trials[0]?.invalid_reason, "infrastructure_failure");
+    assert.notEqual(result.error?.code, "environment_image_evidence_unavailable");
+    const diagnostic = await readJSON<{ error: { message: string } }>(path.join(root, "runs", trials[0]!.run_id, "result.json"));
+    assert.match(diagnostic.error.message, /EnvironmentStartTimeoutError: Environment start timed out after 600/);
+    assert.equal(snapshot.observed.containers.length, useSidecar ? 1 : 0);
   } else {
     assert.equal(result.status, "failed");
     assert.equal(result.error?.code, imageObservation === "missing" ? "environment_image_evidence_unavailable" : "environment_image_mismatch");
@@ -481,7 +496,7 @@ function event(activity: Activity[], type: Activity["type"], task: string, attem
   return found;
 }
 
-async function writeInfrastructureFailureHarbor(directory: string): Promise<string> {
+async function writeInfrastructureFailureHarbor(directory: string, unstarted = false): Promise<string> {
   const executable = path.join(directory, "fake-harbor-infrastructure-failure");
   const source = `#!/usr/bin/env node
 const fs = require("node:fs");
@@ -501,7 +516,8 @@ const trialDirectory = path.join(output, trial);
 fs.mkdirSync(trialDirectory, {recursive:true});
 fs.writeFileSync(path.join(trialDirectory, "lock.json"), JSON.stringify({task:{name:"one"}}));
 fs.writeFileSync(path.join(trialDirectory, "result.json"), JSON.stringify({
-  task_name:"one", trial_name:trial, exception_info:{exception_type:"InfrastructureError"}, verifier_result:{rewards:{reward:0}}
+  task_name:"one", trial_name:trial, exception_info:${JSON.stringify(unstarted ? { exception_type: "EnvironmentStartTimeoutError", exception_message: "Environment start timed out after 600.0 seconds" } : { exception_type: "InfrastructureError" })},
+  ...${JSON.stringify(unstarted ? { agent_execution: null, verifier: null } : { verifier_result: { rewards: { reward: 0 } } })}
 }));
 fs.writeFileSync(path.join(output, "result.json"), JSON.stringify({
   n_total_trials:1, stats:{n_completed_trials:0,n_errored_trials:1,n_cancelled_trials:0}
@@ -596,24 +612,30 @@ if (task === "two") {
   return executable;
 }
 
-async function writeBuildInspector(directory: string): Promise<string> {
+async function writeBuildInspector(directory: string, sidecar = false): Promise<string> {
   const executable = path.join(directory, "fake-harbor-python-inspector");
   const declaration = {
-    schema_version: "1", task: {}, verifier: { separate: false }, compose_services: [{ name: "main", replicas: 1 }],
+    schema_version: "1", task: {}, verifier: { separate: false }, compose_services: [{ name: "main", replicas: 1 },
+      ...(sidecar ? [{ name: "simulator", replicas: 1, cpu_millis: 250, memory_bytes: 128 * 1024 * 1024 }] : [])],
     provider_sidecars: { main_egress: false, verifier_egress: false }, environment_images: [], environment_image_fallbacks: [],
-    environment_builds: [{ source: "task", service: "main", context: "environment", dockerfile: "Dockerfile" }],
+    environment_builds: [{ source: "task", service: "main", context: "environment", dockerfile: "Dockerfile" },
+      ...(sidecar ? [{ source: "compose", service: "simulator", context: "environment", dockerfile: "Dockerfile.simulator", platform: "linux/amd64" }] : [])],
   };
   await writeFile(executable, `#!/usr/bin/env node\nprocess.stdout.write(${JSON.stringify(JSON.stringify(declaration))});\n`, { mode: 0o755 });
   return executable;
 }
 
-async function writeObservedImageDocker(directory: string, configDigest: string | null): Promise<string> {
+async function writeObservedImageDocker(directory: string, configDigest: string | null, serviceImages?: Record<string, string>): Promise<string> {
   const executable = path.join(directory, "fake-observed-image-docker");
+  const containers = Object.entries(serviceImages ?? (configDigest ? { main: configDigest } : {})).map(([service, digest], index) => ({
+    id: index === 0 ? "abcdefabcdef" : "fedcbafedcba", service, digest,
+  }));
   const source = `#!/usr/bin/env node
 const fs = require("node:fs");
 const path = require("node:path");
 const args = process.argv.slice(2);
-if (${JSON.stringify(configDigest)} === null) process.exit(2);
+const containers = ${JSON.stringify(containers)};
+if (containers.length === 0) process.exit(2);
 function jobs(dir) {
   let result = [];
   try { for (const entry of fs.readdirSync(dir, {withFileTypes:true})) {
@@ -629,9 +651,11 @@ function labels() {
   const config = JSON.parse(fs.readFileSync(file, "utf8"));
   return config.environment?.kwargs?.hitch_ownership_labels || null;
 }
-if (args[0] === "container" && args[1] === "ls") { if (labels()) process.stdout.write("abcdefabcdef\\n"); process.exit(0); }
+if (args[0] === "container" && args[1] === "ls") { if (labels()) process.stdout.write(containers.map(c => c.id).join("\\n") + "\\n"); process.exit(0); }
 if (args[0] === "container" && args[1] === "inspect") {
-  process.stdout.write(JSON.stringify([{Id:"abcdefabcdef",Name:"/main",Image:${JSON.stringify(configDigest)},Config:{Labels:labels(),Image:${JSON.stringify(configDigest)}},State:{Running:false,OOMKilled:false,ExitCode:0,Error:""}}]));
+  const container = containers.find(c => c.id === args[2]);
+  if (!container) process.exit(2);
+  process.stdout.write(JSON.stringify([{Id:container.id,Name:"/" + container.service,Image:container.digest,Config:{Labels:{...labels(),"com.docker.compose.service":container.service},Image:container.digest},State:{Running:false,OOMKilled:false,ExitCode:0,Error:""}}]));
   process.exit(0);
 }
 process.exit(2);

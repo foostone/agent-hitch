@@ -33,6 +33,8 @@ export interface EnvironmentImageManifestV1 {
 
 export interface EnvironmentImageUseV1 {
   task_ids: string[];
+  /** Compose sidecar binding; absent in historical main-image uses. */
+  service?: string;
   image_id: Sha256;
   requested_reference: string;
   reference: string;
