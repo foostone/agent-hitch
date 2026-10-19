@@ -69,6 +69,16 @@ task's `environment.build_timeout_sec` independently controls environment
 startup. See the [environment image service](../../environment-images.md) for
 supported builds, records, and fallback rules.
 
+Single-step separate verifiers prepare their own `tests/Dockerfile` context or
+use their effective `docker_image`, with an independent image role. Shared
+verifiers use the candidate environment; multi-step contexts and task-authored
+verifier Compose retain explicit fallback. Preferred prebuild may fall back on
+build failure; required prebuild fails before Target starts. A verifier
+environment startup timeout reports its environment build budget and preserves
+the cause, while scoring keeps its separate timeout. Explicit local
+verifier-only regrade checks only the verifier role and retains the original
+candidate bundle.
+
 ## Interpret the result
 
 Copy the returned `eval_id`, then replace `EVAL_ID` below:

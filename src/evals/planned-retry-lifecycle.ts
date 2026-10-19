@@ -8,7 +8,7 @@ import type { InfrastructureRetryLifecycle } from "./infrastructure-retry.js";
 import { recordLocalDockerProcessExit, recordLocalDockerProcessStart, releaseLocalDockerProcessRecord } from "./local-docker-provider.js";
 import type { ExecutePlannedHarborOptions } from "./planned-execution.js";
 import { resolvedImageMapping } from "./environment-image-planning.js";
-import { prebuiltTaskImage, prebuiltServiceImages, persistTrialEnvironmentImageExecution } from "./trial-environment-evidence.js";
+import { prebuiltTaskImage, prebuiltVerifierImage, prebuiltServiceImages, persistTrialEnvironmentImageExecution } from "./trial-environment-evidence.js";
 import { writeTrialExecutionEvidence } from "./trial-execution-evidence.js";
 import type { TrialEnvironmentImagesV1 } from "./trial-environment-evidence.js";
 import { physicalRetryWorkItem } from "./physical-retry-work.js";
@@ -140,6 +140,7 @@ function retryLifecycle(
       resolvedImages: resolvedImageMapping(item.image_refs ?? []),
       ...(prebuiltImage ? { prebuiltTaskImage: prebuiltImage } : {}),
       prebuiltServiceImages: prebuiltServiceImages(input.environmentImages),
+      verifierImages: { resolvedImages: resolvedImageMapping(item.image_refs ?? [], "verifier"), prebuiltImage: prebuiltVerifierImage(input.environmentImages) },
       ...(options.worker.provider === "local-docker" && process.platform !== "win32" ? {
         recoverableProcess: true,
         onProcessStarted: (pid: number) => recordLocalDockerProcessStart({

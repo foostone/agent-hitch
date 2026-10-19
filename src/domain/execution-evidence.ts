@@ -5,6 +5,7 @@ export interface ObservedContainerResourcesV1 {
   container_id: string;
   name?: string;
   service?: string;
+  role?: "candidate" | "verifier";
   image_reference?: string;
   image_config_digest?: Sha256;
   first_observed_at: string;

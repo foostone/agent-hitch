@@ -41,6 +41,11 @@ models = types.ModuleType("harbor.models")
 task = types.ModuleType("harbor.models.task")
 config = types.ModuleType("harbor.models.task.config")
 config.TaskConfig, config.VerifierEnvironmentMode = TaskConfig, VerifierEnvironmentMode
+modes = types.ModuleType("harbor.models.task.verifier_mode")
+modes.resolve_task_verifier_mode = lambda task: VerifierEnvironmentMode.SEPARATE
+modes.resolve_effective_verifier_env_config = lambda task, step: task.verifier.environment
+modes.resolve_step_verifier_mode = lambda task, step: VerifierEnvironmentMode.SEPARATE
+sys.modules["harbor.models.task.verifier_mode"] = modes
 yaml = types.ModuleType("yaml"); yaml.safe_load = json.loads
 tomllib = types.ModuleType("tomllib"); tomllib.load = lambda handle: {"name": "resource-task"}
 sys.modules.update({"harbor": harbor, "harbor.models": models, "harbor.models.task": task, "harbor.models.task.config": config, "yaml": yaml, "tomllib": tomllib})

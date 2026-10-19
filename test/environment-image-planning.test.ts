@@ -146,3 +146,44 @@ test("environment planning resolves each task for its declared runtime platform"
     "x64:linux/amd64",
   ]);
 });
+
+test("candidate and verifier registry bindings retain distinct roles even for the same reference", async () => {
+  const result = await planEnvironmentImages({ tasks: [task({ environment_images: [
+    { source: "task", service: "main", reference: "registry.test/shared:latest" },
+    { source: "verifier", service: "main", reference: "registry.test/shared:latest" },
+  ] })], mode: "prebuild-required", benchmarkId: "demo", benchmarkRevision: "1",
+  resolver: async (input) => ({ image_id: imageId, reference: `registry.test/shared@${digest}`,
+    manifest_digest: digest, platform: input.platform, cache_hit: true }) });
+  assert.deepEqual(result.uses.map((use) => use.role), ["candidate", "verifier"]);
+  assert.deepEqual(resolvedImageMapping(result.uses, "verifier"), { "registry.test/shared:latest": `registry.test/shared@${digest}` });
+  const candidateOnly = result.uses.filter((use) => use.role === "candidate");
+  assert.deepEqual(resolvedImageMapping(candidateOnly, "verifier"), {});
+  const { role: _role, ...legacy } = result.uses[0]!;
+  assert.deepEqual(resolvedImageMapping([legacy], "verifier"), resolvedImageMapping([legacy]));
+  assert.equal("role" in legacy, false);
+});
+
+test("independent verifier tests builds are prepared separately and keep preferred failure policy", async () => {
+  const tasks = [task({ environment_images: [], environment_builds: [
+    { source: "task", service: "main", context: "environment", context_directory: "/task/environment", dockerfile: "Dockerfile" },
+    { source: "verifier", service: "main", context: "tests", context_directory: "/task/tests", dockerfile: "Dockerfile" },
+  ] })];
+  const calls: string[] = [];
+  const builder = async (input: { contextDirectory: string; platform: string }) => {
+    calls.push(input.contextDirectory);
+    const requested = `hitch-environment:${input.contextDirectory.endsWith("tests") ? "verifier" : "candidate"}`;
+    return { image_id: imageId, requested_reference: requested, reference: `${requested}@${digest}`,
+      manifest_digest: digest, platform: input.platform, cache_hit: false };
+  };
+  const result = await planEnvironmentImages({ tasks, mode: "prebuild-required", benchmarkId: "demo", benchmarkRevision: "1", builder });
+  assert.deepEqual(calls, ["/task/environment", "/task/tests"]);
+  assert.deepEqual(result.uses.map((use) => use.role), ["candidate", "verifier"]);
+  const failing = async (input: Parameters<typeof builder>[0]) => {
+    if (input.contextDirectory.endsWith("tests")) throw new Error("verifier build failed");
+    return builder(input);
+  };
+  const preferred = await planEnvironmentImages({ tasks, mode: "prebuild-preferred", benchmarkId: "demo", benchmarkRevision: "1", builder: failing });
+  assert.deepEqual(preferred.uses.map((use) => use.role), ["candidate"]);
+  assert.deepEqual(preferred.fallbacks, [{ task_id: "task-a", source: "verifier", service: "main", code: "resolution-failed" }]);
+  await assert.rejects(planEnvironmentImages({ tasks, mode: "prebuild-required", benchmarkId: "demo", benchmarkRevision: "1", builder: failing }), { code: "environment_prebuild_unavailable" });
+});

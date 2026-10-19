@@ -11,7 +11,7 @@ import { DEFAULT_HARBOR_VERSION, HARBOR_CREDENTIAL_ENV, discoverHarbor } from ".
 import { harborVerifierConfig } from "./verifier-config.js";
 import { invokeHarbor } from "./process.js";
 import { harborEnvironmentConfig, harborPreparationOptions } from "./environment-config.js";
-import type { HarborDockerServiceLimitsV1 } from "./environment-config.js";
+import type { HarborDockerServiceLimitsV1, HarborVerifierImagesV1 } from "./environment-config.js";
 import { parseHarborModelProxyRoute } from "./model-proxy-config.js";
 import { HARBOR_NODE_VERSION_WITH_PREFIX } from "./runtime-toolchain.js";
 import { withBridgePythonPath } from "./bridge-environment.js";
@@ -49,6 +49,7 @@ export interface RunHarborBackendOptions {
   resolvedImages?: Record<string, string>;
   prebuiltTaskImage?: string;
   prebuiltServiceImages?: Record<string, string>;
+  verifierImages?: HarborVerifierImagesV1;
   modelProxy?: ModelProxyRouteV1;
 }
 
@@ -116,6 +117,7 @@ async function executeHarborBackend({
   resolvedImages,
   prebuiltTaskImage,
   prebuiltServiceImages,
+  verifierImages,
   modelProxy,
 }: RunHarborBackendOptions): Promise<HarborBackendResult> {
   assertHarborArtifactPin(request.artifact_pins, preparedArtifact);
@@ -163,6 +165,7 @@ async function executeHarborBackend({
     ...(resolvedImages ? { resolvedImages } : {}),
     ...(prebuiltTaskImage ? { prebuiltTaskImage } : {}),
     ...(prebuiltServiceImages ? { prebuiltServiceImages } : {}),
+    ...(verifierImages ? { verifierImages } : {}),
     ...(modelProxy ? { modelProxy } : {}),
   });
   await atomicWriteJSON(configPath, config);
@@ -318,6 +321,7 @@ export interface BuildHarborJobConfigOptions {
   resolvedImages?: Record<string, string>;
   prebuiltTaskImage?: string;
   prebuiltServiceImages?: Record<string, string>;
+  verifierImages?: HarborVerifierImagesV1;
   modelProxy?: ModelProxyRouteV1;
 }
 
@@ -339,6 +343,7 @@ export async function buildHarborJobConfig({
   resolvedImages,
   prebuiltTaskImage,
   prebuiltServiceImages,
+  verifierImages,
   modelProxy,
 }: BuildHarborJobConfigOptions): Promise<Record<string, unknown>> {
   if (logicalAttempt !== undefined && (!Number.isSafeInteger(logicalAttempt) || logicalAttempt < 1)) {
@@ -415,6 +420,7 @@ export async function buildHarborJobConfig({
       preparedArtifact.sharedRuntime,
       harborPreparationOptions(env),
       prebuiltServiceImages,
+      verifierImages,
     ),
     verifier: harborVerifierConfig(request),
     agents: [agent],

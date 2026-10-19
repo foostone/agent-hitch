@@ -33,6 +33,8 @@ export interface EnvironmentImageManifestV1 {
 
 export interface EnvironmentImageUseV1 {
   task_ids: string[];
+  /** Historical prebuilds are candidate images; legacy registry source roles were not recorded. */
+  role?: "candidate" | "verifier";
   /** Compose sidecar binding; absent in historical main-image uses. */
   service?: string;
   image_id: Sha256;

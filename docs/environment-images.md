@@ -26,6 +26,24 @@ Compose definitions. Separate verifier sessions do not inherit the candidate's
 prepared main or sidecar images. Historical prebuilt image uses without a
 service binding still identify the main image.
 
+Single-step separate verifiers have an independent `verifier` role. Discovery
+uses Harbor 0.21's effective verifier configuration: an explicit verifier
+environment takes precedence; separate mode without one inherits the task
+environment, including its `docker_image`. An effective `docker_image` wins
+over a Dockerfile. Otherwise Hitch prepares the verifier's own `tests/Dockerfile`
+with `tests/` as the build context. It never substitutes the candidate's main
+or sidecar binding. Shared verifiers require no second image. Task-authored
+`tests/docker-compose.yaml`, multi-step verifier contexts and linked context or
+Dockerfile paths retain an explicit backend fallback. Required prebuild rejects
+these unsupported forms before Target starts.
+
+New image uses and observed containers record the environment role separately
+from the Compose service name; both environments can have a service named
+`main`. Verification rejects images swapped between those roles. Historical
+records retain their original bytes: prebuilt main images belong to the
+candidate, while registry uses without recorded roles retain their old shared
+mapping and observation semantics.
+
 The service hashes every regular context file (path, content digest, executable
 bit), the Dockerfile, non-secret build arguments, platform, target, immutable
 base-image digests, and secret names. Secret values are passed to BuildKit only
@@ -84,6 +102,8 @@ fallback reason separately. `prebuild-preferred` can fall back; a
 `prebuild-required` request fails before Harbor starts if any service cannot be
 prebuilt. Harbor's final Compose overlay replaces only exact discovered image
 references and the same mapping is reused by infrastructure retries.
+An actual builder failure also records `resolution-failed` and can fall back
+under `prebuild-preferred`; `prebuild-required` stops before Target execution.
 Before a planned work item starts Harbor, every referenced global manifest is
 reloaded and matched against the immutable plan. Each imported or diagnostic
 run then embeds the uses and full, de-duplicated manifests in
@@ -99,6 +119,18 @@ prepared sidecar must be observed under its planned service. If Harbor reports
 an explicit setup exception with both Target and verifier executions null,
 missing containers preserve that upstream diagnostic. An observed conflicting
 image still fails verification, and successful trials require image evidence.
+
+Managed separate-verifier startup failures retain a dedicated environment-start
+exception and the original cause. Startup timeout diagnostics report the
+configured environment build budget, taken from the task's top-level
+`environment.build_timeout_sec` and Harbor's multiplier; a shorter internal
+probe timeout can also cause startup failure. Scoring retains its own verifier
+timeout. This phase distinction also applies to explicit verifier-only regrade;
+it neither reruns Target nor increases any timeout. Local regrade validates only
+the new plan's explicit verifier image evidence against the sealed source and
+its original configuration, leaving the candidate bundle unchanged. Portable
+regrade preserves the separate image kwargs; this change adds no remote image
+evidence transport protocol.
 
 Owned trial cleanup omits Compose's `--rmi local` operation. That operation
 enumerates image metadata and can fail before pending network and volume
@@ -120,6 +152,19 @@ python3 test-support/compose_cleanup_engine_canary.py /tmp/hitch-compose-cleanup
 Pass `--compose-binary /path/to/docker-compose` when the binary is not on PATH.
 This proves the installed Compose command boundary; it does not reproduce a
 large containerd image store or certify a particular deployed Compose version.
+
+The verifier lifecycle canary requires Python with Harbor 0.21.0 installed and
+an installed Compose binary. It exercises real Harbor task resolution,
+SingleStepTrial, RegradeTrial and Compose configuration while replacing daemon
+I/O. No model or Docker daemon is needed:
+
+```sh
+/path/to/harbor-venv/bin/python test-support/harbor_verifier_lifecycle_canary.py /tmp/hitch-verifier-lifecycle
+```
+
+This verifies role isolation, removal of runtime builds, inheritance and timeout
+classification. It does not establish why a historical build was slow or promise
+a particular startup latency.
 
 `npm run canary:docker-images` starts three ownership-labeled containers with
 distinct main, sidecar, and separate-Verifier config digests. It runs the real

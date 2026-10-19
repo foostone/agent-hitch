@@ -12,6 +12,11 @@ from typing import Any
 
 import yaml
 from harbor.models.task.config import TaskConfig, VerifierEnvironmentMode
+from harbor.models.task.verifier_mode import (
+    resolve_effective_verifier_env_config,
+    resolve_step_verifier_mode,
+    resolve_task_verifier_mode,
+)
 
 
 def inspect_task(task_dir: Path) -> dict[str, Any]:
@@ -28,13 +33,10 @@ def inspect_task(task_dir: Path) -> dict[str, Any]:
         services.append({"name": "main", "replicas": 1})
     services.sort(key=lambda service: service["name"].encode("utf-8"))
 
-    verifier_mode = config.verifier.environment_mode
-    separate = verifier_mode == VerifierEnvironmentMode.SEPARATE or (
-        verifier_mode is None and config.verifier.environment is not None
-    )
-    verifier_environment = config.verifier.environment
-    if separate and verifier_environment is None:
-        verifier_environment = config.environment
+    steps = getattr(config, "steps", None) or []
+    separate_steps = [step for step in steps if resolve_step_verifier_mode(config, step) == VerifierEnvironmentMode.SEPARATE]
+    separate = resolve_task_verifier_mode(config) == VerifierEnvironmentMode.SEPARATE
+    verifier_environment = resolve_effective_verifier_env_config(config, None)
     main_egress = config.environment.os.value == "linux" and any(
         mode is not None and mode.value != "public"
         for mode in (
@@ -53,11 +55,15 @@ def inspect_task(task_dir: Path) -> dict[str, Any]:
         )
     )
     images, fallbacks, builds = _environment_images(
-        config.environment, "task", task_dir / "environment"
+        config.environment, "task", task_dir / "environment", "environment"
     )
-    if separate and verifier_environment is not None:
+    if steps and separate_steps:
+        # A step can choose another tests directory or environment. Preserve
+        # the existing resource declaration and leave those builds native.
+        fallbacks.append({"source": "verifier", "service": "main", "code": "backend-build"})
+    elif separate and verifier_environment is not None and not steps:
         verifier_images, verifier_fallbacks, verifier_builds = _environment_images(
-            verifier_environment, "verifier", None
+            verifier_environment, "verifier", task_dir / "tests", "tests"
         )
         images.extend(verifier_images)
         fallbacks.extend(verifier_fallbacks)
@@ -127,15 +133,21 @@ def _environment_resources(environment: Any) -> dict[str, Any]:
 
 
 def _environment_images(
-    environment: Any, source: str, context_dir: Path | None
+    environment: Any, source: str, context_dir: Path, context: str
 ) -> tuple[list[dict[str, str]], list[dict[str, str]], list[dict[str, str]]]:
     reference = getattr(environment, "docker_image", None)
+    # Native Compose may override the default main build, image or platform.
+    # Independent verifier Compose requires its own discovery contract.
+    if source == "verifier" and (context_dir / "docker-compose.yaml").exists():
+        return [], [{"source": source, "service": "main", "code": "backend-build"}], []
     if reference is None:
-        if context_dir is not None and (context_dir / "Dockerfile").is_file():
+        dockerfile = context_dir / "Dockerfile"
+        if (dockerfile.is_file() and context_dir.resolve() == context_dir.absolute()
+                and dockerfile.resolve() == dockerfile.absolute()):
             return [], [], [{
                 "source": source,
                 "service": "main",
-                "context": "environment",
+                "context": context,
                 "dockerfile": "Dockerfile",
             }]
         return [], [{"source": source, "service": "main", "code": "backend-build"}], []

@@ -31,7 +31,7 @@ export interface HarborEnvironmentImageFallbackV1 {
 }
 
 export interface HarborEnvironmentBuildDeclarationV1 {
-  source: "task" | "compose";
+  source: "task" | "verifier" | "compose";
   service: string;
   context: string;
   dockerfile: string;
@@ -132,7 +132,8 @@ function imageBuilds(value: unknown): HarborEnvironmentBuildDeclarationV1[] {
   if (!Array.isArray(value)) throw new TypeError("environment build declarations are invalid");
   return value.map((entry, index) => {
     const record = exactRecord(entry, ["source", "service", "context", "dockerfile"], `environment build ${index}`, ["platform"]);
-    const main = record.source === "task" && record.service === "main" && record.context === "environment" && record.dockerfile === "Dockerfile" && record.platform === undefined;
+    const main = (record.source === "task" && record.context === "environment" || record.source === "verifier" && record.context === "tests")
+      && record.service === "main" && record.dockerfile === "Dockerfile" && record.platform === undefined;
     const sidecar = record.source === "compose" && typeof record.service === "string" && /^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,254}$/.test(record.service) && record.service !== "main"
       && typeof record.context === "string" && (record.context === "environment" || record.context.startsWith("environment/")) && relativeBuildPath(record.context)
       && typeof record.dockerfile === "string" && relativeBuildPath(record.dockerfile)

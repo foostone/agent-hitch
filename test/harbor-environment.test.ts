@@ -66,8 +66,9 @@ overlay = json.loads(env._hitch_ownership_compose_path.read_text())
 assert set(overlay["services"]) == {"main", "database"}
 assert set(overlay["networks"]) == {"default", "private"}
 assert set(overlay["volumes"]) == {"data"}
-for group in overlay.values():
-    for config in group.values(): assert config["labels"] == labels
+for name, group in overlay.items():
+    expected = {**labels, "io.hitch.environment-role": "candidate"} if name == "services" else labels
+    for config in group.values(): assert config["labels"] == expected
 assert overlay["services"]["database"]["cpus"] == 0.5
 assert overlay["services"]["database"]["mem_limit"] == 67108864
 assert overlay["services"]["database"]["image"] == resolved["registry.test/database:16"]
@@ -109,8 +110,8 @@ assert '"build": !reset null' in prebuilt_overlay_text
 (root / "docker-compose-hitch-prebuilt.yaml").write_text(prebuilt_overlay_text)
 gateway_env = module.HitchHarborDockerEnvironment(environment_dir=root, hitch_model_proxy_host_gateway=True)
 gateway_overlay = json.loads(gateway_env._hitch_ownership_compose_path.read_text())
-assert gateway_overlay["services"]["main"] == {"extra_hosts": ["host.docker.internal:host-gateway"]}
-assert gateway_overlay["services"]["database"] == {}
+assert gateway_overlay["services"]["main"] == {"extra_hosts": ["host.docker.internal:host-gateway"], "labels": {"io.hitch.environment-role": "candidate"}}
+assert gateway_overlay["services"]["database"] == {"labels": {"io.hitch.environment-role": "candidate"}}
 (root / "controller/payload").mkdir(parents=True)
 (root / "artifact").mkdir()
 shared_paths = {"runtime_directory": str(root / "controller"), "artifact_directory": str(root / "artifact")}
@@ -123,7 +124,7 @@ assert all(mount["read_only"] for mount in shared_overlay["services"]["main"]["v
 assert "volumes" not in shared_overlay["services"]["database"]
 verifier_env = module.HitchHarborDockerEnvironment(environment_dir=root, session_id="task__verifier__trial", hitch_shared_runtime=shared_paths)
 assert verifier_env._hitch_shared_runtime is None
-assert verifier_env._hitch_ownership_compose_path is None
+assert json.loads(verifier_env._hitch_ownership_compose_path.read_text())["services"]["main"]["labels"]["io.hitch.environment-role"] == "verifier"
 verifier_prebuilt = module.HitchHarborDockerEnvironment(environment_dir=root, session_id="task__verifier__trial", task_env_config=TaskEnvironment(None), hitch_prebuilt_task_image=prebuilt)
 assert verifier_prebuilt.task_env_config.docker_image is None
 assert verifier_prebuilt._hitch_prebuilt_task_image is None

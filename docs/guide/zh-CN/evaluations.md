@@ -61,6 +61,8 @@ hitch eval run \
 
 计划式本地评测会在 Trial 启动前准备支持的主镜像和简单 Compose sidecar 镜像，并把 sidecar 的服务名与不可变镜像绑定；依赖关系和健康检查继续由原 Compose 定义控制。构建准备使用现有的 30 分钟命令期限和评测取消信号。`--setup-timeout` 控制 Agent setup；Harbor 任务的 `environment.build_timeout_sec` 独立控制环境启动。支持范围、构建记录和回退规则见[环境镜像服务](../../environment-images.md)。
 
+单步独立 Verifier 会准备自己的 `tests/Dockerfile` 上下文，或优先使用有效配置中的 `docker_image`，并以独立角色绑定镜像；共享 Verifier 沿用候选环境。多步上下文、自定义 Verifier Compose 及链接路径保留明确回退。`prebuild-preferred` 在实际构建失败时仍可回退，`prebuild-required` 会在 Target 启动前失败。独立评分环境的启动超时保留原始 cause，并标明配置的环境构建预算；评分脚本继续使用自己的超时。显式本地 verifier-only 重评分只校验本次 Verifier 角色，保留原始候选 bundle，不重跑 Target。
+
 ## 理解结果
 
 复制返回的 `eval_id`，替换下面的 `EVAL_ID`：

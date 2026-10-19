@@ -323,6 +323,7 @@ export async function runEval({ evalId = newEvalId(), request, root, env = proce
         ? path.join(evalDirectory, "harbor")
         : path.join(evalDirectory, "harbor", attemptDirectoryName(logicalAttempt));
       const harborJobDirectory = path.join(backendDirectory, "job");
+      const imageRefs = executionPlan.work_items.find((item) => item.logical_attempt === logicalAttempt)?.image_refs ?? [];
       const shardRefs: EvalTrialRefV1[] = [];
       const publish = async (ref: EvalTrialRefV1): Promise<void> => {
         if (ref.attempt !== logicalAttempt) {
@@ -364,7 +365,8 @@ export async function runEval({ evalId = newEvalId(), request, root, env = proce
         runtimeId: controllerRuntime.runtime_id,
         preparedArtifact,
         ...(activeCaptureRuntime.exporter ? { modelProxy: activeCaptureRuntime.exporter.route } : {}),
-        resolvedImages: resolvedImageMapping(executionPlan.work_items.find((item) => item.logical_attempt === logicalAttempt)?.image_refs ?? []),
+        resolvedImages: resolvedImageMapping(imageRefs),
+        ...(imageRefs.length ? { verifierImages: { resolvedImages: resolvedImageMapping(imageRefs, "verifier") } } : {}),
         ...(executionResources ? { executionResources } : {}),
         env,
         ...(harborExecutable !== undefined ? { harborExecutable } : {}),
@@ -437,7 +439,8 @@ export async function runEval({ evalId = newEvalId(), request, root, env = proce
         resolvedRevision,
         controllerRuntime,
         preparedArtifact,
-        resolvedImages: resolvedImageMapping(executionPlan.work_items.find((item) => item.logical_attempt === logicalAttempt)?.image_refs ?? []),
+        resolvedImages: resolvedImageMapping(imageRefs),
+        ...(imageRefs.length ? { verifierImages: { resolvedImages: resolvedImageMapping(imageRefs, "verifier") } } : {}),
         ...(executionResources ? { executionResources } : {}),
         modelCapturePlan: activeCaptureRuntime.plan,
         ...(activeCaptureRuntime.exporter ? { interactionCaptureExporter: activeCaptureRuntime.exporter } : {}),

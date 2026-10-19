@@ -1,12 +1,36 @@
 import path from "node:path";
 import type { EnvironmentImageManifestV1, EnvironmentImageUseV1, ExecutionEvidenceV1, RunEnvironmentImagesV1 } from "../domain/index.js";
-import { HitchError, atomicWriteJSON, ensureDir } from "../foundation/index.js";
+import { HitchError, atomicWriteJSON, ensureDir, readJSON, sha256JSON } from "../foundation/index.js";
 import type { EvalEnvironmentImageManifestLoader } from "./service-types.js";
 import { writeTrialExecutionEvidence } from "./trial-execution-evidence.js";
+import { parseEnvironmentImageUses } from "./execution-plan-images.js";
+import { resolvedImageMapping } from "./environment-image-planning.js";
 
 export interface TrialEnvironmentImagesV1 {
   uses: EnvironmentImageUseV1[];
   manifests: EnvironmentImageManifestV1[];
+}
+
+/** Read only this execution's verifier bindings from previously sealed inputs. */
+export async function loadVerifierEnvironmentImages(input: {
+  manifestFile: string; taskId: string; uses: readonly EnvironmentImageUseV1[]; sourceConfig: Record<string, unknown>;
+}): Promise<TrialEnvironmentImagesV1 | undefined> {
+  const uses = input.uses.filter((use) => use.role === "verifier" && use.task_ids.includes(input.taskId));
+  if (uses.length === 0) return undefined; // Legacy plans never promised role-specific observations.
+  const saved = await readJSON<RunEnvironmentImagesV1>(input.manifestFile);
+  const recorded = parseEnvironmentImageUses(saved.uses, [input.taskId], "sealed environment images");
+  if (saved.schema_version !== "1" || saved.task_id !== input.taskId
+    || uses.some((use) => !recorded.some((entry) => sha256JSON(entry) === sha256JSON(use)))) throw imageMismatch();
+  const evidence = await loadTrialEnvironmentImages({ taskId: input.taskId, uses, loader: async (id) => {
+    const manifest = saved.manifests.find((entry) => entry.image_id === id);
+    if (!manifest) throw imageMismatch();
+    return manifest;
+  } });
+  const environment = input.sourceConfig.environment as { kwargs?: Record<string, unknown> } | undefined;
+  const kwargs = environment?.kwargs ?? {};
+  if (sha256JSON(kwargs.hitch_prebuilt_verifier_image ?? null) !== sha256JSON(prebuiltVerifierImage(evidence) ?? null)
+    || sha256JSON(kwargs.hitch_verifier_resolved_images ?? null) !== sha256JSON(resolvedImageMapping(input.uses, "verifier"))) throw imageMismatch();
+  return evidence;
 }
 
 export async function loadTrialEnvironmentImages(input: {
@@ -66,11 +90,13 @@ export function verifyTrialEnvironmentImageExecution(
     const manifest = manifests.get(use.image_id);
     if (!manifest) throw imageMismatch();
     const expectedConfig = manifest.output.config_digest;
-    const boundService = use.service ?? (use.resolution === "prebuilt" && execution.observed.containers.some((container) => container.service !== undefined) ? "main" : undefined);
-    const observed = execution.observed.containers.filter((container) => (!boundService || container.service === boundService)
+    const roleContainers = execution.observed.containers.filter((container) => use.role !== undefined
+      ? container.role === use.role : use.resolution !== "prebuilt" || container.role !== "verifier");
+    const boundService = use.service ?? (use.role === "verifier" || use.resolution === "prebuilt" && roleContainers.some((container) => container.service !== undefined) ? "main" : undefined);
+    const observed = roleContainers.filter((container) => (!boundService || container.service === boundService)
       && (expectedConfig ? container.image_config_digest !== undefined : container.image_reference !== undefined));
     if (observed.length === 0) {
-      if (unstartedFailure) continue;
+      if (unstartedFailure || use.role === "verifier" && verifierDidNotStart(trial)) continue;
       throw new HitchError("immutable trial container image evidence is unavailable", {
         code: "environment_image_evidence_unavailable", exitCode: 12,
       });
@@ -111,8 +137,16 @@ export async function persistTrialEnvironmentImageExecution(
 }
 
 export function prebuiltTaskImage(evidence?: TrialEnvironmentImagesV1): string | undefined {
+  return prebuiltMainImage(evidence, "candidate");
+}
+
+export function prebuiltVerifierImage(evidence?: TrialEnvironmentImagesV1): string | undefined {
+  return prebuiltMainImage(evidence, "verifier");
+}
+
+function prebuiltMainImage(evidence: TrialEnvironmentImagesV1 | undefined, role: "candidate" | "verifier"): string | undefined {
   if (!evidence) return undefined;
-  const uses = evidence.uses.filter((use) => use.resolution === "prebuilt" && use.service === undefined);
+  const uses = evidence.uses.filter((use) => use.resolution === "prebuilt" && use.service === undefined && (use.role ?? "candidate") === role);
   if (uses.length === 0) return undefined;
   if (uses.length !== 1) throw new TypeError("one trial cannot use multiple prebuilt task images");
   const manifest = evidence.manifests.find((entry) => entry.image_id === uses[0]?.image_id);
@@ -123,7 +157,7 @@ export function prebuiltTaskImage(evidence?: TrialEnvironmentImagesV1): string |
 export function prebuiltServiceImages(evidence?: TrialEnvironmentImagesV1): Record<string, string> {
   const result: Record<string, string> = Object.create(null) as Record<string, string>;
   for (const use of evidence?.uses ?? []) {
-    if (use.resolution !== "prebuilt" || use.service === undefined) continue;
+    if (use.resolution !== "prebuilt" || use.service === undefined || use.role === "verifier") continue;
     const manifest = evidence?.manifests.find((entry) => entry.image_id === use.image_id);
     if (!manifest?.output.config_digest) throw new HitchError("prebuilt service image has no immutable local config digest", { code: "environment_image_manifest_unavailable", exitCode: 12 });
     if (result[use.service] !== undefined && result[use.service] !== manifest.output.config_digest) throw new TypeError("one trial cannot bind a service to multiple prebuilt images");
@@ -150,4 +184,14 @@ function compare(left: string, right: string): number {
 
 function imageMismatch(): HitchError {
   return new HitchError("observed trial container image does not match the immutable image plan", { code: "environment_image_mismatch", exitCode: 12 });
+}
+
+function verifierDidNotStart(trial?: Record<string, unknown>): boolean {
+  if (!trial?.exception_info || typeof trial.exception_info !== "object") return false;
+  const type = (trial.exception_info as Record<string, unknown>).exception_type;
+  if (type === "VerifierEnvironmentStartTimeoutError" || type === "VerifierEnvironmentStartError") return true;
+  // A missing verifier timing record proves that Harbor never entered scoring;
+  // require an explicit failure, rather than infer a phase from elapsed time.
+  return trial.verifier === null && trial.agent_execution !== undefined
+    && typeof type === "string" && /^[a-zA-Z_][a-zA-Z0-9_]{0,127}$/.test(type);
 }

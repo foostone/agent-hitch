@@ -16,7 +16,7 @@ const reservation = { cpu_millis: 2_500, memory_bytes: 2_000_000, container_slot
 
 test("Docker observer records bounded peak memory, OOM, and exit evidence without inventing CPU time", async () => {
   const id = "e".repeat(64);
-  const labels = { ...dockerOwnershipLabelMap(ownership), "com.docker.compose.service": "main" };
+  const labels = { ...dockerOwnershipLabelMap(ownership), "com.docker.compose.service": "main", "io.hitch.environment-role": "verifier" };
   let inspections = 0;
   const observer = startDockerResourceObserver({
     ownership,
@@ -50,6 +50,7 @@ test("Docker observer records bounded peak memory, OOM, and exit evidence withou
   assert.equal(terminal.observed.containers[0]?.exit_reason, "oom-killed");
   assert.equal(terminal.observed.containers[0]?.image_config_digest, `sha256:${"f".repeat(64)}`);
   assert.equal(terminal.observed.containers[0]?.service, "main");
+  assert.equal(terminal.observed.containers[0]?.role, "verifier");
   assert.deepEqual(terminal.observed.unavailable_fields, ["cpu_time_ns"]);
   assert.deepEqual(parseExecutionEvidence(terminal), terminal);
 });

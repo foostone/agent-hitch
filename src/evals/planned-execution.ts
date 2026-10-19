@@ -21,7 +21,7 @@ import { executeRemotePlannedWorkItem } from "./planned-remote-execution.js";
 import { runtimeResourcesForTask } from "./execution-plan-resources.js";
 import { startDockerResourceObserver } from "./docker-resource-observer.js";
 import { resolvedImageMapping } from "./environment-image-planning.js";
-import { loadTrialEnvironmentImages, prebuiltTaskImage, prebuiltServiceImages, persistTrialEnvironmentImageExecution, writeTrialEnvironmentImageEvidence } from "./trial-environment-evidence.js";
+import { loadTrialEnvironmentImages, prebuiltTaskImage, prebuiltVerifierImage, prebuiltServiceImages, persistTrialEnvironmentImageExecution, writeTrialEnvironmentImageEvidence } from "./trial-environment-evidence.js";
 import { writeTrialExecutionEvidence } from "./trial-execution-evidence.js";
 import type { TrialEnvironmentImagesV1 } from "./trial-environment-evidence.js";
 import { PrioritySemaphore, assertTaskSlotPlan, workOrder, workSchedulingPriority } from "./planned-execution-support.js";
@@ -412,6 +412,7 @@ async function executeLeasedWorkItem(
     resolvedImages: resolvedImageMapping(item.image_refs ?? []),
     ...(prebuiltImage ? { prebuiltTaskImage: prebuiltImage } : {}),
     prebuiltServiceImages: prebuiltServiceImages(environmentImages),
+    verifierImages: { resolvedImages: resolvedImageMapping(item.image_refs ?? [], "verifier"), prebuiltImage: prebuiltVerifierImage(environmentImages) },
     env: options.env,
     ...(options.harborExecutable !== undefined ? { harborExecutable: options.harborExecutable } : {}),
     ...(options.signal ? { signal: options.signal } : {}),
