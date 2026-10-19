@@ -234,7 +234,7 @@ def _independent_compose_builds(services, environment):
                     return None
                 continue
             builds.append({"source": "compose", "service": name,
-                           "context": str(Path("environment") / relative_context), "dockerfile": dockerfile,
+                           "context": (Path("environment") / relative_context).as_posix(), "dockerfile": dockerfile,
                            **({"platform": platform} if platform else {})})
     except (OSError, ValueError):
         return None
