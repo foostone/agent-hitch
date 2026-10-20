@@ -114,7 +114,7 @@ Set `HITCH_LAB_JUDGE_OPENAI_API_KEY` and
 verifier's launching environment. They are not candidate `--pass-env` entries.
 The custom transport initially supports **one judge only**. It is a separately
 identified single-judge configuration, not the standard Sonnet/GPT dual profile.
-Omitting `--judge-api` keeps upstream provider detection and judging unchanged;
+Omitting `--judge-api` keeps upstream provider detection, requests and scoring;
 `--judge-reasoning-effort` is accepted only for the explicit Chat transport.
 
 The adapter inherits the official `Judge.evaluate_from_file` and `_parse_json`,
@@ -148,8 +148,16 @@ is the task macro mean. `lab_criterion_pass` preserves the criterion pass fracti
 (single or official `dual_criterion_pass`) as an auxiliary raw metric. It is not
 a process score. Single/custom judge profiles must be reported separately.
 
-The bridge directly calls `evaluate_run` or `evaluate_run_dual`. Any
-`n_grading_errors`, invalid verdict, incomplete membership, inconsistent all-pass
+The bridge directly calls `evaluate_run` or `evaluate_run_dual`.
+
+The raw response must satisfy the official schema before scoring supplies any
+default: exactly a `verdict` of `pass`/`fail` and a string `reasoning`. This gate
+applies to upstream single and both dual judges as well as the custom transport;
+`{}`, missing fields, extra fields and wrong types leave no reward. The scoped
+Judge subclass is restored after grading; official vendor code, prompts and dual
+aggregation remain unchanged. A valid `fail` still produces its official zero.
+
+Any `n_grading_errors`, invalid verdict, incomplete membership, inconsistent all-pass
 aggregate or swallowed filename-matcher API/parsing failure invalidates
 verification and leaves no reward. Absent/empty output is passed to the original
 scorer as missing evidence, not replaced with an invented score; unreadable

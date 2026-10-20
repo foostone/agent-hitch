@@ -5,6 +5,7 @@ Python >=3.9, no external packages and no Hitch imports. Does not acquire data o
 call a model. A complete snapshot is required to report complete-split coverage.
 """
 import argparse
+from contextlib import contextmanager
 import json
 from pathlib import Path
 import re
@@ -14,9 +15,30 @@ from urllib.parse import urlsplit
 
 sys.dont_write_bytecode = True
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from producer_support import checkout, copy_tree, digest, file_records, json_file, select, task_extension, write_package
+from producer_support import checkout, file_records, git_commit_tree, json_file, select, task_extension, write_package
 
 UPSTREAM_REVISION = "660b33a86ed032559df0b2fdc1ad38cf7ceb83f3"
+
+
+@contextmanager
+def renderer_source(source, revision):
+    """Keep upstream imports and their __file__ resources inside the pinned tree."""
+    with git_commit_tree(source, revision) as pinned:
+        previous_path = sys.path[:]
+        modules = {name: module for name, module in sys.modules.items()
+                   if name == "jobbench_harbor" or name.startswith("jobbench_harbor.")}
+        for name in modules: del sys.modules[name]
+        try:
+            sys.path.insert(0, str(pinned / "harbor"))
+            from jobbench_harbor.prepare import _source_hashes
+            from jobbench_harbor.render import render_task
+            yield pinned, _source_hashes, render_task
+        finally:
+            for name in list(sys.modules):
+                if name == "jobbench_harbor" or name.startswith("jobbench_harbor."):
+                    del sys.modules[name]
+            sys.modules.update(modules)
+            sys.path[:] = previous_path
 
 
 def produce(args):
@@ -25,6 +47,11 @@ def produce(args):
         raise ValueError("judge base URL must be credential-free HTTPS without query or fragment")
     if not args.judge_model.strip() or any(ord(c) < 32 for c in args.judge_model): raise ValueError("invalid judge model")
     source = checkout(args.source, args.source_revision)
+    with renderer_source(source, args.source_revision) as inputs:
+        return render_package(args, *inputs)
+
+
+def render_package(args, source, _source_hashes, render_task):
     if not re.fullmatch(r"[a-f0-9]{40}", args.dataset_revision): raise ValueError("dataset revision must be a full HF commit")
     snapshot = Path(args.snapshot).resolve()
     # Enumerate membership before opening instructions or rubric contents.
@@ -41,10 +68,6 @@ def produce(args):
             population[f"{args.split}--{occupation.name}--{task.name}"] = task
     selection = select(population, args.seed, args.count, args.task)
     selection["population_scope"] = "provided-snapshot-split"
-    # These functions and renderer are imported byte-identically from the locked checkout.
-    sys.path.insert(0, str(source / "harbor"))
-    from jobbench_harbor.prepare import _source_hashes
-    from jobbench_harbor.render import render_task
     root = Path(args.out).resolve()
     root.mkdir(parents=True, exist_ok=False)
     json_file(root / "source-manifest.json", {"status": "importing", "selection": selection})
@@ -82,7 +105,7 @@ def produce(args):
     shutil.copy2(Path(__file__).resolve().parents[1] / "producer_support.py", root / "source-support.py")
     shutil.copy2(source / "LICENSE", root / "UPSTREAM-LICENSE")
     json_file(root / "source-manifest.json", {"schema_version": "1", "status": "ready", "source": "https://github.com/Job-Bench/job-bench-eval",
-        "source_revision": args.source_revision, "dataset": "https://huggingface.co/datasets/JobBench/job-bench", "dataset_revision": args.dataset_revision,
+        "source_revision": args.source_revision, "renderer_source": {"kind": "git-commit-blob-tree", "revision": args.source_revision, "entries": "tracked regular files only; symlinks and submodules rejected"}, "dataset": "https://huggingface.co/datasets/JobBench/job-bench", "dataset_revision": args.dataset_revision,
         "snapshot_attestation": "caller-supplied revision; local selected file hashes recorded, not remote commit attestation",
         "selection": selection, "tasks": tasks, "transformations": transforms, "adapter": {"id": "jobbench", "version": "1", "path": "source-adapter.py"},
         "compatibility": {"upstream_harbor": "0.22.0", "target_harbor": "0.21.0", "task_schema": "1.4", "execution": "requires separate Docker verification"}})

@@ -95,22 +95,23 @@ def run(tests, output, destination):
                 os.environ["LAB_ROOT"] = str(lab)
                 sys.path.insert(0, str(tests / "vendor"))
                 with (logs / "judge-output.log").open("w", encoding="utf-8") as stream, redirect_stdout(stream), redirect_stderr(stream):
-                    from lab_core.evaluation.run_eval import Judge, evaluate_run, evaluate_run_dual
+                    from lab_core.evaluation import run_eval as evaluation
+                    from hitch_judge import chat_judge, validated_judges
                     try:
-                        api = config.get("api", "upstream")
-                        if api == "openai-chat-completions":
-                            if len(models) != 1: raise ValueError("Chat Completions transport requires one judge")
-                            from hitch_judge import chat_judge
-                            judge = chat_judge(Judge, models[0], config.get("reasoning_effort"))
-                            config["transport"] = judge.transport_provenance
-                            (logs / "judge-provenance.json").write_text(json.dumps(config, indent=2) + "\n")
-                            scores = evaluate_run("hitch", source_id, judge, parallel=config["parallel"])
-                        elif api != "upstream":
-                            raise ValueError("unsupported LAB judge API")
-                        elif len(models) == 2:
-                            scores = evaluate_run_dual("hitch", source_id, parallel=config["parallel"], judge_models=tuple(models))
-                        else:
-                            scores = evaluate_run("hitch", source_id, Judge(model=models[0]), parallel=config["parallel"])
+                        with validated_judges(evaluation) as Judge:
+                            api = config.get("api", "upstream")
+                            if api == "openai-chat-completions":
+                                if len(models) != 1: raise ValueError("Chat Completions transport requires one judge")
+                                judge = chat_judge(Judge, models[0], config.get("reasoning_effort"))
+                                config["transport"] = judge.transport_provenance
+                                (logs / "judge-provenance.json").write_text(json.dumps(config, indent=2) + "\n")
+                                scores = evaluation.evaluate_run("hitch", source_id, judge, parallel=config["parallel"])
+                            elif api != "upstream":
+                                raise ValueError("unsupported LAB judge API")
+                            elif len(models) == 2:
+                                scores = evaluation.evaluate_run_dual("hitch", source_id, parallel=config["parallel"], judge_models=tuple(models))
+                            else:
+                                scores = evaluation.evaluate_run("hitch", source_id, Judge(model=models[0]), parallel=config["parallel"])
                     finally:
                         for file in run_dir.glob("scores*.json"): shutil.copy2(file, logs / file.name)
                 # The official matcher catches API/parsing exceptions itself; promote its failure to invalid verification.

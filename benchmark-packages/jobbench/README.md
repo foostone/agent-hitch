@@ -4,6 +4,11 @@ This independent producer emits Package v1, which `hitch benchmark compile`
 turns into an ordinary Harbor dataset. No benchmark-specific Hitch dispatch is
 needed. It uses the official Harbor renderer, `verify.py`, `judge.py`, artifact
 readers, calculation runtime and rubric JSON from a clean pinned source checkout.
+Renderer code and every `__file__` resource are loaded from a temporary tree of
+the requested commit's exact tracked Git blobs, without checkout filters or
+`export-ignore` omissions. Ignored local files cannot enter imports or verifier
+inputs. Symlinks, submodules and unsafe/nonportable Git paths are rejected;
+imports and temporary files are restored/removed even if rendering fails.
 The optional upstream `[task]` package identity table is removed so Harbor uses
 the flat task directory consistently as its task name; original configuration is
 retained as a transformation source. The candidate receives the original public task folder; rubrics, task cards and

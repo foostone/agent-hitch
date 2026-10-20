@@ -21,6 +21,9 @@ class FixtureJudge(Judge):
         if os.environ.get("LAB_TEST_ERROR"):
             raise RuntimeError(os.environ["ANTHROPIC_API_KEY"])
         if os.environ.get("LAB_TEST_BAD_VERDICT"): return {"verdict": "unknown", "reasoning": "malformed"}
+        raw = os.environ.get("LAB_TEST_RESPONSE")
+        if raw and os.environ.get("LAB_TEST_RESPONSE_MODEL", self.model) == self.model:
+            return self._parse_json(raw)
         evidence = variables["agent_output"]
         passed = "File not found:" not in evidence and "No agent output found" not in evidence
         if self.model.startswith("gpt") and variables["criterion_title"] == "second": passed = False
@@ -67,6 +70,8 @@ def create(destination):
     write(job / "eval/jobbench_eval/__init__.py", '"""Renderer fixture needs only a harmless helper tree."""\n')
     shutil.copy2(job / "eval/scorecard_fixture.py", job / "eval/jobbench_eval/scorecard_fixture.py")
     write(job / "eval/judge.py", JOB_JUDGE)
+    write(job / ".gitignore", ".env\nignored-local.py\n")
+    write(job / ".gitattributes", "eval/jobbench_eval/scorecard_fixture.py export-ignore\n")
     snapshot = destination / "snapshot"
     rubric = {"rubrics": [{"rubric": "first block", "criterion": ["criterion a", "criterion b"], "weight": 1}, {"rubric": "second block", "criterion": ["criterion c"], "weight": 2}]}
     for name in ["task1", "task2"]:

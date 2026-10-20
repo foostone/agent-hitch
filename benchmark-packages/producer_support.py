@@ -1,13 +1,15 @@
 """Standard-library helpers for independent, local terminal package producers."""
 import ast
+from contextlib import contextmanager
 import hashlib
 import json
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import re
 import shutil
 import stat
 import subprocess
+import tempfile
 
 CAPS = ["shell", "artifact-export", "separate-verifier"]
 PYTHON_IMAGE = "python:3.12-slim-bookworm@sha256:782412e85d0f0984994c290652577d4018aff08145c85b262bb63dc0c7522254"
@@ -53,6 +55,39 @@ def checkout(source, revision):
     dirty = subprocess.check_output(["git", "-C", str(source), "status", "--porcelain", "--untracked-files=normal"], text=True)
     if actual != revision or dirty: raise ValueError("source must be a clean checkout at the requested commit")
     return source
+
+
+@contextmanager
+def git_commit_tree(source, revision):
+    """Materialize exact tracked blobs, without checkout filters or ignored files."""
+    if not re.fullmatch(r"[a-f0-9]{40}", revision): raise ValueError("source revision must be a full Git commit")
+    git = ["git", "--no-replace-objects", "-C", str(source)]
+    listing = subprocess.check_output([*git, "ls-tree", "-rz", "--full-tree", revision])
+    with tempfile.TemporaryDirectory(prefix="hitch-pinned-source-") as directory:
+        root = Path(directory)
+        for entry in listing.split(b"\0"):
+            if not entry: continue
+            metadata, raw_name = entry.split(b"\t", 1)
+            mode, kind, oid = metadata.decode("ascii").split()
+            name = raw_name.decode("utf-8")
+            relative = PurePosixPath(name)
+            if (relative.is_absolute() or relative.as_posix() != name or any(char in name for char in '\\<>:"|?*')
+                    or any(part in (".", "..") or part.casefold() == ".git" or part.endswith((".", " "))
+                           or re.fullmatch(r"CON|PRN|AUX|NUL|CONIN\$|CONOUT\$|COM[0-9¹²³]|LPT[0-9¹²³]", part.split(".", 1)[0].rstrip(" ").upper())
+                           for part in relative.parts)
+                    or any(ord(char) < 32 or ord(char) == 127 for char in name)):
+                raise ValueError(f"unsafe Git source path: {name!r}")
+            if mode not in ("100644", "100755") or kind != "blob" or not re.fullmatch(r"[a-f0-9]{40}", oid):
+                raise ValueError(f"non-regular Git source entry: {name}")
+            data = subprocess.check_output([*git, "cat-file", "blob", oid])
+            if hashlib.sha1(f"blob {len(data)}\0".encode() + data).hexdigest() != oid:
+                raise ValueError(f"Git source blob identity mismatch: {name}")
+            target = root.joinpath(*relative.parts)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            # Exclusive creation also rejects filesystem aliases/collisions.
+            with target.open("xb") as stream: stream.write(data)
+            target.chmod(0o755 if mode == "100755" else 0o644)
+        yield root
 
 
 def regular_tree(root):

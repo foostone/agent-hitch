@@ -47,6 +47,120 @@ test("JobBench official renderer imports, validates and compiles a fractional to
   python(args, process.env, 1); // Never overwrite an existing package.
 });
 
+test("JobBench renderer excludes ignored local files from imported and compiled verifier trees", async t => {
+  const { root, source } = await fixture(t), output = path.join(root, "package"), compiled = path.join(root, "compiled");
+  const helper = path.join(source.jobbench!, "eval/jobbench_eval"), sentinel = "synthetic-ignored-credential-sentinel";
+  await writeFile(path.join(helper, ".env"), `API_KEY=${sentinel}\n`);
+  await writeFile(path.join(helper, "ignored-local.py"), `PRIVATE_LOCAL_VALUE = "${sentinel}"\n`);
+  const status = spawnSync("git", ["-C", source.jobbench!, "status", "--porcelain", "--untracked-files=normal"], { encoding: "utf8" });
+  assert.equal(status.status, 0, status.stderr); assert.equal(status.stdout, "", "ignored local inputs keep the checkout clean");
+  const args = ["benchmark-packages/jobbench/import.py", "--source", source.jobbench!, "--source-revision", source.jobbench_revision!,
+    "--snapshot", source.snapshot!, "--dataset-revision", "a".repeat(40), "--task", "main--fixture-profession--task1", "--out", output];
+  python(args);
+  const benchmark = await loadBenchmark(output), task = benchmark.tasks[0]!;
+  await exportStandardBenchmarkDataset(output, compiled);
+  for (const verifier of [path.join(output, task.path, "tests"), path.join(compiled, task.id, "tests")]) {
+    for (const name of [".env", "ignored-local.py"]) await assert.rejects(readFile(path.join(verifier, "jobbench_eval", name)), { code: "ENOENT" });
+    assert.equal(await readFile(path.join(verifier, "jobbench_eval/scorecard_fixture.py"), "utf8"), await readFile(path.join(helper, "scorecard_fixture.py"), "utf8"));
+  }
+  await writeFile(path.join(helper, ".env"), "different-private-local-value");
+  const second = path.join(root, "second"); python([...args.slice(0, -1), second]);
+  assert.deepEqual((await loadBenchmark(second)).lock, benchmark.lock, "ignored local state cannot change the package lock");
+});
+
+test("JobBench uses commit blobs and restores renderer imports across source revisions and errors", async t => {
+  const { root, source } = await fixture(t);
+  const second = JSON.parse(python(["test-support/benchmark_producers_fixture.py", path.join(root, "other-source")])) as Record<string, string>;
+  const renderer = path.join(second.jobbench!, "harbor/jobbench_harbor/render.py");
+  await writeFile(renderer, (await readFile(renderer, "utf8")) + '\nINSTRUCTION += "\\nPinned second renderer\\n"\n');
+  for (const args of [["add", "."], ["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "-qm", "second pinned renderer"]]) {
+    const result = spawnSync("git", ["-C", second.jobbench!, ...args], { encoding: "utf8" }); assert.equal(result.status, 0, result.stderr);
+  }
+  second.jobbench_revision = spawnSync("git", ["-C", second.jobbench!, "rev-parse", "HEAD"], { encoding: "utf8" }).stdout.trim();
+  const pinnedHelper = await readFile(path.join(source.jobbench!, "eval/jobbench_eval/scorecard_fixture.py"), "utf8");
+  for (const name of ["harbor/jobbench_harbor/render.py", "eval/jobbench_eval/scorecard_fixture.py", "harbor/templates/environment.Dockerfile"]) {
+    const result = spawnSync("git", ["-C", source.jobbench!, "update-index", "--assume-unchanged", name], { encoding: "utf8" });
+    assert.equal(result.status, 0, result.stderr);
+    await writeFile(path.join(source.jobbench!, name), 'raise RuntimeError("uncommitted source must not execute or enter the package")\n');
+  }
+  assert.equal(spawnSync("git", ["-C", source.jobbench!, "status", "--porcelain"], { encoding: "utf8" }).stdout, "");
+  const script = String.raw`
+import argparse, importlib.util, json, sys, tempfile, types
+from pathlib import Path
+settings = json.loads(sys.argv[1])
+spec = importlib.util.spec_from_file_location("jobbench_import", "benchmark-packages/jobbench/import.py")
+producer = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(producer)
+tempfile.tempdir = str(Path(settings["root"]) / "temporary-sources")
+Path(tempfile.tempdir).mkdir()
+original_path = sys.path[:]
+cached = types.ModuleType("jobbench_harbor")
+cached.__path__ = []
+sys.modules["jobbench_harbor"] = cached
+stale = types.ModuleType("jobbench_harbor.stale")
+sys.modules["jobbench_harbor.stale"] = stale
+original_modules = {k: v for k, v in sys.modules.items() if k == "jobbench_harbor" or k.startswith("jobbench_harbor.")}
+def assert_restored():
+    assert sys.path == original_path
+    assert {k: v for k, v in sys.modules.items() if k == "jobbench_harbor" or k.startswith("jobbench_harbor.")} == original_modules
+    assert not list(Path(tempfile.tempdir).iterdir())
+for source, revision, out in settings["sources"]:
+    args = argparse.Namespace(source=source, source_revision=revision, out=out,
+        snapshot=settings["snapshot"], dataset_revision="a" * 40, split="main", seed=0, count=1,
+        task=["main--fixture-profession--task1"], judge_model="grok-4.3", judge_base_url="https://api.example.invalid/v1", judge_workers=1)
+    producer.produce(args)
+    assert_restored()
+    try:
+        producer.produce(args)
+    except FileExistsError:
+        pass
+    else:
+        raise AssertionError("existing output was overwritten")
+    assert_restored()
+`;
+  const firstOut = path.join(root, "first"), secondOut = path.join(root, "second");
+  python(["-c", script, JSON.stringify({ root, snapshot: source.snapshot, sources: [
+    [source.jobbench, source.jobbench_revision, firstOut], [second.jobbench, second.jobbench_revision, secondOut],
+  ] })]);
+  const task = "tasks/main--fixture-profession--task1";
+  assert.doesNotMatch(await readFile(path.join(firstOut, task, "instruction.md"), "utf8"), /Pinned second renderer|uncommitted source/);
+  assert.match(await readFile(path.join(secondOut, task, "instruction.md"), "utf8"), /Pinned second renderer/);
+  assert.equal(await readFile(path.join(firstOut, task, "tests/jobbench_eval/scorecard_fixture.py"), "utf8"), pinnedHelper, "tracked export-ignore helpers still come from their blob");
+  assert.doesNotMatch(await readFile(path.join(firstOut, "source-manifest.json"), "utf8"), /hitch-pinned-source-/);
+  assert.equal(JSON.parse(await readFile(path.join(firstOut, "source-manifest.json"), "utf8")).renderer_source.kind, "git-commit-blob-tree");
+});
+
+test("JobBench commit materialization rejects unsafe portable paths and non-regular Git modes", () => {
+  python(["-c", String.raw`
+import hashlib, sys
+from pathlib import Path
+from unittest.mock import patch
+sys.path.insert(0, "benchmark-packages")
+import producer_support as support
+body = b"pinned Unicode helper\n"
+oid = hashlib.sha1(f"blob {len(body)}\0".encode() + body).hexdigest()
+unsafe = ["../escape", "/escape", "C:/escape", "C:escape", "folder/name:stream", "folder/.. /escape",
+    "folder/name.", "folder/name ", "folder/CON", "folder/nul.txt", "folder/AUX", "folder/prn.log",
+    "folder/COM1.py", "folder/LPT9", "folder/COM¹", "folder/CONOUT$", "folder/.git/config", "folder\\escape",
+    "folder/tab\tname", "folder/line\nname", "folder/question?", "folder/star*"]
+for name, mode, kind in [(name, "100644", "blob") for name in unsafe] + [("helper", "120000", "blob"), ("submodule", "160000", "commit")]:
+    listing = f"{mode} {kind} {oid}\t{name}\0".encode()
+    with patch.object(support.subprocess, "check_output", return_value=listing) as git:
+        try:
+            with support.git_commit_tree("unused", "a" * 40):
+                raise AssertionError("unsafe source materialized")
+        except ValueError:
+            pass
+        assert git.call_count == 1, "reject before reading a blob or creating a file"
+name = "public/Tax Sections — Source/helper.py"
+listing = f"100755 blob {oid}\t{name}\0".encode()
+with patch.object(support.subprocess, "check_output", side_effect=[listing, body]):
+    with support.git_commit_tree("unused", "a" * 40) as root:
+        assert (root / name).read_bytes() == body
+    assert not root.exists()
+`]);
+});
+
 test("LAB keeps nested source IDs, shared documents and fallback instructions through standard compilation", async t => {
   const { root, source } = await fixture(t), output = path.join(root, "package");
   await writeFile(path.join(source.lab!, "lab_core/.env"), "IGNORED_KEY=private-source-secret");
@@ -136,6 +250,69 @@ test("single-judge LAB grading errors and malformed verdicts cannot become a val
     await assert.rejects(readFile(path.join(logs, "reward.json")));
     assert.match(await readFile(path.join(logs, "grading-error.json"), "utf8"), /could not grade/);
   }
+});
+
+test("LAB upstream single and either dual judge reject missing raw verdicts before official normalization", async t => {
+  const { root, source } = await fixture(t), evidence = path.join(root, "output");
+  await mkdir(evidence); await writeFile(path.join(evidence, "answer.txt"), "work");
+  for (const [mode, models, target] of [
+    ["single", ["gpt-5.5"], "gpt-5.5"],
+    ["dual-first", ["claude-sonnet-4-6", "gpt-5.5"], "claude-sonnet-4-6"],
+    ["dual-second", ["claude-sonnet-4-6", "gpt-5.5"], "gpt-5.5"],
+  ] as const) {
+    await t.test(mode, async () => {
+      const output = path.join(root, mode), logs = path.join(root, `${mode}-logs`);
+      python(["benchmark-packages/lab/import.py", "--source", source.lab!, "--revision", source.lab_revision!, "--task", "area/review/scenario-01", "--judges", ...models, "--out", output]);
+      const task = (await loadBenchmark(output)).tasks[0]!, tests = path.join(output, task.path, "tests");
+      const run = (response?: string, expected = 0) => python([path.join(tests, "hitch_grade.py"), "--tests", tests, "--output", evidence, "--logs", logs], {
+        ...process.env, PYTHONPATH: source.stubs, ANTHROPIC_API_KEY: "private-upstream-schema-secret",
+        ...(response === undefined ? {} : { LAB_TEST_RESPONSE: response, LAB_TEST_RESPONSE_MODEL: target }),
+      }, expected);
+      run(); // Seed valid reward and score files so malformed regrades must clear them.
+      for (const response of ["{}", '{"reasoning":"private-upstream-schema-secret"}', '{"verdict":"fail"}',
+        '{"verdict":"pass","reasoning":null}', '{"verdict":"PASS","reasoning":"wrong enum"}',
+        '{"verdict":"fail","reasoning":"extra key","unexpected":true}']) {
+        await writeFile(path.join(logs, "scores_stale.json"), "private-upstream-schema-secret");
+        run(response, 1);
+        await assert.rejects(readFile(path.join(logs, "reward.json")), { code: "ENOENT" });
+        await assert.rejects(readFile(path.join(logs, "scores_stale.json")), { code: "ENOENT" });
+        await assert.rejects(readFile(path.join(logs, "scores_dual.json")), { code: "ENOENT" });
+        assert.match(await readFile(path.join(logs, "grading-error.json"), "utf8"), /could not.*grade/);
+        for (const file of await readdir(logs)) assert.doesNotMatch(await readFile(path.join(logs, file), "utf8"), /private-upstream-schema-secret/);
+      }
+      run('{"verdict":"fail","reasoning":"valid failed criterion"}');
+      const rewards = JSON.parse(await readFile(path.join(logs, "reward.json"), "utf8"));
+      assert.equal(rewards.lab_all_pass, mode === "dual-second" ? 0.5 : 0, "valid failed criteria retain official single/dual all-pass scores");
+    });
+  }
+  python(["-c", String.raw`
+import sys
+from types import SimpleNamespace
+sys.path.insert(0, "benchmark-packages/lab/runtime")
+from hitch_judge import validated_judges
+class Official:
+    def evaluate_from_file(self, response): return response
+original_method = Official.evaluate_from_file
+evaluation = SimpleNamespace(Judge=Official)
+for fail in [False, True]:
+    try:
+        with validated_judges(evaluation) as Validated:
+            assert evaluation.Judge is Validated and Validated is not Official
+            assert Validated().evaluate_from_file({"verdict":"fail", "reasoning":""}) == {"verdict":"fail", "reasoning":""}
+            try:
+                Validated().evaluate_from_file({})
+            except ValueError:
+                pass
+            else:
+                raise AssertionError("missing raw verdict was accepted")
+            with validated_judges(evaluation): pass
+            assert evaluation.Judge is Validated
+            if fail: raise RuntimeError("synthetic evaluation failure")
+    except RuntimeError:
+        assert fail
+    assert evaluation.Judge is Official
+    assert Official.evaluate_from_file is original_method
+`]);
 });
 
 test("producers reject missing/unsafe source inputs and a dirty or mismatched source revision", async t => {

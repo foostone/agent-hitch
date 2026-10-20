@@ -3,7 +3,33 @@
 The official prompt loader and JSON parser are inherited unchanged. Rubric
 scoping, document extraction and score aggregation remain in lab_core.
 """
+from contextlib import contextmanager
 from urllib.parse import urlsplit
+
+
+def validate_verdict(result):
+    """Enforce the official verdict schema before score_rubric supplies defaults."""
+    if (not isinstance(result, dict) or set(result) != {"verdict", "reasoning"}
+            or result["verdict"] not in ("pass", "fail") or not isinstance(result["reasoning"], str)):
+        raise ValueError("LAB judge returned an invalid verdict schema")
+    return result
+
+
+@contextmanager
+def validated_judges(evaluation):
+    # Official dual evaluation instantiates its module-global Judge. Swap only
+    # that reference for this grading scope; never mutate the reusable class.
+    original = evaluation.Judge
+
+    class ValidatedJudge(original):
+        def evaluate_from_file(self, *args, **kwargs):
+            return validate_verdict(super().evaluate_from_file(*args, **kwargs))
+
+    evaluation.Judge = ValidatedJudge
+    try:
+        yield ValidatedJudge
+    finally:
+        evaluation.Judge = original
 
 
 def chat_judge(official_judge, model, reasoning_effort=None):
@@ -42,10 +68,7 @@ def chat_judge(official_judge, model, reasoning_effort=None):
                         raise ValueError("judge returned a refusal or tool call")
                     text = message.content
                     if not isinstance(text, str) or not text.strip(): raise ValueError("judge returned empty content")
-                    verdict = self._parse_json(text)
-                    if not isinstance(verdict, dict) or verdict.get("verdict") not in ("pass", "fail") or not isinstance(verdict.get("reasoning"), str):
-                        raise ValueError("judge returned an invalid verdict or reasoning")
-                    return verdict
+                    return validate_verdict(self._parse_json(text))
                 except Exception as error:
                     last_error = error
             raise ValueError(f"Chat judge failed after {_retries} attempts: {last_error}")
