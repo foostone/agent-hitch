@@ -97,6 +97,43 @@ hitch eval inspect EVAL_ID --json
 hitch eval rerun EVAL_ID --task COMPILED_TASK_ID --type verifier-only
 ```
 
+### Explicit OpenAI-compatible Chat Completions judge
+
+For a provider whose model name is not recognized by upstream detection, opt in
+at import rather than disguising its model ID:
+
+```sh
+python3 benchmark-packages/lab/import.py --source /sources/harvey-labs \
+  --task corporate-ma/compare-closing-checklist-against-ma-agreement \
+  --judges deepseek-flash --judge-api openai-chat-completions \
+  --judge-reasoning-effort high --parallel 3 --out /packages/lab-custom-single
+```
+
+Set `HITCH_LAB_JUDGE_OPENAI_API_KEY` and
+`HITCH_LAB_JUDGE_OPENAI_BASE_URL=https://api.deepseek.com` privately in the
+verifier's launching environment. They are not candidate `--pass-env` entries.
+The custom transport initially supports **one judge only**. It is a separately
+identified single-judge configuration, not the standard Sonnet/GPT dual profile.
+Omitting `--judge-api` keeps upstream provider detection and judging unchanged;
+`--judge-reasoning-effort` is accepted only for the explicit Chat transport.
+
+The adapter inherits the official `Judge.evaluate_from_file` and `_parse_json`,
+formats the original template with the same variables, and passes the object to
+the original `evaluate_run`. It sends the official 64,000-token output cap and
+uses JSON-object mode on the first attempt with the upstream-style plain JSON
+fallback. Optional `reasoning_effort` is recorded as requested configuration;
+effective effort is provider-dependent. It requires exactly one nonempty text
+choice with `finish_reason=stop` and a valid pass/fail verdict. Truncation,
+refusals, tool calls, API and parsing failures invalidate verification, while a
+valid fail remains a scored zero. Transport/model/endpoint settings are retained
+in verifier provenance. Upstream prompts, rubric JSON, extraction, filename
+matching and all-pass aggregation are unchanged.
+
+The fallback filename matcher still requires the separate Anthropic credential.
+Exact filenames and upstream extension/fuzzy matching do not need that call;
+if fallback matching is required but cannot run, verification fails explicitly.
+No custom matcher or silent missing-file substitution is introduced.
+
 The recipe is for local direct execution. Resident workers need the judge
 variables in their own launching environment; remote verifier credential binding
 has not been implemented or validated here. A verifier-only regrade uses retained
@@ -123,10 +160,12 @@ evidence. Failed regrades clear stale reward and score files.
 
 Offline tests use original evaluation/scoring functions with deterministic fake
 providers and cover the complete import/validate/compile path, auxiliary versus
-primary score, missing files and failure gates. The real single-task import,
-Package validation, compilation and Harbor 0.21 task parsing passed. Docker was
-unavailable, so no images, real candidates/judges or container regrades were run;
-these checks establish no scored benchmark observations. See
+primary score, missing files and failure gates. The original acceptance check on 2026-10-19 passed real single-task import,
+Package validation, compilation and Harbor 0.21 task parsing. Docker was
+unavailable in that check, so it ran no images, real candidates/judges or
+container regrades and established no scored benchmark observations. The Chat
+transport regressions use deterministic SDK fakes; any live deployment evidence
+must separately identify its model, endpoint, judge profile and harness. See
 [acceptance evidence](../../docs/evidence/jobbench-lab-producers-2026-10-19.json).
 
 Sources: [official tutorial](https://github.com/harveyai/harvey-labs/blob/e9b1f9f4dc25576f9a020d857e3e3a6420834dc3/docs/tutorial.md),

@@ -80,6 +80,7 @@ def run(tests, output, destination):
         try:
             inspect_output(output)
             config = json.loads((tests / "judge.json").read_text(encoding="utf-8"))
+            (logs / "judge-provenance.json").write_text(json.dumps(config, indent=2) + "\n")
             source_id = config["source_task_id"]
             task_config = json.loads((tests / "lab/tasks" / source_id / "task.json").read_text(encoding="utf-8"))
             models = config["models"]
@@ -96,7 +97,17 @@ def run(tests, output, destination):
                 with (logs / "judge-output.log").open("w", encoding="utf-8") as stream, redirect_stdout(stream), redirect_stderr(stream):
                     from lab_core.evaluation.run_eval import Judge, evaluate_run, evaluate_run_dual
                     try:
-                        if len(models) == 2:
+                        api = config.get("api", "upstream")
+                        if api == "openai-chat-completions":
+                            if len(models) != 1: raise ValueError("Chat Completions transport requires one judge")
+                            from hitch_judge import chat_judge
+                            judge = chat_judge(Judge, models[0], config.get("reasoning_effort"))
+                            config["transport"] = judge.transport_provenance
+                            (logs / "judge-provenance.json").write_text(json.dumps(config, indent=2) + "\n")
+                            scores = evaluate_run("hitch", source_id, judge, parallel=config["parallel"])
+                        elif api != "upstream":
+                            raise ValueError("unsupported LAB judge API")
+                        elif len(models) == 2:
                             scores = evaluate_run_dual("hitch", source_id, parallel=config["parallel"], judge_models=tuple(models))
                         else:
                             scores = evaluate_run("hitch", source_id, Judge(model=models[0]), parallel=config["parallel"])

@@ -13,10 +13,10 @@ import subprocess
 ROOT = Path(__file__).resolve().parent / "fixtures/benchmark-producers"
 
 LAB_JUDGE = '''
-class Judge:
+class FixtureJudge(Judge):
     def __init__(self, model="claude-sonnet-4-6"):
         self.model = model
-    def evaluate_from_file(self, prompt_name, variables):
+    def evaluate(self, prompt_template, variables):
         import os
         if os.environ.get("LAB_TEST_ERROR"):
             raise RuntimeError(os.environ["ANTHROPIC_API_KEY"])
@@ -25,6 +25,7 @@ class Judge:
         passed = "File not found:" not in evidence and "No agent output found" not in evidence
         if self.model.startswith("gpt") and variables["criterion_title"] == "second": passed = False
         return {"verdict": "pass" if passed else "fail", "reasoning": evidence}
+Judge = FixtureJudge
 '''
 
 JOB_JUDGE = '''import argparse,json,os
@@ -96,6 +97,27 @@ def create(destination):
     for name in ["pandas.py", "pdfplumber.py"]: write(stubs / name, "")
     write(stubs / "markitdown.py", "class MarkItDown: pass\n")
     write(stubs / "anthropic.py", "import os\nclass Anthropic:\n    def __init__(self): raise RuntimeError(os.environ.get('ANTHROPIC_API_KEY','synthetic matcher failure'))\n")
+    write(stubs / "openai.py", """import json,os
+from pathlib import Path
+from types import SimpleNamespace as NS
+class OpenAI:
+    def __init__(self):
+        self.base_url=os.environ.get('OPENAI_BASE_URL','https://api.openai.com/v1')
+        self.chat=NS(completions=self)
+    def create(self,**kwargs):
+        if os.environ.get('LAB_CHAT_REQUESTS'):
+            with Path(os.environ['LAB_CHAT_REQUESTS']).open('a') as f: f.write(json.dumps(kwargs)+'\\n')
+        mode=os.environ.get('LAB_CHAT_FAILURE')
+        if mode=='api': raise RuntimeError(os.environ['OPENAI_API_KEY'])
+        prompt=kwargs['messages'][0]['content']
+        passed='File not found:' not in prompt and 'No agent output found' not in prompt
+        text=json.dumps({'verdict': 'fail' if mode=='fail' or not passed else 'pass', 'reasoning':'synthetic chat judge'})
+        if mode=='parse': text='not JSON'
+        if mode=='verdict': text='{"verdict":"unknown","reasoning":"synthetic"}'
+        if mode=='empty': text=''
+        choice=NS(finish_reason='length' if mode=='length' else 'stop',message=NS(content=text,refusal=None,tool_calls=None))
+        return NS(choices=[] if mode=='no-choice' else [choice,choice] if mode=='multiple-choices' else [choice])
+""")
     write(stubs / "sitecustomize.py", "import enum\nif not hasattr(enum, 'StrEnum'):\n    class CompatStrEnum(str, enum.Enum): pass\n    enum.StrEnum = CompatStrEnum\n")
     return {"jobbench": str(job), "jobbench_revision": git_fixture(job), "lab": str(lab), "lab_revision": git_fixture(lab), "snapshot": str(snapshot), "stubs": str(stubs)}
 

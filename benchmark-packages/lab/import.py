@@ -36,9 +36,11 @@ def produce(args):
     judges = args.judges or list(pure["JUDGE_MODELS"])
     if not 1 <= len(judges) <= 2 or len(set(judges)) != len(judges): raise ValueError("choose one or two distinct judge models")
     detect = definitions(source / "lab_core/evaluation/judge.py", functions=["_detect_provider"])["_detect_provider"]
+    if args.judge_api != "upstream" and len(judges) != 1: raise ValueError("Chat Completions transport requires exactly one judge")
+    if args.judge_reasoning_effort is not None and args.judge_api == "upstream": raise ValueError("judge reasoning override requires explicit Chat Completions transport")
     for model in judges:
         if not re.fullmatch(r"[A-Za-z0-9_.-]+", model): raise ValueError("unsupported judge model ID")
-        detect(model)
+        if args.judge_api == "upstream": detect(model)
     if args.parallel < 1 or args.agent_timeout < 1: raise ValueError("parallelism and agent timeout must be positive")
     root = Path(args.out).resolve(); root.mkdir(parents=True, exist_ok=False)
     json_file(root / "source-manifest.json", {"status": "importing", "selection": selection})
@@ -95,9 +97,9 @@ def produce(args):
         shutil.copy2(sandbox / "install_pandoc.sh", tests / "install_pandoc.sh")
         for file in Path(__file__).with_name("runtime").glob("*.py"): shutil.copy2(file, tests / file.name)
         json_file(tests / "judge.json", {"protocol": "harvey-lab-official@1", "source_task_id": name, "source_revision": args.revision,
-            "models": judges, "parallel": args.parallel, "primary": "dual_all_pass_rate" if len(judges) == 2 else "score",
+            "models": judges, "api": args.judge_api, "reasoning_effort": args.judge_reasoning_effort, "parallel": args.parallel, "primary": "dual_all_pass_rate" if len(judges) == 2 else "score",
             "matching_model": "claude-sonnet-4-6 (official fallback matcher)", "network": "public"})
-        extra = " --extra mistral" if any(detect(m) == "mistral" for m in judges) else ""
+        extra = " --extra mistral" if args.judge_api == "upstream" and any(detect(m) == "mistral" for m in judges) else ""
         (tests / "Dockerfile").write_text(f'''FROM {PYTHON_IMAGE}
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
 RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates && rm -rf /var/lib/apt/lists/*
@@ -128,6 +130,7 @@ CMD ["sleep", "infinity"]
     shutil.copy2(source / "LICENSE", root / "UPSTREAM-LICENSE")
     json_file(root / "source-manifest.json", {"schema_version": "1", "status": "ready", "source": "https://github.com/harveyai/harvey-labs", "source_revision": args.revision,
         "selection": selection, "tasks": tasks, "transformations": transforms, "adapter": {"id": "harvey-lab", "version": "1", "path": "source-adapter.py"},
+        "judge_transport": {"api": args.judge_api, "models": judges, "reasoning_effort": args.judge_reasoning_effort},
         "scoring": "official single all-pass score / dual_all_pass_rate; criterion pass fraction auxiliary only",
         "execution_profile": "Hitch terminal harness, open candidate network; differs from official LAB reference harness with network=none",
         "dependency_policy": "verifier uv.lock frozen; upstream candidate apt/pip/npm remain as authored, image build receipts identify resolved image",
@@ -136,7 +139,7 @@ CMD ["sleep", "infinity"]
     write_package(root, name="harvey-lab-" + ("dual" if len(judges) == 2 else "single"), revision=args.revision,
         uri="https://github.com/harveyai/harvey-labs", license="MIT", selection=package_selection, primary="lab_all_pass",
         metrics={"lab_all_pass": "scalar" if len(judges) == 2 else "binary", "lab_criterion_pass": "scalar"},
-        extensions={"judge_models": judges, "source_selection": selection, "network_difference": "open-network Hitch harness; not reference LAB harness parity",
+        extensions={"judge_models": judges, "judge_api": args.judge_api, "judge_reasoning_effort": args.judge_reasoning_effort, "source_selection": selection, "network_difference": "open-network Hitch harness; not reference LAB harness parity",
         "credential_policy": "host HITCH_LAB_JUDGE_* variables resolve only in verifier; never --pass-env", "auxiliary_metrics": ["lab_criterion_pass"]})
     return {"package": str(root), "selection": selection, "task_ids": ids, "judges": judges}
 
@@ -147,6 +150,8 @@ if __name__ == "__main__":
     parser.add_argument("--seed", type=int, default=0); parser.add_argument("--count", type=int, default=1)
     parser.add_argument("--task", action="append", help="original nested task ID; repeatable")
     parser.add_argument("--judges", nargs="+", help="one or two judge models; default is read from pinned official code")
+    parser.add_argument("--judge-api", choices=["upstream", "openai-chat-completions"], default="upstream", help="explicit single-judge transport; upstream keeps official provider detection")
+    parser.add_argument("--judge-reasoning-effort", choices=["none", "low", "medium", "high", "xhigh", "max"], help="optional Chat Completions reasoning_effort")
     parser.add_argument("--parallel", type=int, default=6); parser.add_argument("--agent-timeout", type=int, default=7200)
     parser.add_argument("--out", required=True)
     print(json.dumps(produce(parser.parse_args()), indent=2))
