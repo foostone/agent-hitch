@@ -13,6 +13,7 @@ import { DaemonServer, daemonClient } from "../src/daemon/index.js";
 import { atomicWriteJSON, delay, readJSON, sha256Bytes, sha256JSON } from "../src/foundation/index.js";
 import { forceRemove, prepareHostHarborArtifactForTest, writeFakeHarbor, writeFakeNpm } from "../test-support/helpers.js";
 import { installEmptyDockerBackendForTest } from "../test-support/empty-docker-backend.js";
+import { resolveModelProxyBinding } from "../src/evals/model-capture-runtime.js";
 import { EnvironmentImageService } from "../src/images/index.js";
 import { writeResultBundleIndex } from "../src/runs/index.js";
 
@@ -641,8 +642,12 @@ test("eval recovery restores the exact host model proxy route before reattaching
   const activityLog = path.join(root, "proxy-activity.jsonl");
   const harbor = await writeFakeHarbor(root, { delayMs: 1_000, activityLog });
   const npm = await writeFakeNpm(root, { packageName: "@openai/codex", binName: "codex" });
-  const env = { ...process.env, HITCH_NPM_PATH: npm };
+  const env = { ...process.env, HITCH_NPM_PATH: npm,
+    HITCH_MODEL_PROXY_BIND_HOST: "127.0.0.1", HITCH_MODEL_PROXY_ADVERTISED_HOST: "127.0.0.1" };
   await installEmptyDockerBackendForTest(root, env);
+  assert.deepEqual(await resolveModelProxyBinding(env, { platform: "linux", inspectDockerBridge: async () => {
+    throw new Error("host-only proxy recovery must not inspect the Docker bridge");
+  } }), { bindHost: "127.0.0.1", advertisedHost: "127.0.0.1" });
   const child = spawn(process.execPath, [
     path.join(import.meta.dirname, "..", "test-support", "recovery-scheduler-child.js"),
     root, harbor, npm, dataset, "codex@version:1.2.3", "proxy",
