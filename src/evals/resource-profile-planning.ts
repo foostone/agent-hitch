@@ -24,8 +24,11 @@ export async function buildTaskResourceProfileIdentity(input: {
     const declaration = input.environmentImages.find(image => component.role === "main" ? image.source === "task" && image.service === "main"
       : component.role === "verifier" ? image.source === "verifier" && image.service === "main" : image.source === "compose" && image.service === component.name)
       ?? (component.role === "main" ? input.environmentImages.find(image => image.source === "compose" && image.service === "main") : undefined);
-    const candidates = input.images.filter(image => image.task_ids.includes(input.taskId)
-      && (declaration ? image.requested_reference === declaration.reference : component.role === "main" && image.resolution === "prebuilt"));
+    const role = component.role === "verifier" ? "verifier" : "candidate";
+    const candidates = input.images.filter(image => image.task_ids.includes(input.taskId) && (image.resolution === "prebuilt"
+      ? (image.role ?? "candidate") === role && (component.role === "main" || component.role === "verifier"
+        ? image.service === undefined : component.role === "task-sidecar" && image.service === component.name)
+      : declaration && (image.role === undefined || image.role === role) && image.requested_reference === declaration.reference));
     const declaredDigest = declaration?.reference.match(/@(sha256:[a-f0-9]{64})$/)?.[1] as Sha256 | undefined;
     const digests = [...new Set(candidates.map(image => image.manifest_digest))];
     const digest = digests.length === 1 ? digests[0] : digests.length === 0 ? declaredDigest : undefined;

@@ -17,7 +17,9 @@ import { EvalEventSink } from "../src/evals/events.js";
 import { validateEvalId } from "../src/evals/request.js";
 import type { DockerReaperReportV1 } from "../src/evals/docker-reaper.js";
 import { createExecutionLease } from "../src/evals/execution-leases.js";
-import { preparePhaseDockerExecution } from "../src/evals/phase-docker-backend.js";
+import { bindPhaseDockerBackend, preparePhaseDockerExecution } from "../src/evals/phase-docker-backend.js";
+import { finishPlannedLocalWork } from "../src/evals/planned-work-cleanup.js";
+import { installEmptyDockerBackendForTest } from "../test-support/empty-docker-backend.js";
 
 const GIB = 1024 ** 3;
 const evalId = validateEvalId(`eval_${"a".repeat(32)}`);
@@ -66,7 +68,9 @@ test("phase cleanup accepts zero removals and unrelated leases, and rejects issu
     worker: { workerId: "local", provider: "local-docker", collisionDomainId: "local" }, reservation: plan().work_items[0]!.reservation, ttlMs: 45_000 });
   await handle.release();
   await preparePhaseDockerExecution({ root, lease: handle.current() });
-  const input = { root, lease: handle.current(), trialParents: [], env: process.env };
+  const env = { ...process.env }; await installEmptyDockerBackendForTest(root, env);
+  await bindPhaseDockerBackend({ root, lease: handle.current(), env });
+  const input = { root, lease: handle.current(), trialParents: [], env };
   await confirmPhaseResourceCleanup({ ...input, reaper: async () => clean(root) });
   await confirmPhaseResourceCleanup({ ...input, reaper: async () => ({ ...clean(root), retained: [{ kind: "container", id: "other", reason: "lease_not_selected" }] }) });
   for (const reaper of [
@@ -77,7 +81,7 @@ test("phase cleanup accepts zero removals and unrelated leases, and rejects issu
   ]) await assert.rejects(confirmPhaseResourceCleanup({ ...input, reaper }), { code: "phase_transition_unconfirmed" });
 });
 
-test("planned V2 and profiled V1 work retain failed cleanup allocations and cancel queued admission", async () => {
+test("never-launched V2 and profiled V1 work release allocations without requiring Docker", async () => {
   for (const [shared, profiledV1] of [[false, false], [true, false], [true, true]]) for (const fails of [false, true]) {
     const root = await mkdtemp(path.join(os.tmpdir(), "hitch-phase-cleanup-"));
     const options = await fixture(root, shared, profiledV1);
@@ -93,21 +97,39 @@ test("planned V2 and profiled V1 work retain failed cleanup allocations and canc
       acquired += 1;
       return { allocationId: permit.allocation.allocation_id, collisionKeys: permit.collision_keys, release: () => { released += 1; permit.release(); } };
     } };
-    options.dockerResourceReaper = async () => fails ? { ...clean(root), retained: [{ kind: "container", id: "owned", reason: "cannot confirm" }] } : clean(root);
+    let sweeps = 0;
+    options.dockerResourceReaper = async () => { sweeps++; if (fails) throw new Error("Docker unavailable"); return clean(root); };
     try {
-      if (fails) await assert.rejects(executePlannedHarborTasks(options), { code: "phase_transition_unconfirmed" });
-      else await assert.rejects(executePlannedHarborTasks(options));
+      await assert.rejects(executePlannedHarborTasks(options));
       assert.equal(acquired, 1);
-      assert.equal(released, fails ? 0 : 1);
-      if (profiledV1) assert.equal(resources.snapshot().resource_profiling.active_unknown_slots, fails ? 1 : 0);
+      assert.equal(released, 1);
+      assert.equal(sweeps, 0);
+      if (profiledV1) assert.equal(resources.snapshot().resource_profiling.active_unknown_slots, 0);
     } finally { dispatcher.close(); await options.sink.close(); await rm(root, { recursive: true, force: true }); }
   }
+});
+
+test("bound planned work keeps its allocation when Docker cleanup fails", async t => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "hitch-phase-bound-cleanup-"));
+  const options = await fixture(root, true, true);
+  t.after(async () => { await options.sink.close(); await rm(root, { recursive: true, force: true }); });
+  options.env = { ...process.env }; await installEmptyDockerBackendForTest(root, options.env);
+  const item = options.plan.work_items[0]!;
+  const lease = await createExecutionLease({ evalDirectory: options.evalDirectory, evalId, workId: item.work_id,
+    worker: options.worker, reservation: item.reservation, ttlMs: 45000 });
+  await preparePhaseDockerExecution({ root, lease: lease.current() });
+  await bindPhaseDockerBackend({ root, lease: lease.current(), env: options.env });
+  options.dockerResourceReaper = async () => { throw new Error("Docker unavailable"); };
+  const allocation = { held: true };
+  await assert.rejects(finishPlannedLocalWork({ options, item, lease, epoch: 1, processRecorded: false, allocation }), { code: "phase_transition_unconfirmed" });
+  assert.equal(allocation.held, true);
 });
 
 test("physical retries release only after confirmed cleanup for V2 and profiled V1 plans", async () => {
   for (const [shared, profiledV1] of [[false, false], [true, false], [true, true]]) for (const failure of ["none", "issues", "retained", "exception"]) {
     const root = await mkdtemp(path.join(os.tmpdir(), "hitch-phase-retry-cleanup-"));
     const options = await fixture(root, shared, profiledV1); let released = false;
+    options.env = { ...process.env }; await installEmptyDockerBackendForTest(root, options.env);
     options.admission = { acquire: async () => ({ allocationId: `allocation_${"f".repeat(32)}`, collisionKeys: [], release: () => { released = true; } }) };
     options.dockerResourceReaper = async () => {
       if (failure === "exception") throw new Error("daemon unavailable");
@@ -118,6 +140,7 @@ test("physical retries release only after confirmed cleanup for V2 and profiled 
       const lifecycle = await beginPlannedInfrastructureRetry({ options, item: options.plan.work_items[0]!, retry: 1,
         triggers: [{ task_id: "one", attempt: 1, trial_id: "first", run_id: `run_${"d".repeat(32)}`, observation_status: "invalid", invalid_reason: "verifier_infrastructure_failure" }],
         backendDirectory: path.join(options.evalDirectory, "retry") });
+      await lifecycle.backend.onProcessStarting!(options.env);
       if (failure === "none") await lifecycle.close();
       else await assert.rejects(lifecycle.close(), { code: "phase_transition_unconfirmed" });
       assert.equal(released, failure === "none");

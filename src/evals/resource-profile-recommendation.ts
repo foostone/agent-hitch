@@ -49,21 +49,24 @@ export function recommendResourceConfiguration(profile: ResourceProfileV1, curre
   }
   const allowed = blocked.length === 0;
   const currentLimits = currentRoleLimits(identity);
-  const names = [...new Set([...(identity?.role_images.map(role => role.component_id) ?? []), ...profile.trials.flatMap(trial => trial.roles.map(role => role.component_id))])].sort();
+  // Retain mismatched evidence and its failure blockers, but never combine its
+  // descriptive peaks with the original configuration's population.
+  const population = identity ? profile.trials.filter(trial => trial.identity_digest === profile.identity_digest) : profile.trials;
+  const names = [...new Set([...(identity?.role_images.map(role => role.component_id) ?? []), ...population.flatMap(trial => trial.roles.map(role => role.component_id))])].sort();
   const roles = names.map(component_id => {
-    const observations = profile.trials.flatMap(trial => trial.roles.filter(role => role.component_id === component_id));
+    const observations = population.flatMap(trial => trial.roles.filter(role => role.component_id === component_id));
     const values = observations.flatMap(role => role.memory_peak_bytes === undefined ? [] : [role.memory_peak_bytes]).sort((a, b) => a - b);
     const maximum = values.at(-1);
     const suggested = allowed && maximum !== undefined ? Math.ceil((maximum + Math.max(maximum * ratio, marginBytes)) / round) * round : undefined;
     if (suggested !== undefined && !Number.isSafeInteger(suggested)) throw new TypeError("resource recommendation is unrepresentable");
     return { component_id, current_limits: currentLimits.find(role => role.component_id === component_id) ?? null, observed_max_bytes: maximum ?? null, p95_descriptive_bytes: values.length ? values[Math.max(0, Math.ceil(values.length * 0.95) - 1)] : null,
       measurement_kinds: [...new Set(observations.map(role => `${role.peak_kind}:${role.peak_semantics}`))],
-      ...(suggested === undefined ? {} : { suggested_memory_bytes: suggested }), source_digests: profile.trials.filter(trial => trial.roles.some(role => role.component_id === component_id)).map(trial => trial.source.digest) };
+      ...(suggested === undefined ? {} : { suggested_memory_bytes: suggested }), source_digests: population.filter(trial => trial.roles.some(role => role.component_id === component_id)).map(trial => trial.source.digest) };
   });
   return { schema_version: "1", kind: "resource-configuration-recommendation", profile_digest, identity_digest: profile.identity_digest,
     automatic_application: false, lowering_eligible: allowed, min_complete_trials: minimum, complete_trials: eligible.length, all_trials: profile.trials.length,
     blocked_reasons: [...new Set(blocked)], trial_eligibility: trials, roles, current_role_limits: currentLimits,
-    group_observations: profile.trials.flatMap(trial => trial.memory_observation ? [{ sample_id: trial.sample_id, ...trial.memory_observation }] : []),
+    group_observations: population.flatMap(trial => trial.memory_observation ? [{ sample_id: trial.sample_id, ...trial.memory_observation }] : []),
     actions: allowed ? [{ action: "review_explicit_configuration", detail: "Review the maximum-plus-margin proposal and create a new explicit configuration and plan; no limit changes automatically." }]
       : [{ action: "retain_current_limits", detail: "Keep the current enforced limits; sampled maxima do not establish safe lower limits." },
         { action: "collect_complete_lifecycle_evidence", detail: "Collect cold-start, agent, artifact-collection, verifier and exit coverage, per-role final kernel peaks, OOM flags and exit outcomes." },

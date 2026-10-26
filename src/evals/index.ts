@@ -102,7 +102,8 @@ export { parseRemoteExecutionAdmission, parseRemoteExecutionOwnership, parseRemo
 export { parseRemoteWorkerCleanupChallenge, parseRemoteWorkerCleanupReceipt } from "./remote-worker-cleanup.js";
 export { prepareEvaluationBinding } from "../backends/index.js";
 export { assertEvalEnvironmentBinding } from "./environment-binding.js";
-export { bindPhaseDockerBackend, confirmPhaseDockerBackend, phaseCleanupEnvironment, phaseReceiptTrialParents, preparePhaseDockerExecution, readPhaseDockerBindings, recordPhaseDockerCleanup } from "./phase-docker-backend.js";
+export { bindPhaseDockerBackend, confirmPhaseDockerBackend, phaseCleanupEnvironment, phaseDockerExecutionNeverStarted, phaseReceiptTrialParents, preparePhaseDockerExecution, readPhaseDockerBindings, recordPhaseDockerCleanup } from "./phase-docker-backend.js";
+export { reconcileTerminalLocalDockerLease } from "./terminal-local-lease.js";
 export { buildTaskResourceProfileIdentity } from "./resource-profile-planning.js";
 export { parseResourceProfileIdentity, resourceProfileIdentityDigest } from "./resource-profile-identity.js";
 export { approveResourceConfiguration, parseApprovedResourceConfiguration, matchApprovedResourceConfiguration } from "./resource-profile-approval.js";

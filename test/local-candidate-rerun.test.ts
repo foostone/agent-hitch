@@ -12,6 +12,7 @@ import { validateEvalId } from "../src/evals/request.js";
 import { atomicWriteJSON, hitchRootId } from "../src/foundation/index.js";
 import { dockerOwnershipLabelMap } from "../src/evals/docker-ownership.js";
 import { verifyTrialEnvironmentImageExecution } from "../src/evals/trial-environment-evidence.js";
+import { installEmptyDockerBackendForTest } from "../test-support/empty-docker-backend.js";
 
 const GIB = 1024 ** 3;
 const rerunId = `rerun_${"d".repeat(32)}`;
@@ -59,10 +60,11 @@ test("candidate restart admits frozen peak, applies main/sidecar limits, and rel
     const plan = frozenPlan();
     const slot = { task_id: "finance", attempt: 1 };
     const evalDirectory = path.join(root, "evals", evalId);
+    const env: NodeJS.ProcessEnv = { ...process.env }; await installEmptyDockerBackendForTest(root, env);
     const order: string[] = [];
     let admitted: BackendWorkItemV1 | undefined;
     const managed = await beginLocalCandidateRestart({ plan, slot, evalDirectory, rerunId, rerunDirectory: path.join(evalDirectory, "reruns", rerunId),
-      options: { root, evalId, selector: { mode: "invalid" }, env: { ...process.env, HITCH_DOCKER_PATH: "/usr/bin/true" },
+      options: { root, evalId, selector: { mode: "invalid" }, env,
         workItemAdmission: { acquire: async input => { admitted = input.workItem; order.push("admitted"); return {
           allocationId: `allocation_${"f".repeat(32)}`, collisionKeys: [], release: () => { order.push("released"); } }; } },
         dockerResourceReaper: async input => {
@@ -78,6 +80,7 @@ test("candidate restart admits frozen peak, applies main/sidecar limits, and rel
     assert.equal(managed.backend.dockerServiceLimits!.simulator!.memory_bytes, GIB);
     assert.equal(managed.backend.dockerOwnership!.work_id, admitted!.work_id);
     assert.equal(managed.backend.phaseResourceContract!.task_id, slot.task_id);
+    await managed.backend.onProcessStarting!(env);
     assert.equal((await managed.captureExecutionEvidence()).reservation.memory_bytes, 3 * GIB);
     await managed.close();
     await managed.close();
@@ -105,9 +108,9 @@ test("candidate restart preserves role image bindings and setup-failure observat
   const plan = frozenPlan(true, uses), evalDirectory = path.join(root, "evals", evalId);
   const managed = await beginLocalCandidateRestart({ plan, slot: { task_id: "finance", attempt: 1 }, evalDirectory,
     rerunId, rerunDirectory: path.join(evalDirectory, "reruns", rerunId), options: {
-      root, evalId, selector: { mode: "invalid" }, env: { ...process.env, HITCH_DOCKER_PATH: "/usr/bin/true" },
+      root, evalId, selector: { mode: "invalid" }, env: { ...process.env, HITCH_DOCKER_PATH: "/missing/docker" },
       environmentImageManifestLoader: async id => manifests.find(manifest => manifest.image_id === id)!,
-      dockerResourceReaper: async () => ({ schema_version: "1", root_id: hitchRootId(root), scanned: 0, deleted: [], retained: [], issues: [] }),
+      dockerResourceReaper: async () => { throw new Error("never-launched setup failure must not require Docker cleanup"); },
     } });
   try {
     assert.equal(managed.backend.prebuiltTaskImage, manifests[0]!.output.config_digest);
@@ -131,14 +134,16 @@ test("candidate restart retains admission when Docker cleanup cannot be confirme
   const root = await mkdtemp(path.join(os.tmpdir(), "hitch-candidate-phase-"));
   try {
     const plan = frozenPlan();
+    const env: NodeJS.ProcessEnv = { ...process.env }; await installEmptyDockerBackendForTest(root, env);
     let released = false;
     const managed = await beginLocalCandidateRestart({ plan, slot: { task_id: "finance", attempt: 1 }, rerunId,
       evalDirectory: path.join(root, "evals", evalId), rerunDirectory: path.join(root, "rerun"), options: {
-        root, evalId, selector: { mode: "invalid" }, env: { ...process.env, HITCH_DOCKER_PATH: "/usr/bin/true" },
+        root, evalId, selector: { mode: "invalid" }, env,
         workItemAdmission: { acquire: async () => ({ allocationId: `allocation_${"f".repeat(32)}`, collisionKeys: [], release: () => { released = true; } }) },
         dockerResourceReaper: async () => ({ schema_version: "1", root_id: hitchRootId(root), scanned: 1, deleted: [], retained: [],
           issues: failure === "report" ? [{ kind: "container", stage: "delete", message: "cannot confirm removal" }] : [] }),
       } });
+    await managed.backend.onProcessStarting!(env);
     if (failure === "backend") await atomicWriteJSON(path.join(managed.backendDirectory, "job", "trial", "hitch-phase-resources-agent.json"), {
       schema_version: "1", role: "agent", docker_backend_id: "original-daemon", containers: [],
       ownership: dockerOwnershipLabelMap(managed.backend.dockerOwnership!),

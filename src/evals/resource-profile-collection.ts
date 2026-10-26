@@ -11,6 +11,7 @@ import { phaseReceiptTrialParents } from "./phase-docker-backend.js";
 import { loadResourceProfileIdentityManifest } from "./resource-profile-bindings.js";
 import { makeResourceProfile, resourceProfileTrialFromExecution, type ResourceProfileTrialV1 } from "./resource-profile-evidence.js";
 import { validateEvalId } from "./request.js";
+import { resourceProfileExecutionBindings } from "./resource-profile-execution.js";
 
 /** Collect only frozen control/run evidence. Never inspect today's task tree to
  * reconstruct identities missing from a historical execution plan. */
@@ -51,6 +52,10 @@ export async function collectEvalResourceProfile(input: { root: string; evalId: 
   const leases = await readExecutionLeases(directory);
   const retries = await readEvalRetryState(directory, evalId);
   const candidateWorks = rerunIds.flatMap(rerun => plan.work_items.map(work => candidateRestartWorkItem(work, rerun)));
+  const bindings = await resourceProfileExecutionBindings({ directory, plan, taskId: input.taskId, identity, rerunIds,
+    assessmentIds: await childDirectories(path.join(directory, "assessments"), /^assessment_[a-f0-9]{32}$/), readJSON: boundedJSON });
+  const identityIssue = (workId: string): string | undefined => bindings.has(workId) ? bindings.get(workId)
+    : resolveRetryWork(plan, retries, workId)?.item.task_ids.includes(input.taskId) ? undefined : "physical_profile_identity_unavailable";
   for (const parent of await phaseReceiptTrialParents(input.root, evalId, leases.filter(lease => lease.provider === "local-docker"))) {
     sources.set(path.join(path.dirname(parent), "execution.json"), { trusted: true });
   }
@@ -60,9 +65,11 @@ export async function collectEvalResourceProfile(input: { root: string; evalId: 
     const value = JSON.parse(content.toString("utf8")) as Record<string, unknown>;
     if (value.task_id !== input.taskId) continue;
     if (value.eval_id !== evalId) throw new TypeError("profile evidence belongs to another eval");
+    const issue = identityIssue(String(value.work_id));
     const trial = resourceProfileTrialFromExecution({ evidence: value,
       source: { path: path.relative(input.root, file), digest: sha256Bytes(content), trust: provenance.trusted ? "frozen-eval-evidence" : "operator-import" },
-      ...(identityDigest ? { identityDigest } : {}) });
+      ...(identityDigest && !issue ? { identityDigest } : {}) });
+    if (issue) trial.blocked_reasons.push(issue);
     if (provenance.reason) trial.blocked_reasons.push(provenance.reason);
     const prior = trials.get(trial.sample_id);
     trials.set(trial.sample_id, prior ? mergeProfileObservations(prior, trial) : trial);
@@ -72,11 +79,12 @@ export async function collectEvalResourceProfile(input: { root: string; evalId: 
       ?? resolveRetryWork(plan, retries, lease.work_id)?.item ?? candidateWorks.find(work => work.work_id === lease.work_id);
     if (!work && !trials.has(`${lease.lease_id}:${lease.epoch}`)) blocked.push(`unattributed_physical_execution:${lease.lease_id}`);
     if (!work?.task_ids.includes(input.taskId) || trials.has(`${lease.lease_id}:${lease.epoch}`)) continue;
+    const issue = identityIssue(lease.work_id);
     trials.set(`${lease.lease_id}:${lease.epoch}`, { sample_id: `${lease.lease_id}:${lease.epoch}`, task_id: input.taskId,
-      ...(identityDigest ? { identity_digest: identityDigest } : {}), source: { path: `evals/${evalId}/leases/${lease.lease_id}.json`,
+      ...(identityDigest && !issue ? { identity_digest: identityDigest } : {}), source: { path: `evals/${evalId}/leases/${lease.lease_id}.json`,
         digest: sha256Bytes((await boundedFile(path.join(directory, "leases", `${lease.lease_id}.json`)))!), trust: "frozen-eval-evidence" },
       input_case: { id: input.taskId, kind: "unspecified" }, lifecycle: { complete: false, covered_phases: [] }, roles: [],
-      blocked_reasons: ["execution_evidence_missing", "complete_lifecycle_not_proven"] });
+      blocked_reasons: ["execution_evidence_missing", "complete_lifecycle_not_proven", ...(issue ? [issue] : [])] });
   }
   if (!trials.size) blocked.push("no_execution_evidence");
   return makeResourceProfile({ identity, trials: [...trials.values()], blockedReasons: blocked });

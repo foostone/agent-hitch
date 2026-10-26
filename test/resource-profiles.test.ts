@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import type { EvalRequest, ExecutionEvidenceV1, ResourceProfileIdentityV1, Sha256 } from "../src/domain/index.js";
+import type { EnvironmentImageUseV1, EvalRequest, ExecutionEvidenceV1, ResourceProfileIdentityV1, Sha256 } from "../src/domain/index.js";
 import { atomicWriteJSON, sha256JSON } from "../src/foundation/index.js";
 import { approveResourceConfiguration, buildEvalExecutionPlan, buildTaskResourceProfileIdentity, collectEvalResourceProfile,
   createExecutionLease, ensurePhysicalRetryDecision, deriveTaskResourceRequirement, makeResourceProfile, matchApprovedResourceConfiguration, parseApprovedResourceConfiguration,
@@ -127,6 +127,41 @@ test("planning identities bind immutable role image digests, backend version, en
   assert.ok((await buildTaskResourceProfileIdentity({ ...args, environmentImages: [] })).blocked_reasons.some(reason => reason.startsWith("image_digest_unavailable")));
   const { backendVersion: _version, ...missingVersion } = args;
   assert.ok((await buildTaskResourceProfileIdentity(missingVersion)).blocked_reasons.includes("backend_version_unavailable"));
+});
+
+test("profile image identities distinguish prebuilt main, verifier and services, and registry source roles", async () => {
+  const taskResources = deriveTaskResourceRequirement({ taskId: "task-a", defaultResources: defaults, defaultSource: "operator-default", declaration: {
+    schema_version: "1", task: {}, verifier: { separate: true, environment: {} },
+    compose_services: [{ name: "main", replicas: 1 }, { name: "simulator", replicas: 2 }],
+    provider_sidecars: { main_egress: false, verifier_egress: false }, environment_images: [], environment_image_fallbacks: [], environment_builds: [] } });
+  const images: EnvironmentImageUseV1[] = ["main", "verifier", "simulator"].map(name => ({
+    task_ids: ["task-a"], role: name === "verifier" ? "verifier" : "candidate", ...(name === "simulator" ? { service: name } : {}),
+    image_id: digest(name), requested_reference: `built:${name}`, reference: `built:${name}@${digest(name)}`,
+    manifest_digest: digest(name), platform: "linux/amd64", resolution: "prebuilt", cache_hit: true,
+  }));
+  const args = { taskId: "task-a", taskDigest: digest("task"), taskResources, artifactDigest: digest("artifact"), controllerRuntimeDigest: digest("controller"),
+    runtimeContract: { docker_platform: "linux/amd64", artifact_platform: "linux-x64", node_version: "22" }, request, provider: "local-docker", backendVersion: "0.21.0" };
+  const built = await buildTaskResourceProfileIdentity({ ...args, images, environmentImages: [] });
+  assert.deepEqual(built.blocked_reasons, []);
+  assert.deepEqual(Object.fromEntries(built.identity!.role_images.map(role => [role.component_id, [role.image_digest, role.replicas]])), {
+    "main:main": [digest("main"), 1], "verifier:verifier": [digest("verifier"), 1], "task-sidecar:simulator": [digest("simulator"), 2],
+  });
+  const legacy = images.map(({ role, ...image }) => image.service === undefined && role === "candidate" ? image : { ...image, ...(role ? { role } : {}) });
+  assert.equal((await buildTaskResourceProfileIdentity({ ...args, images: legacy, environmentImages: [] })).identity_digest, built.identity_digest);
+  const registry = images.map(image => ({ ...image, resolution: "registry" as const, requested_reference: "same:tag", reference: `same@${image.manifest_digest}` }));
+  const pinned = await buildTaskResourceProfileIdentity({ ...args, images: registry, environmentImages: [
+    { source: "task", service: "main", reference: "same:tag" }, { source: "verifier", service: "main", reference: "same:tag" },
+    { source: "compose", service: "simulator", reference: "same:tag" },
+  ] });
+  // Candidate substitutions share a reference, so use one candidate digest just as runtime resolution does.
+  assert.ok(pinned.blocked_reasons.includes("image_digest_unavailable:main:main"));
+  registry[2] = { ...registry[2]!, manifest_digest: registry[0]!.manifest_digest, reference: registry[0]!.reference };
+  const resolved = await buildTaskResourceProfileIdentity({ ...args, images: registry, environmentImages: [
+    { source: "task", service: "main", reference: "same:tag" }, { source: "verifier", service: "main", reference: "same:tag" },
+    { source: "compose", service: "simulator", reference: "same:tag" },
+  ] });
+  assert.deepEqual(resolved.blocked_reasons, []);
+  assert.equal(resolved.identity!.role_images.find(role => role.component_id === "verifier:verifier")!.image_digest, digest("verifier"));
 });
 
 test("profile approvals bind frozen endpoint generation, environment binding and exact artifact pins without exposing secrets", async () => {

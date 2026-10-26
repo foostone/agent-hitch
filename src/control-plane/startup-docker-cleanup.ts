@@ -1,7 +1,7 @@
 import { readdir } from "node:fs/promises";
 import path from "node:path";
 import type { ExecutionLeaseV1 } from "../domain/index.js";
-import { confirmPhaseDockerBackend, parseEvalExecutionPlan, phaseCleanupEnvironment, phaseReceiptTrialParents, readExecutionLeases, readPhaseDockerBindings, recordPhaseDockerCleanup } from "../evals/index.js";
+import { confirmPhaseDockerBackend, parseEvalExecutionPlan, phaseCleanupEnvironment, phaseDockerExecutionNeverStarted, phaseReceiptTrialParents, readExecutionLeases, readPhaseDockerBindings, reconcileTerminalLocalDockerLease, recordPhaseDockerCleanup } from "../evals/index.js";
 import type { EvalDockerResourceReaper } from "../evals/index.js";
 import { HitchError, hitchRootId, readJSON, statePaths } from "../foundation/index.js";
 
@@ -15,19 +15,23 @@ export async function reapStartupDockerResources(input: {
   env: NodeJS.ProcessEnv;
   emit(event: Record<string, unknown>): void;
 }): Promise<void> {
-  const phaseLeases = await persistedPhaseLeases(input.root);
+  let phaseLeases = await persistedPhaseLeases(input.root);
+  let requiresConfirmation = phaseLeases.length > 0;
   try {
+    phaseLeases = await Promise.all(phaseLeases.map(lease => reconcileTerminalLocalDockerLease(input.root, lease)));
     const parents: string[] = [];
     for (const evalId of new Set(phaseLeases.map(lease => lease.eval_id))) {
       parents.push(...await phaseReceiptTrialParents(input.root, evalId, phaseLeases.filter(lease => lease.eval_id === evalId)));
     }
     const bindings = await readPhaseDockerBindings({ root: input.root, leases: phaseLeases, trialParents: parents, useCleanupFences: true });
+    if (phaseLeases.length && !bindings.length
+      && (await Promise.all(phaseLeases.map(lease => phaseDockerExecutionNeverStarted(input.root, lease)))).every(Boolean)) requiresConfirmation = false;
     const env = await phaseCleanupEnvironment(bindings, input.env);
     await confirmPhaseDockerBackend(bindings, env);
     const report = await input.reaper({ root: input.root, env });
     input.emit({ type: "docker.reaper.completed", root_id: report.root_id, scanned: report.scanned,
       deleted: report.deleted.length, retained: report.retained.length, issues: report.issues.length });
-    if (phaseLeases.length && (report.root_id !== hitchRootId(input.root) || report.issues.length || report.retained.length
+    if (requiresConfirmation && (report.root_id !== hitchRootId(input.root) || report.issues.length || report.retained.length
       // An unconfirmed host process could create containers after an empty
       // Docker listing. Only settled, released executions may reopen capacity.
       || phaseLeases.some(lease => lease.state !== "released"))) {
@@ -37,7 +41,7 @@ export async function reapStartupDockerResources(input: {
     await recordPhaseDockerCleanup(input.root, bindings);
   } catch (error) {
     input.emit({ type: "docker.reaper.failed", code: (error as { code?: string }).code || "docker_reaper_failed" });
-    if (phaseLeases.length) throw unconfirmed();
+    if (requiresConfirmation) throw unconfirmed();
   }
 }
 

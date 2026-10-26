@@ -112,8 +112,23 @@ test("a not-started marker cannot excuse a recorded backend launch without bindi
   const f = await fixture(); t.after(() => rm(f.root, { recursive: true, force: true }));
   await rm(f.receiptPath);
   await preparePhaseDockerExecution({ root: f.root, lease: f.lease.current() });
-  await atomicWriteJSON(path.join(f.evalDirectory, "provider", "leases", `${f.lease.leaseId}.json`), { state: "terminal" });
-  await assert.rejects(confirmPhaseResourceCleanup({ ...f.input, reaper: async () => f.clean }), { code: "phase_transition_unconfirmed" });
+  for (const record of [{ state: "terminal" }, null]) {
+    await atomicWriteJSON(path.join(f.evalDirectory, "provider", "leases", `${f.lease.leaseId}.json`), record);
+    await assert.rejects(confirmPhaseResourceCleanup({ ...f.input, reaper: async () => f.clean }), { code: "phase_transition_unconfirmed" });
+  }
+});
+
+test("a released never-launched execution needs no Docker command or reaper", async t => {
+  const f = await fixture(); t.after(() => rm(f.root, { recursive: true, force: true }));
+  await rm(f.receiptPath);
+  await preparePhaseDockerExecution({ root: f.root, lease: f.lease.current() });
+  const input = { ...f.input, env: { HITCH_DOCKER_PATH: "/missing/docker" },
+    reaper: async (): Promise<typeof f.clean> => { throw new Error("Docker must not be contacted"); } };
+  await assert.rejects(bindPhaseDockerBackend({ root: f.root, lease: f.lease.current(), env: input.env }));
+  assert.deepEqual(await confirmPhaseResourceCleanup(input), f.clean);
+  await assert.rejects(confirmPhaseResourceCleanup({ ...input, lease: { ...f.lease.current(), state: "lost" }, reaper: async () => f.clean }), { code: "phase_transition_unconfirmed" });
+  await atomicWriteJSON(f.receiptPath, f.receipt);
+  await assert.rejects(confirmPhaseResourceCleanup(input), { code: "phase_transition_unconfirmed" });
 });
 
 test("backend launch and an entire cleanup sweep pin the selected Docker context", async t => {

@@ -359,6 +359,8 @@ hitch daemon start --unknown-max-parallelism 1
 
 **资源准入与容器清理证明的覆盖范围仍须区分。** 带新 `resource_profiling` 的 local 单 task-slot（包括 V1 sum、unknown 和明确声明资源的任务）使用持久 Docker daemon 绑定与确认清理后释放额度的流程，覆盖普通执行、physical retry、candidate restart 和 verifier-only；daemon 重启也核查相应 lease/fence。清理失败或身份不明时保留 allocation 并阻止继续调度。旧无 profile 计划以及 coarse/opaque batch 保留原执行路径，不能仅凭 backend 进程结束证明全部容器生命周期已经结束；其并发计数不等于容器级清理保证。远端 allocation 生命周期也不能被本地清理 helper 当作远端容器已清理的证据。
 
+持久记录能够证明 Harbor 从未启动时，无须访问 Docker 即可释放该次执行的试跑额度；这要求有效的 `not-started` 绑定、没有 provider 进程记录、没有已绑定的运行时资源证据，并且租约已释放。已经启动的执行仍须确认 Docker 清理。恢复流程确认宿主进程结束后，即使退出码非零或结果收集失败，也要完成进程及租约的释放协调；执行失败不会被改成成功，未知进程状态仍阻断重新开放容量。
+
 ### 13.2 AutomationBench 模板升级
 
 [通用 v4 producer](../benchmark-packages/automationbench/import.mjs) 已为 simulator 写入 `cpus: 1`、`mem_limit: "1024m"`；[v5 resource producer](../benchmark-packages/automationbench/resources.mjs) 对旧导出仅补缺失字段，保留自定义限额及 `deploy.resources.limits` 写法。修改适用于全部受支持 domain，没有 MKT 特例。
@@ -420,6 +422,8 @@ hitch eval run --dataset DATASET --harness HARNESS_REF --model MODEL \
 
 HTTP/结构化 eval request 使用 `resource_config` 携带同一批准对象。批准匹配失败会保留 unknown 和具体原因；不能仅按 task ID、benchmark 名称或历史观测免除试跑。若需要改硬限制，先修改 task/Compose 或适用的默认资源策略，生成新计划和身份，再审查相应配置；不能把批准文件当成 overlay。image digest 缺失、旧身份不完整或远端版本未验证时，手工填写 actor/reason 也不能绕过身份门槛。
 
+预构建镜像按实际执行使用的 role/service 匹配，candidate main、verifier main 和 Compose sidecar 各自绑定镜像 digest。画像收集以每次物理执行的配置判断样本归属：更换 endpoint 或 verifier runtime 的重跑不能冒用原计划 identity；身份不同或无法核验的样本保留证据与阻断原因，并排除出原配置的统计。若选中的重跑任务依赖原 identity 的显式批准，改变 endpoint/runtime 时须创建新计划并重新审查配置，不能沿用旧批准。
+
 ### 13.5 P1 验证范围
 
 自动测试覆盖未知字段识别、worker/process 共享试跑计数、普通资源容量同时约束、shard/opaque 并发限制、旧 plan 冻结、显式批准匹配与失效、真实 eval 证据入口、OOM/失败及重试保留、CLI 持续采样和内存口径。local task-slot 的清理失败保留额度与重启检查单独覆盖；这些测试不将 coarse/opaque 或 remote 路径升级为已具备完整容器清理证明。
@@ -431,3 +435,11 @@ HTTP/结构化 eval request 使用 `resource_config` 携带同一批准对象。
 已对齐 `dev@6120740`，保留该分支的环境准备、逐角色镜像绑定、external endpoint 和 shared runtime 行为。画像身份同时绑定冻结 endpoint（包含 generation）、environment binding 与 artifact pins；恢复执行仍复用原 artifact，并可从已验证内容准备 readonly-bind 快照。未知 shard 的初次执行和 infrastructure retry 均使用冻结并发上限。eval、rerun 和 work dispatcher 在取得 collision lock 前检查当前资源及未知额度，避免等待额度时通过锁释放通知形成忙循环；取消和后续准入有回归覆盖。
 
 最终回归合计 **1,076 项，1,059 通过、17 跳过、0 失败、0 取消**：按 macOS CI 约定先单独运行 environment binding 的 14 项，再以并发 4 运行其余 1,062 项。失败项修复后的定向复测另有 **53 通过、1 项平台跳过**。`typecheck`、`build`、`check:architecture`（466 个源文件、993 条跨模块边）、语法检查、中英文 CLI 文档检查、相对 dev 的 `git diff --check` 及 `npm pack --dry-run` 均通过；发布包包含新增阶段屏障、资源画像 CLI 与 schema。平台和外部环境相关跳过不作为真实 provider 的完整生命周期证明，§13.3 的 partial 限制不变。
+
+### 13.7 PR #57 复核修复（2026-10-26）
+
+CI 暴露了恢复测试对本机 Docker 的隐式依赖。测试现显式向初次执行、恢复执行、调度器及其子进程传递同一 fake Docker 环境；恢复仍复用冻结 artifact。生产路径分别处理未启动证明和已退出进程的失败结果，避免试跑许可被不必要地保留。旧 `lost` 租约仅在 provider 身份、资源 epoch 和当前 OS 进程检查一致时协调为 released，保留原 fence epoch，不增加容器资源授权；Docker 清理检查仍独立生效。legacy/coarse 的全局 best-effort 清理保留。
+
+画像镜像按 role/service 匹配；重跑身份不同或缺少来源证明的样本保留失败和 OOM 证据，但不参与原配置的峰值统计。更换 endpoint/runtime 时不能继承旧身份的显式批准；endpoint 拒绝检查发生在 lineage 写入前，避免拒绝操作阻塞后续恢复。旧无画像计划及身份不变的重跑继续使用原契约。
+
+本轮在 macOS、Node 23.11.0、Python 3.12.13（安装 CI 所需依赖）下，将始终失败的 Docker shim 前置到 PATH，单独运行 binding 测试后以并发 4 运行其余测试。最终合计 **1,091 项，1,073 通过、18 跳过、0 失败、0 取消**。TypeScript 编译、架构检查（469 个源文件、999 条跨模块边）、语法与中英文文档检查、`git diff --check`、`npm pack --dry-run` 均通过；包内包含新增恢复与画像模块。跳过项包括真实 Docker 集成及平台相关场景，不能作为新的真实容器生命周期证明。

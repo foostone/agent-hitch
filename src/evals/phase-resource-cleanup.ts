@@ -3,7 +3,7 @@ import { HitchError, hitchRootId } from "../foundation/index.js";
 import { reapOwnedDockerResources } from "./docker-reaper.js";
 import type { DockerReaperReportV1 } from "./docker-reaper.js";
 import type { EvalDockerResourceReaper } from "./service-types.js";
-import { confirmPhaseDockerBackend, phaseCleanupEnvironment, readPhaseDockerBindings, recordPhaseDockerCleanup } from "./phase-docker-backend.js";
+import { confirmPhaseDockerBackend, phaseCleanupEnvironment, phaseDockerExecutionNeverStarted, readPhaseDockerBindings, recordPhaseDockerCleanup } from "./phase-docker-backend.js";
 
 export function requiresConfirmedResourceCleanup(work: BackendWorkItemV1): boolean {
   // New profiling slots hold a scarce unknown-trial permit even when their
@@ -25,7 +25,11 @@ export async function confirmPhaseResourceCleanup(input: {
   root: string; lease: ExecutionLeaseV1; trialParents: readonly string[]; env: NodeJS.ProcessEnv; reaper?: EvalDockerResourceReaper;
 }): Promise<DockerReaperReportV1> {
   try {
+    if (input.lease.state !== "released") throw phaseCleanupUnconfirmed();
     const bindings = await readPhaseDockerBindings({ root: input.root, leases: [input.lease], trialParents: input.trialParents });
+    if (!bindings.length && await phaseDockerExecutionNeverStarted(input.root, input.lease)) {
+      return { schema_version: "1", root_id: hitchRootId(input.root), scanned: 0, deleted: [], retained: [], issues: [] };
+    }
     const env = await phaseCleanupEnvironment(bindings, input.env);
     await confirmPhaseDockerBackend(bindings, env);
     const report = await (input.reaper ?? reapOwnedDockerResources)({ root: input.root, leaseIds: [input.lease.lease_id], env });

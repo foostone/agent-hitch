@@ -11,6 +11,7 @@ import { hitchRootId, readEvalEnvironmentImageReferences, readJSON } from "../sr
 import { loadEnvironmentImageManifest } from "../src/images/index.js";
 import type { EnvironmentImageBuilder } from "../src/images/index.js";
 import { forceRemove, prepareHostHarborArtifactForTest, writeFakeHarbor, writeFakeNpm } from "../test-support/helpers.js";
+import { installEmptyDockerBackendForTest } from "../test-support/empty-docker-backend.js";
 
 const runEval = (options: RunEvalOptions) => runEvalProduction({ ...options, harborArtifactBuilder: prepareHostHarborArtifactForTest });
 
@@ -324,6 +325,8 @@ test("a persisted planned retry resumes without repeating the initial candidate"
   await writeFile(path.join(dataset, "one", "task.toml"), "name = \"one\"\n");
   const harbor = await writeInfrastructureFailureHarbor(root);
   const npm = await writeFakeNpm(root);
+  const env = { ...process.env, HITCH_NPM_PATH: npm };
+  await installEmptyDockerBackendForTest(root, env);
   const controller = new AbortController();
   const request = {
     dataset, harness_ref: "pi@version:1.2.3", attempts: 1, max_concurrent: 1,
@@ -331,7 +334,7 @@ test("a persisted planned retry resumes without repeating the initial candidate"
   };
   const interrupted = await runEval({
     root, harborExecutable: harbor, executionStrategy: "local-task-slots-v1", trialBundleGraceMs: 0,
-    env: { ...process.env, HITCH_NPM_PATH: npm }, request, signal: controller.signal,
+    env, request, signal: controller.signal,
     onEvent: (event) => { if (event.type === "eval.retry.decision") controller.abort(); },
   });
   assert.equal(interrupted.status, "cancelled");
@@ -341,10 +344,11 @@ test("a persisted planned retry resumes without repeating the initial candidate"
   assert.equal(planned?.decisions[0]?.state, "planned");
 
   await rm(path.join(evalDirectory, "result.json"));
-  const resumed = await runEval({
+  const resumed = await runEvalProduction({
     root, evalId: interrupted.eval_id as never, request, precreated: true, resumeExisting: true,
     harborExecutable: harbor, executionStrategy: "local-task-slots-v1", trialBundleGraceMs: 0,
-    env: { ...process.env, HITCH_NPM_PATH: npm },
+    env,
+    harborArtifactBuilder: async () => { throw new Error("resume must not rebuild a frozen artifact"); },
   });
   assert.equal(resumed.status, "failed");
   assert.equal(await readFile(path.join(root, "infrastructure-failure.count"), "utf8"), "2");

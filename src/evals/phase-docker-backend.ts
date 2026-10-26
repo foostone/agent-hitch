@@ -34,6 +34,13 @@ export async function preparePhaseDockerExecution(input: { root: string; lease: 
   } satisfies PhaseDockerExecution);
 }
 
+/** Call after validating runtime receipts with readPhaseDockerBindings. Only
+ * a released lease and an independent prelaunch marker can excuse Docker I/O. */
+export async function phaseDockerExecutionNeverStarted(root: string, lease: ExecutionLeaseV1): Promise<boolean> {
+  return lease.state === "released" && (await readControllerBinding(root, lease))?.state === "not-started"
+    && await statOrMissing(path.join(root, "evals", lease.eval_id, "provider", "leases", `${lease.lease_id}.json`)) === null;
+}
+
 /** Called by the backend immediately before spawning Harbor. Its returned env
  * pins the Docker selector for the entire backend process and all children. */
 export async function bindPhaseDockerBackend(input: { root: string; lease: ExecutionLeaseV1; env: NodeJS.ProcessEnv }): Promise<NodeJS.ProcessEnv> {
@@ -100,8 +107,8 @@ export async function readPhaseDockerBindings(input: {
     if (!controller && !values.length) throw new TypeError("phase execution Docker binding is missing");
     const ids = [...new Set([...values.flatMap(value => value.backendId === null ? [] : [value.backendId]),
       ...(controller?.state === "bound" ? [controller.docker_backend_id!] : [])])];
-    if (controller?.state === "not-started" && (ids.length || await readJSON<unknown>(
-      path.join(input.root, "evals", lease.eval_id, "provider", "leases", `${leaseId}.json`), null))) {
+    if (controller?.state === "not-started" && (ids.length || await statOrMissing(
+      path.join(input.root, "evals", lease.eval_id, "provider", "leases", `${leaseId}.json`)))) {
       throw new TypeError("phase backend started without a durable Docker binding");
     }
     if (!ids.length) continue;

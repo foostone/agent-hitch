@@ -161,6 +161,8 @@ hitch run --harness HARNESS_REF [--prompt TEXT | --prompt-file PATH] [RUN_OPTION
 
 `resources profile` 与 `resources recommend` 必须选择一种输入：`--eval EVAL_ID --task TASK_ID`、执行证据列表 `--input FILE`，或已保存画像 `--profile FILE`。导入文件不提供 Provider 生命周期证明。`--identity` 和 `--min-complete-trials` 仅用于 `recommend`。这些命令输出 JSON；指定 `--output FILE` 时保存结果，并改为输出文件元数据。当前真实观测仍为 `partial`，建议报告会说明降限被阻断的原因，不输出更低的内存数值。详见[资源画像与批准契约](../../hitch-phase-resource-reservation-spec.zh-CN.md#13-p1-实际接口与使用边界2026-10-21)。
 
+重跑样本的 endpoint/runtime 身份发生变化或无法核验时，证据仍保留，但排除出原配置的统计。依赖显式资源批准的重跑若改变该身份，须创建新计划并重新审查配置。
+
 操作包括 `capabilities`、`configure`、`inspect`、`import`、`seal-task`、`seal-dataset`、`selection`、`preflight`、`pin`、`release`、`materialize`、`workspace-end`、`lease-end`、`audit`、`bundle-export` 和 `bundle-import`。资源数据集通过 v2 输入显式启用，普通 v1 数据集保持原有行为。查看和审计可以省略输入文件；审计默认 dry-run，只有请求显式设置 `apply: true` 才变更存储。
 
 释放引用须使用原 owner 和 generation。只有执行结束且结果封存得到确认后才能结束执行工作区；超时或 Worker 失联不能证明资源可以安全释放。请求字段、固定 OCI 身份、角色隔离、离线包与恢复边界见[资源存储协议及请求示例](../../resource-storage.zh-CN.md)。

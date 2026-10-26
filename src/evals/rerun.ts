@@ -42,6 +42,7 @@ import { assertRemoteRerunQuiescent, executeRemoteRerunGroup } from "./remote-re
 import { remoteRerunNeedsExecution, restoreRemoteRerunSelection } from "./rerun-resume.js";
 import { stageRemoteRerunCompletion } from "./rerun-completion.js";
 import { beginLocalCandidateRestart } from "./local-candidate-rerun.js";
+import { assertRerunResourceApproval } from "./resource-profile-rerun.js";
 export { selectRerunTasks, selectRerunTrialSlots } from "./rerun-slots.js";
 export type { EvalTrialSlot, RerunSelector } from "./rerun-slots.js";
 
@@ -109,6 +110,12 @@ async function rerunEvalLocked(options: RerunEvalOptions & { rerunId: string; re
     allowVerifierFailures: options.rerunType === "candidate-restart" || options.rerunType === "collect-only" || options.rerunType === "verifier-only",
   });
   const selectedTasks = uniqueTasks(selectedTrials);
+  if (options.endpointAttempt || options.verifierRuntimeId) assertRerunResourceApproval({
+    plan: parseEvalExecutionPlan(await readJSON(path.join(options.evalDirectory, "execution-plan.json"))),
+    request: originalRequest, controllerRuntimeId: String(plan.controllerRuntime.runtime_id), trials: selectedTrials,
+    ...(options.endpointAttempt ? { endpointBinding: options.endpointAttempt.endpoint_binding } : {}),
+    ...(options.verifierRuntimeId ? { verifierRuntimeId: options.verifierRuntimeId } : {}),
+  });
   if (!restored) await atomicWriteJSON(path.join(rerunDirectory, "request.json"), {
     schema_version: SCHEMA_VERSION,
     rerun_id: rerunId,
