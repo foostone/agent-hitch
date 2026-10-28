@@ -267,7 +267,14 @@ network_mode = "public"
                     'web_proxy': service('proxy', 0.25, '128m', networks={'web': None, 'vm': {'aliases': plan['router_dns_aliases']}},
                         entrypoint=['/bin/caddy'], command=['run', '--config', '/etc/caddy/Caddyfile', '--adapter', 'caddyfile'],
                         volumes=['./Caddyfile:/etc/caddy/Caddyfile:ro', 'web_proxy_data:/data', 'web_proxy_config:/config']),
-                    'assets': {'image': PYTHON, 'platform': 'linux/amd64', 'cpus': 0.25…220 tokens truncated…: 'adapter/assemble.py'},
+                    'assets': {'image': PYTHON, 'platform': 'linux/amd64', 'cpus': 0.25, 'mem_limit': '128m', 'pids_limit': 64,
+                        'command': ['python', '-m', 'http.server', '80', '--directory', '/public'], 'read_only': True,
+                        'volumes': ['./state-mirror/public:/public:ro'], 'networks': {'vm': {'aliases': ['assets.trial.hitch.test']}}}})
+                volumes.update(web_proxy_data={}, web_proxy_config={}); networks['web'] = {'internal': True}
+            write(environment / 'docker-compose.yaml', {'services': services, 'volumes': volumes, 'networks': networks})
+        write(staging / 'source-manifest.json', {'status': 'assembled_execution_pending', 'sdk_commit': SDK, 'web_commit': WEB, 'web_app_commit': WEB_APP,
+            'task_hash_manifest_sha256': 'sha256:' + HASH_MANIFEST, 'asset_revision': ASSETS, 'images': images,
+            'adapter': {'id': 'osworld-fixed-samples', 'version': '1', 'path': 'adapter/assemble.py'},
             'selection': {'algorithm': 'sha256-rank-v1', 'seed': 20260902, 'population_size': 108, 'tasks': SAMPLE, 'resample_on_failure': False},
             'tasks': [{'task_id': 'osworld-' + name.replace('_', '-'), 'source_task_id': name, 'source_sha256': 'sha256:' + TASK_HASHES[name]} for name in SAMPLE],
             'transformations': transforms, 'real_scored_tasks': 0,
