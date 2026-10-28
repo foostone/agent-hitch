@@ -105,7 +105,9 @@ def assemble(args):
                 raise ValueError('asset acquisition is not the verified release')
             previous = asset_records.setdefault(item['file'], item)
             if previous['sha256'] != item['sha256'] or previous['size'] != item['size']: raise ValueError('conflicting asset receipts')
-    model_profile = json.loads((HERE / 'deepseek-profile.json').read_bytes())
+    profile_name = getattr(args, 'model_profile', 'thinking-high')
+    profile_file = {'thinking-high': 'deepseek-flash-thinking-high-profile.json', 'legacy': 'deepseek-profile.json'}[profile_name]
+    model_profile = json.loads((HERE / profile_file).read_bytes())
     profile = {'schema_version': '1', 'id': 'osworld-v2-deepseek-graphical-' + ('host-local' if local else 'portable') + (f'-tcg-http-{args.screenshot_http_timeout_sec}s' if args.screenshot_http_timeout_sec != 10 else ''),
         'track': 'custom', 'input_mode': 'instruction',
         'tool_policy': {'id': 'osworld-graphical-computer13', 'allowed': CAPS, 'network': 'open', 'enforcement': 'required'},
@@ -117,6 +119,8 @@ def assemble(args):
             'screen_size': [1920, 1080], 'screenshot_transport': transport,
             'candidate_guide_sha256': sha((HERE / 'candidate-guide.md').read_bytes()),
             'task_current_date': 'unchanged native SDK', 'leaderboard_comparable': False}}
+    if profile_name != 'legacy':
+        profile['id'] += '-flash-thinking-high'
     profile_digest = sha(json.dumps(profile, sort_keys=True, separators=(',', ':'), ensure_ascii=False).encode())
     output = Path(args.out).absolute()
     if output.exists() or output.is_symlink(): raise ValueError('assembly requires fresh output')
@@ -126,6 +130,7 @@ def assemble(args):
         (staging / 'adapter').mkdir()
         for name in ('assemble.py', 'prepare-state-assets.py', 'web_routes.py', 'deepseek-profile.json', 'candidate-guide.md'):
             shutil.copyfile(HERE / name, staging / 'adapter' / name)
+        shutil.copyfile(HERE / 'deepseek-flash-thinking-high-profile.json', staging / 'adapter/deepseek-flash-thinking-high-profile.json')
         runtime = staging / 'runtime'; runtime.mkdir()
         for file in (HERE / 'runtime').glob('*.py'): shutil.copyfile(file, runtime / file.name)
         # Import only the pinned public action definitions, never task classes.
@@ -262,14 +267,7 @@ network_mode = "public"
                     'web_proxy': service('proxy', 0.25, '128m', networks={'web': None, 'vm': {'aliases': plan['router_dns_aliases']}},
                         entrypoint=['/bin/caddy'], command=['run', '--config', '/etc/caddy/Caddyfile', '--adapter', 'caddyfile'],
                         volumes=['./Caddyfile:/etc/caddy/Caddyfile:ro', 'web_proxy_data:/data', 'web_proxy_config:/config']),
-                    'assets': {'image': PYTHON, 'platform': 'linux/amd64', 'cpus': 0.25, 'mem_limit': '128m', 'pids_limit': 64,
-                        'command': ['python', '-m', 'http.server', '80', '--directory', '/public'], 'read_only': True,
-                        'volumes': ['./state-mirror/public:/public:ro'], 'networks': {'vm': {'aliases': ['assets.trial.hitch.test']}}}})
-                volumes.update(web_proxy_data={}, web_proxy_config={}); networks['web'] = {'internal': True}
-            write(environment / 'docker-compose.yaml', {'services': services, 'volumes': volumes, 'networks': networks})
-        write(staging / 'source-manifest.json', {'status': 'assembled_execution_pending', 'sdk_commit': SDK, 'web_commit': WEB, 'web_app_commit': WEB_APP,
-            'task_hash_manifest_sha256': 'sha256:' + HASH_MANIFEST, 'asset_revision': ASSETS, 'images': images,
-            'adapter': {'id': 'osworld-fixed-samples', 'version': '1', 'path': 'adapter/assemble.py'},
+                    'assets': {'image': PYTHON, 'platform': 'linux/amd64', 'cpus': 0.25…220 tokens truncated…: 'adapter/assemble.py'},
             'selection': {'algorithm': 'sha256-rank-v1', 'seed': 20260902, 'population_size': 108, 'tasks': SAMPLE, 'resample_on_failure': False},
             'tasks': [{'task_id': 'osworld-' + name.replace('_', '-'), 'source_task_id': name, 'source_sha256': 'sha256:' + TASK_HASHES[name]} for name in SAMPLE],
             'transformations': transforms, 'real_scored_tasks': 0,
@@ -287,6 +285,8 @@ if __name__ == '__main__':
     parser.add_argument('--asset-receipts', required=True, nargs='+')
     parser.add_argument('--max-steps', required=True, type=int)
     parser.add_argument('--agent-timeout-sec', required=True, type=int)
+    parser.add_argument('--model-profile', choices=('thinking-high', 'legacy'), default='thinking-high',
+                        help='Flash thinking/high by default; legacy preserves the archived non-thinking profile')
     parser.add_argument('--screenshot-http-timeout-sec', default=10, type=int,
                         help='Explicit TCG screenshot transport override (10..120); default keeps native SDK behavior')
     print(json.dumps(assemble(parser.parse_args()), indent=2))
