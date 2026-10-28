@@ -200,5 +200,38 @@
     "Synthetic API and file-tool integration only; no benchmark score.",
     "Provider alias attribution does not prove immutable checkpoint identity.",
     "Native token fields are recorded as emitted; cache fields are not assumed to follow Chat Completions accounting."
-  ]
+  ],
+  "validation": {
+    "offline_transport_profile_tests": {
+      "passed": 7
+    },
+    "typecheck": "passed",
+    "build": "passed",
+    "architecture": "passed",
+    "documentation": "passed",
+    "full_regression": {
+      "tests": 997,
+      "passed": 977,
+      "failed": 5,
+      "skipped": 15,
+      "unresolved_failures": [
+        "host-model-proxy route recovery assertion",
+        "remote-verifier success scoring timeout",
+        "remote-verifier invalid scoring timeout",
+        "remote-verifier release-lost scoring timeout",
+        "remote-verifier generation-cleanup scoring timeout"
+      ]
+    },
+    "remote_verifier_isolated_retry": {
+      "passed": [
+        "success",
+        "generation-cleanup"
+      ],
+      "failed": [
+        "invalid",
+        "release-lost"
+      ],
+      "failure": "remote scoring test timed out"
+    }
+  }
 }

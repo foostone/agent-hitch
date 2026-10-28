@@ -25,3 +25,13 @@ synthetic canary have not been rerun by this evidence record.
 The requested and returned alias is mutable; these observations do not establish
 an immutable checkpoint identity. Existing JobBench/LAB Flash smoke results are
 historical evidence and are not relabelled or included in a new benchmark total.
+
+Validation: typecheck, build, architecture and documentation checks passed, as did
+all seven offline transport/profile tests. The complete serialized regression
+reported 997 tests: 977 passed, 5 failed and 15 skipped. The failures were the
+host-model-proxy recovery assertion and four remote-verifier scoring timeouts.
+An isolated rerun of the four remote-verifier cases passed the success and
+generation-cleanup cases; invalid and release-lost still timed out. These results
+remain unresolved, so this change is submitted as a draft rather than claiming a
+fully passing suite. No Docker permissions were changed and no scored Harbor or
+Marketing run was executed.
